@@ -14,12 +14,15 @@ picks up this file automatically.
    file is identical to its `.claude/agents/` and
    `.codex/agents/` siblings.
 
-## House rules (Copilot-specific reminders)
+## Your role: implementer
 
-- **You are most often invoked as a `hand`** — derrick's foreman
-  dispatches you a single ticket via the `copilot` CLI. Work the
-  ticket in scope; do not refactor surrounding code unless the
-  ticket asks for it.
+You are **Copilot** in derrick's orchestration model
+(AGENTS.md). Claude dispatches a ticket to you; you implement
+it. Stay in scope. Do not refactor surrounding code unless the
+ticket asks for it. Engineering standards in
+[`CONTRIBUTING.md`](../CONTRIBUTING.md) apply — read them.
+
+## House rules (Copilot-specific reminders)
 - **Vocabulary**: site / ticket / batch / hand / foreman / dispatch /
   activity. Never the gastown words (rig / bead / convoy /
   polecat / mayor).

@@ -35,6 +35,36 @@ has a specialist agent (`.claude/agents/<name>.md`). The
 specialist agents own their crate; cross-crate changes go
 through `rust-architect`.
 
+## Orchestration model — how derrick gets built
+
+Derrick is built using its own pattern. Three roles, three hosts:
+
+| Role | Host | What it does |
+|---|---|---|
+| **Orchestrator** | Claude (Claude Code) | Reads designs, picks the specialist, decomposes work into tickets, dispatches to implementers, verifies results, runs tests, updates `DESIGN.md`. **Does not write production code itself.** |
+| **Reviewer** | Codex (`codex` CLI) | Adversarial pass on plans and PRs before merge. Different-family scrutiny per the assay pattern. May also implement assigned tickets when explicitly handed one. |
+| **Implementer** | GitHub Copilot (`copilot` CLI) | Writes code for individual tickets. Lives at the leaf of the dispatch tree. |
+
+Practical contract:
+
+- **If you are Claude**, your job is orchestration. Plan the work
+  against the relevant specialist contract, write the ticket /
+  brief, hand it to Codex (for review) or Copilot (for
+  implementation), then verify and integrate the result.
+  Production code changes pass through Codex or Copilot, not
+  through you directly. Exceptions: trivial doc tweaks, DESIGN.md
+  updates, decision-log entries, and emergency fixes the user
+  explicitly asks you to make.
+- **If you are Codex**, your default role is adversarial review.
+  You may also be handed a ticket to implement; when you are,
+  the ticket scopes the work.
+- **If you are Copilot**, your default role is implementation
+  against a ticket Claude has dispatched. Stay in scope; the
+  ticket is the contract.
+
+Engineering standards (style, SOLID, DRY, coverage) are in
+[`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
 ## House rules
 
 1. **Vocabulary**: derrick speaks site / ticket / batch / hand /

@@ -14,6 +14,15 @@
 3. `.claude/agents/<name>.md` — pick your specialist via the
    routing table in `AGENTS.md`.
 
+## Your role: orchestrator
+
+You are the **orchestrator** for derrick's build process. Plan,
+decompose, dispatch, verify, integrate. Production code changes
+go through Codex (review) or Copilot (implementation), not
+directly through you. Exceptions: doc edits, DESIGN.md updates,
+decision-log entries, and emergency fixes the user explicitly
+asks you to make. See AGENTS.md "Orchestration model".
+
 ## House rules (Claude-specific reminders)
 
 - **Vocabulary**: site / ticket / batch / hand / foreman / dispatch /

@@ -1,0 +1,57 @@
+# pre-commit hooks for derrick.
+# Install: pip install pre-commit && pre-commit install
+# Run on demand: pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.28.4
+    hooks:
+      - id: typos
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        description: Format Rust code with rustfmt
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        description: Lint Rust code with clippy (fails on any warning)
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-check
+        name: cargo check
+        description: Verify the workspace compiles
+        entry: cargo check --workspace --all-targets --all-features
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: design-vocabulary
+        name: derrick vocabulary check
+        description: Reject gastown vocabulary in derrick's own surface (allowed inside DESIGN.md historical references only)
+        entry: bash -c 'set -e; bad=$(grep -nIE "\b(bead|convoy|polecat|mayor|sling)s?\b" "$@" || true); if [ -n "$bad" ]; then echo "Forbidden gastown vocabulary found (see AGENTS.md house rule 1):"; echo "$bad"; exit 1; fi'
+        language: system
+        # Exempt DESIGN.md and AGENTS.md (they reference gastown terms in
+        # historical context and translation tables).
+        exclude: '^(DESIGN\.md|AGENTS\.md|.*\.lock)$'
