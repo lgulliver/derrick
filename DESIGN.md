@@ -131,6 +131,7 @@ modules can be tested, profiled, and (later) ported in isolation.
 | Adopt | `crates/derrick-adopt` | Brownfield detection of AGENTS.md, CLAUDE.md, agents/, skills/, docs (see §5.6) |
 | Substrate trait | `crates/derrick-substrate` | One async trait (`Substrate`); a native impl, future impls slot in behind it |
 | Native substrate | `crates/derrick-substrate-native` | SQLite-backed execution substrate + in-process foreman |
+| Stack | `crates/derrick-stack` | PR stacking: trait + native / graphite / git-spice backends (see §8.5) |
 | Observe | `crates/derrick-observe` | Aggregated read-only view (talks to substrate trait) |
 | Config | `crates/derrick-config` | Load + validate `derrick.yaml` (serde) |
 | Repo templates | `templates/` | What `derrick init` copies in |
@@ -431,6 +432,7 @@ vocabulary regardless of backend (v1 ships only the native one).
 | `derrick activity [--site \| --batch]` | Recent agent activity timeline | `Event.Tail` |
 | `derrick hands` | Hands registered to this site, current task, last heartbeat | `Hand.List` |
 | `derrick orphans` | Lost work (tickets with no live owner) | `Ticket.Orphans` |
+| `derrick stack [--batch <name>]` | Current PR stack: parent→child PRs, merge state, restack health | `Stack.Show` |
 | `derrick runs` | Last N derrick pipeline runs, exit status per step | local `.derrick/runs/` |
 | `derrick run <id>` | Replay the manifest of one specific run | local |
 
@@ -465,6 +467,7 @@ site         taxi-ingest                            mode: crew
 batch        001-webhook-ingest      11 tickets     3 done • 2 in-flight • 6 ready
 foreman      running (pid 28411, 14m)               last escalation: none
 backend      native                                 orphans: 0
+stack        native      3 PRs merged • 2 open • 6 pending     no restack conflicts
 last assay   2026-05-17 09:18  →  accept (round 2)  by codex/gpt-5
 
 in flight:
@@ -915,7 +918,94 @@ later without changing the rest of derrick. (Recorded as a v1.1
 research task: "evaluate `@github/copilot-sdk` for parallel fan-out
 and in-process dispatch.")
 
-### 8.5 Extension point: adding more backends later
+### 8.5 PR stacking — tickets become a stack, not a pile
+
+A batch is an ordered group of tickets with explicit `blocks`
+links. That dependency chain maps directly onto a **stacked PR
+graph**: each ticket becomes one PR; its parent branch is the
+PR of the ticket it blocks on (or `main` for roots); reviewers
+see small, focused changes; tickets can land independently as
+their dependencies clear.
+
+Without stacking, derrick produces N PRs all rooted on `main`
+that conflict with each other on every shared file. With
+stacking, the same N PRs form a clean DAG.
+
+#### Backends
+
+`tools.git.stacking.backend`:
+
+- **`none`** (default) — derrick doesn't manage PRs. Hands
+  push branches and open PRs however they want. Sensible
+  for solo mode or single-ticket batches.
+- **`native`** — derrick manages the stack itself using plain
+  `git` + `gh pr create`. v1 default when stacking is enabled.
+  Branches are named `derrick/<batch>/<ticket-id>`; the foreman
+  sets parents based on `blocks` links; when a parent PR lands,
+  derrick rebases and force-pushes all dependents.
+- **`graphite`** — shell out to Graphite (`gt`). Adapter
+  records `gt branch create --parent <branch>` and lets
+  Graphite handle restacks. Detected automatically if
+  Graphite is installed and the repo is initialised
+  (`.graphite_user_config` present).
+- **`git-spice`** — shell out to `gs` (git-spice). Same shape
+  as the graphite adapter.
+
+The trait `StackBackend` lives in `crates/derrick-stack`;
+adapters in `crates/derrick-stack/src/backends/`.
+
+#### What the foreman does when stacking is on
+
+1. Before dispatching a ticket to a hand, the foreman computes
+   its parent branch from the substrate (the most-recent
+   `blocks` predecessor's branch, or `main` if root).
+2. The hand is told to create its branch *off the parent*, not
+   off `main`. For Copilot agents this is part of the dispatch
+   payload; for `claude` hands it's printed in the queue file.
+3. When the hand opens a PR, derrick adds the PR URL to the
+   ticket via the substrate.
+4. When a PR merges, derrick walks the dependent tickets and
+   asks the backend to restack them (`git rebase --onto` for
+   native; `gt restack` for graphite). Force-push uses
+   `--force-with-lease`.
+5. If a restack fails (merge conflict), the ticket is moved to
+   `blocked` with a `restack-conflict` label and a human is
+   notified via the activity log.
+
+#### `derrick stack` subcommand
+
+- `derrick stack` — show the current stack for the active batch:
+  parent → child PRs, merge status, restack health.
+- `derrick stack restack [--batch <name>]` — manual restack of
+  a batch's children after a parent lands (in case the foreman
+  isn't running).
+- `derrick stack submit [--batch <name>]` — open PRs for every
+  ticket whose hand has pushed a branch but not yet opened a
+  PR (catches up after a foreman crash).
+
+#### Configuration
+
+```yaml
+tools:
+  git:
+    stacking:
+      backend: native            # none | native | graphite | git-spice
+      branch_pattern: "derrick/{{batch}}/{{ticket_id}}"
+      auto_restack_on_merge: true
+      force_push: with-lease     # with-lease | off
+      open_pr: true              # foreman opens PRs as hands push branches
+      draft: false               # open as draft PRs by default
+```
+
+#### Brownfield detection
+
+`derrick init` detects Graphite via `.graphite_user_config` or
+`~/.graphite/`. If found, it proposes `backend: graphite` in
+the generated `derrick.yaml` so the user keeps their existing
+stack tooling. Same idea for git-spice. Otherwise it proposes
+`backend: native`.
+
+### 8.6 Extension point: adding more backends later
 
 The `Substrate` trait is the only contract. A future
 `crates/derrick-substrate-gastown` (or `-linear`, `-github-projects`,
@@ -1183,6 +1273,9 @@ entry). `state.json` is gitignored too. The yaml is committed.
   `runs`.
 - Token tooling: `derrick scrub`, `derrick caveman`, `derrick gain`.
 - BYOM tooling: `derrick models check`, `derrick auth set/list`.
+- PR stacking: `derrick stack` / `derrick stack restack` /
+  `derrick stack submit`; native backend default, graphite and
+  git-spice adapters detected and offered at init time.
 - `/add-feature`, `/derrick-doctor`, `/derrick-resume`,
   `/derrick-status` slash commands.
 - Codex CLI wrapper config: derrick writes a `.codex/instructions.md`
@@ -1235,6 +1328,7 @@ links back to the section where it lives.
 | D14 | **Sub-agent / skill telemetry**: derrick parses Claude Code's session transcript files (`~/.claude/projects/<repo>/*.jsonl`) post-step for accurate token counts; falls back to estimates for codex / copilot / raw API. | §9.B.7 |
 | D15 | **Role/host validation**: `derrick models check` subcommand for explicit verification; warnings (not errors) emitted at `derrick init` and `derrick run` so issues surface early. | §6.5 |
 | D16 | **v1 install surface (beyond CLI + plugin)**: shell completions (clap_complete: bash/zsh/fish), VS Code + JetBrains editor configs in templates (opt-in), `.codex/instructions.md` wrapper config written during init so codex sees the constitution, `derrick uninstall` to cleanly reverse init. | §11 |
+| D17 | **PR stacking ships in v1** as a first-class concern. Default backend `native` (plain git + `gh pr create`). Graphite and git-spice adapters auto-detected at init. Foreman restacks dependents on merge using `--force-with-lease`. | §8.5 |
 
 ### Remaining open questions
 
@@ -1260,6 +1354,32 @@ during implementation:
    install script needs to detect that. Health-check the
    marketplace URL with a 2s timeout, then fall through. Worth
    confirming this is acceptable before we hard-wire it.
+
+4. **Restack on conflict policy** (§8.5). When a parent PR
+   lands and a dependent fails to rebase cleanly, derrick
+   marks the ticket `blocked` with a `restack-conflict` label.
+   Question: do we *also* attempt an automated three-way merge
+   first, falling back to manual only on a real conflict, or
+   bail immediately to the human? Auto-merge feels nice but
+   force-pushed half-resolved branches are worse than blocked
+   ones. Leaning: bail immediately, surface the recipe.
+
+5. **Hands and stacks: who creates the branch?** (§8.5)
+   Two options: (a) derrick creates the branch off the
+   computed parent and tells the hand to push to it, or (b)
+   the hand creates the branch and derrick rebases it after.
+   (a) is cleaner but couples hands tightly to derrick's
+   branch naming. (b) is loose but means more restack work.
+   Leaning: (a) for native and Copilot, (b) for human hands.
+
+6. **Squash vs. merge on stacked PRs.** Stacks work poorly
+   with squash-merge because the squash rewrites SHAs that
+   children depend on. Graphite has its own answer; native
+   backend doesn't, and many GitHub repos default to squash.
+   v1 should probably enforce "merge commit" or "rebase
+   merge" for derrick-managed stacks and warn at `derrick
+   doctor` if the repo's default merge strategy is squash.
+   Worth confirming.
 
 ---
 

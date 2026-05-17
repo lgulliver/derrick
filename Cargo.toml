@@ -13,6 +13,7 @@ members = [
     "crates/derrick-adopt",
     "crates/derrick-substrate",
     "crates/derrick-substrate-native",
+    "crates/derrick-stack",
     "crates/derrick-observe",
     "crates/derrick-config",
 ]
