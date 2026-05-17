@@ -123,7 +123,9 @@ Plus the product surface:
 | Memory | Go | `internal/memory` | Seeds Claude memory files on init + per-step context budgets |
 | Scrubber | Go | `internal/scrub` | Derrick-native subprocess output filter (RTK-equivalent) |
 | Caveman | Go | `internal/caveman` | Derrick-native text compressor for inter-step handoff |
-| Copilot adapter | Go | `internal/copilot` | Dispatches steps or beads to Copilot agents (CLI + Workspace API) |
+| Copilot adapter | Go | `internal/copilot` | Dispatches steps or tickets to Copilot agents (CLI + Workspace API) |
+| Model abstraction | Go | `internal/models` | Provider interface; adapters for API providers, local runtimes, and CLI shells (see §6.5) |
+| Brownfield importer | Go | `internal/adopt` | Detects existing AGENTS.md, CLAUDE.md, agents/, skills/, docs; adopts rather than clobbers (see §5.6) |
 | Substrate iface | Go | `internal/substrate` | One interface (beads, links, convoys, workers); two backends |
 | Native substrate | Go | `internal/substrate/native` | SQLite-backed default execution substrate + in-process mayor |
 | Gastown shim | Go | `internal/substrate/gastown` | Backend that proxies to `gt`/`bd` for users who already run gastown |
@@ -154,60 +156,84 @@ site:
   prefix: mp           # ticket prefix (mp-1, mp-2 …)
   role: foreman        # default role when the foreman is started
 
+# Model registry — define providers once, name them in roles
+models:
+  claude-opus:    { provider: anthropic, model: "claude-opus-4-7" }
+  claude-sonnet:  { provider: anthropic, model: "claude-sonnet-4-6" }
+  codex-gpt5:     { provider: openai-cli, cli: "codex exec", model: "gpt-5" }
+  copilot:        { provider: gh-copilot, cli: "gh copilot",  model: "gpt-5-codex" }
+  # examples of BYOM (none enabled by default):
+  # gemini-pro:   { provider: google,  model: "gemini-2.5-pro" }
+  # local-llama:  { provider: ollama,  base_url: "http://localhost:11434", model: "llama3.3:70b" }
+  # bedrock-claude: { provider: bedrock, region: "eu-west-2", model: "anthropic.claude-opus-4-7-v1" }
+  # azure-gpt5:   { provider: azure-openai, endpoint: "...", deployment: "gpt-5" }
+
+# Role bindings — pipeline steps name a role; the role names a model.
+# Changing one model changes the whole class of step that uses it.
+roles:
+  proposer:  claude-opus       # plan + analyze (heavy reasoning)
+  drafter:   claude-sonnet     # specify + clarify + tasks (mechanical)
+  reviewer:  codex-gpt5        # assay (adversarial, different family)
+  executor:  copilot           # ticket dispatch in crew/copilot mode
+  summariser: claude-sonnet    # inter-step caveman-augmented summary, if used
+
 # Underlying tool versions / opt-outs
 tools:
-  speckit:   { enabled: true,  version: ">=0.4.0" }
-  assay:     { enabled: true,  reviewer: codex, model: "gpt-5", rounds: 1, strict: false }
+  speckit: { enabled: true, version: ">=0.4.0" }
+  assay:
+    enabled: true
+    role: reviewer              # which role runs cross-examination
+    reviewers: [reviewer]       # list → multi-reviewer assay (§9.C.2)
+    rounds: 1
+    strict: false
   substrate:
-    backend: native           # native (default) | gastown | none
-    mode: crew                # solo | copilot | crew     (see §8)
+    backend: native             # native (default) | gastown | none
+    mode: crew                  # solo | copilot | crew (see §8)
   copilot:
     enabled: true
-    cli: "gh copilot"           # gh copilot CLI; Workspace API later
-    model: "gpt-5-codex"        # whichever Copilot model the user has
-    agent_identity: derrick-hand     # for crew mode handoff
+    agent_identity: derrick-hand
   # No external rtk/caveman dependency — derrick ships its own (see §9).
 
 # /add-feature pipeline. Steps run in order; any can be skipped via flag.
+# Each step names a role (resolved via `roles:` above) or runner: derrick / human.
 pipeline:
   - id: specify
-    runner: claude
-    model: sonnet
+    role: drafter
+    host: claude                  # which host CLI loads the prompt (see §6.5)
     command: "/speckit.specify {{prompt}}"
   - id: clarify
-    runner: claude
-    model: sonnet
+    role: drafter
+    host: claude
     command: "/speckit.clarify"
     skippable: true
-    default_skip: false
   - id: plan
-    runner: claude
-    model: opus
+    role: proposer
+    host: claude
     command: "/speckit.plan"
   - id: checkpoint
     runner: human
-    skippable: true
-    default_skip: false
     prompt: "Review plan.md at {{feature_dir}}/plan.md — continue? [y/N]"
+    skippable: true
   - id: assay
-    runner: derrick               # in-process; calls codex directly (see §7)
+    runner: derrick               # in-process; uses the reviewer role(s) (§7)
     inputs: [{{feature_dir}}/spec.md, {{feature_dir}}/plan.md]
     rounds: "{{tools.assay.rounds}}"
     on_reject: halt               # halt | warn — fail closed by default
   - id: analyze
-    runner: claude
-    model: opus
+    role: proposer
+    host: claude
     command: "/speckit.analyze"
   - id: tasks
-    runner: claude
-    model: sonnet
+    role: drafter
+    host: claude
     command: "/speckit.tasks"
   - id: bridge
-    runner: derrick                # creates tickets in the substrate (native or gastown shim)
+    runner: derrick               # creates tickets in the substrate
     inputs: [{{tasks_md}}]
     batch: "{{batch}}"
   - id: foreman
-    runner: derrick                # starts the foreman loop (in-proc native, or gastown's mayor via shim)
+    runner: derrick               # starts the foreman loop
+    executor_role: executor       # which role hands run as
     role: "{{site.role}}"
 
 # Project-specific guardrails surfaced into prompts and checkpoints
@@ -270,27 +296,34 @@ $ cd ~/repos/my-project
 $ derrick init
 ```
 
-Interactive, but answers can be passed via flags / a config file for CI.
-Steps:
+Brownfield-first by default. Interactive but flag/file-driven for CI.
+See §5.6 for the full brownfield adoption contract; the short version:
 
-1. Detect or ask for: project name, rig prefix, primary language(s),
-   default model preference.
-2. Refuse to clobber existing `.specify/`, `.claude/commands/add-feature.md`,
-   or `derrick.yaml` unless `--force`.
-3. Bootstrap:
-   - `derrick.yaml` from template.
-   - `.specify/` skeleton (constitution stub, memory, scripts) by shelling
-     out to `specify init --here` then patching in derrick's extensions.
-   - `.specify/extensions/derrick/scripts/tasks-to-tickets.sh`
-     (derived from the blacksmith bridge but speaking derrick's
-     vocabulary; emits to whichever substrate backend is selected).
-   - `.claude/commands/add-feature.md` (the slash command).
-   - `.claude/agents/` placeholders for the standard roles
-     (foreman, assay-reviewer, hand-default). User can edit/extend.
-   - `CLAUDE.md` block appended (or created) pointing at derrick's docs.
-4. Register the rig with gastown (`gt rig add` or equivalent), unless
-   `--no-gastown`.
-5. `derrick doctor` on the freshly initialised repo.
+1. **Adoption pass.** Walk the repo for existing AGENTS.md,
+   CLAUDE.md, `.claude/`, constitution-like docs, trackers. Classify
+   each as *adopt as-is*, *reference*, or *augment*.
+2. **Identify.** Detect or ask for: project name, ticket prefix,
+   primary language(s), preferred provider/host for each role.
+3. **Propose.** Print the proposed `derrick.yaml` and the list of
+   files derrick would create or append to. Nothing is moved or
+   rewritten unless the user opts in.
+4. **Bootstrap (only after confirm)**:
+   - `derrick.yaml` from template, pointing at *existing* paths
+     wherever they were found.
+   - `.specify/` skeleton — only if not already present.
+   - `.specify/extensions/derrick/scripts/tasks-to-tickets.sh`.
+   - `.claude/commands/add-feature.md` — refuses to overwrite an
+     existing command of the same name without `--force`.
+   - `.claude/agents/` *additions*, never replacements. Names that
+     collide with the user's existing agents are skipped.
+   - `CLAUDE.md` block appended only with `--append-agents-md` or
+     the equivalent confirm.
+5. Register the site with the substrate (native default, or shell
+   to `gt rig add` for the gastown backend), unless `--no-substrate`.
+6. `derrick doctor` on the freshly initialised repo.
+
+`derrick init --greenfield` is the opt-in for an empty repo where
+derrick may write authoritatively.
 
 ### 5.3 `/add-feature` (the primary UX)
 
@@ -410,6 +443,55 @@ ready next:
 
 This is what users actually want at 09:30 standup. One command.
 
+### 5.6 Brownfield adoption — `derrick init` on a real repo
+
+Many target repos already have an `AGENTS.md`, a `CLAUDE.md`, an
+existing `.claude/` directory, written conventions, an issue
+tracker, and house style. `derrick init` must **adopt, not
+overwrite**. It runs an adoption pass *before* writing anything:
+
+1. **Detect.** Walk the repo for: `AGENTS.md`, `CLAUDE.md`,
+   `CODEOWNERS`, `.claude/`, `.github/copilot-instructions.md`,
+   `docs/adrs/`, existing `.specify/`, existing constitution-like
+   files (`PRINCIPLES.md`, `STYLE.md`, `CONTRIBUTING.md`), and
+   linked tracker prefixes (e.g. `LIN-`, `JIRA-`, `BD-`).
+2. **Classify.** For each artifact, decide: *adopt as-is*,
+   *reference from derrick.yaml*, or *augment*. Nothing is moved
+   or rewritten unless the user opts in.
+3. **Propose.** Print the proposed `derrick.yaml` and the *list
+   of files derrick would create or append to* (nothing else). The
+   user reviews, accepts or edits, then derrick writes.
+
+Concrete behaviours:
+
+| Existing | Derrick's default behaviour |
+|---|---|
+| `AGENTS.md` | Reference it from `guardrails.agents_md`. Do not overwrite. Append a short derrick block at the bottom (opt-in via `--append-agents-md`). |
+| `CLAUDE.md` | Same — referenced, optionally appended. |
+| `.claude/agents/<name>.md` | Treat as authoritative. Do not create `hand-default.md`, `foreman.md` etc. if names overlap. |
+| `.claude/commands/` | Add `/add-feature` and friends *alongside*. Refuse to overwrite an existing command of the same name without `--force`. |
+| `.claude/skills/` | Untouched. Derrick's skills are added separately. |
+| Existing constitution-like file | Reference it as `guardrails.constitution_path`. Do not write a new one. |
+| Existing `.specify/` | Reuse. Patch only `.specify/extensions/derrick/`. |
+| No constitution at all | Offer to generate a *minimal stub* (`derrick init --constitution-stub`) or run a one-shot LLM pass that drafts one from existing docs (`--constitution-from-docs`). Both opt-in. |
+| Existing tracker (Linear, Jira, GitHub Projects) | Skip native substrate ticket creation; offer a future adapter (out of scope for v1, recorded as a constraint). |
+| Existing CI / pre-commit / git hooks | Untouched. |
+
+Switches:
+
+```
+$ derrick init                          # interactive, brownfield-safe default
+$ derrick init --greenfield             # current behaviour: assumes empty slate
+$ derrick init --dry-run                # print plan, write nothing
+$ derrick init --adopt-only             # write derrick.yaml + .derrick/ only;
+                                        # don't touch .claude/, AGENTS.md, etc.
+$ derrick init --constitution-from-docs # one-shot LLM draft from existing docs
+$ derrick init --import-tasks <file>    # seed the substrate with existing tasks
+```
+
+The brownfield path is the default because most real repos are
+brownfield. Greenfield is the explicit opt-in.
+
 ---
 
 ## 6. The Claude Code plugin
@@ -435,6 +517,99 @@ README.md
 verifies derrick is installed, and then defers to the skill for the
 actual workflow narrative — same pattern the Anthropic-shipped skills
 use (a one-page command, a fat skill).
+
+### 6.5 BYOM (Bring Your Own Model) — hosts, providers, roles
+
+Derrick separates three concerns most tools conflate:
+
+- **Provider** — *who serves the inference*. Anthropic API,
+  OpenAI API, Google Gemini, Bedrock, Azure OpenAI, Ollama,
+  llama.cpp, or a CLI shell (`codex exec`, `gh copilot`,
+  `claude --print`). Adapters live in
+  `internal/models/providers/<name>.go`.
+- **Host** — *who the user is conversing with*. `claude` (the
+  Claude Code CLI), `codex` (the Codex CLI), `gh copilot`, raw
+  HTTP, or none. The host loads its own context: AGENTS.md,
+  sub-agents, skills, plugins. Hosts are configured per pipeline
+  step (`host: claude`) or implied by the provider.
+- **Role** — *what the step needs done*. `proposer`,
+  `drafter`, `reviewer`, `executor`, `summariser`. Pipeline
+  steps name roles, never models directly.
+
+The binding is `step → role → model → provider`, with `host`
+selected per step. Changing your reviewer model from Codex to
+Gemini is one line in `models:`; no pipeline edits.
+
+#### Supported providers (v1)
+
+| Provider | Type | Notes |
+|---|---|---|
+| `anthropic` | API | First-class. Prompt caching used by §9.B.4. |
+| `openai` | API | Used for non-Claude reasoning roles. |
+| `openai-cli` | CLI | `codex exec` etc — for users who prefer the local CLI. |
+| `google` | API | Gemini. |
+| `bedrock` | API | AWS Bedrock. Region + model-id. |
+| `azure-openai` | API | Endpoint + deployment. |
+| `gh-copilot` | CLI | `gh copilot` for ticket dispatch. |
+| `ollama` | Local | `base_url` + model tag. Sensible for `summariser` role to keep tokens off the network entirely. |
+| `llamacpp` | Local | Same idea. |
+| `shell` | Generic | Any command that takes a prompt on stdin and emits a response on stdout. Escape hatch. |
+
+#### Respecting the host's own rules
+
+When derrick invokes a step on a **host** CLI (claude / codex /
+gh copilot), it deliberately does **not** inject a system prompt,
+override the host's context, or bypass the host's rule loading.
+The contract:
+
+- Derrick passes the working directory (the user's repo) and the
+  step command. That's it.
+- The host loads its **own** files: `CLAUDE.md`, `AGENTS.md`,
+  sub-agents under `.claude/agents/`, skills under
+  `.claude/skills/`, plugins, hooks, `.codex/`, `~/.codex/`,
+  `.github/copilot-instructions.md`, etc. Derrick does not touch
+  any of this.
+- Sub-agent spawn within a step (e.g. `Agent({subagent_type:
+  "Explore"})`) is the host's decision; derrick doesn't see it
+  and doesn't intercede.
+- Skills triggered in-session (caveman, find-skills, the user's
+  custom skills) run inside the host. Derrick's *own* caveman
+  implementation is for inter-step compression, not in-session.
+- Derrick records *what command it sent* and *what artifact came
+  back*. It does not record the host's internal context, prompt
+  expansion, or subagent transcripts — those belong to the host.
+
+This means: a brownfield repo with a carefully tuned AGENTS.md
+and twenty agents gets exactly the same Claude Code behaviour
+inside a derrick step as it would in a normal session. Derrick
+is the conductor, not the orchestra.
+
+When a step uses an API provider directly (no host CLI),
+derrick *does* assemble the prompt — but only from declared
+inputs (the artifact files in `inputs:` and the constitution),
+never from arbitrary repo state. This is the only path where
+derrick acts as the prompter; we keep it narrow.
+
+#### Cost and latency knobs per model
+
+`models.<name>` accepts:
+
+```yaml
+models:
+  bedrock-claude:
+    provider: bedrock
+    region: eu-west-2
+    model: anthropic.claude-opus-4-7-v1
+    max_tokens: 4096
+    temperature: 0.2
+    cache: true              # prompt caching where supported
+    timeout: 120s
+    rate_limit: { rpm: 20, tpm: 80000 }
+    cost_hint:  { in_per_mtok: 15, out_per_mtok: 75 }   # for `derrick gain`
+```
+
+Cost hints are optional but power the §9.B.7 telemetry — without
+them, `derrick gain` reports token counts only, not dollars.
 
 ---
 
@@ -478,12 +653,19 @@ Same shape courtroom popularised, compressed:
    On `revise` past `rounds`, halts the same way. `on_reject: warn`
    downgrades to a printed warning for solo-mode repos.
 
-### Why Codex specifically
+### Why a second-family reviewer
 
-It's a different family (OpenAI), it ships a stable `codex exec`
-non-interactive mode, and the user already has it installed for
-courtroom. `tools.assay.reviewer` accepts `codex | gemini | bedrock`
-later — the adapter lives in `internal/assay/reviewers/<name>.go`.
+Assay's value is *different-family scrutiny*. The default
+`reviewer` role binds to `codex-gpt5` because Codex ships a stable
+`codex exec` non-interactive mode and is widely installed, but
+**any** model in §6.5 can fill the role. The only constraint we
+care about: don't bind both `proposer` and `reviewer` to the same
+provider — that defeats the point. `derrick doctor` warns if you
+do.
+
+Multi-reviewer assay (§9.C.2) accepts a list:
+`tools.assay.reviewers: [reviewer, reviewer-gemini, reviewer-local]`.
+Reconciliation policy in §9.C.2.
 
 ### Boundaries with the *other* underlying tools
 
@@ -744,15 +926,20 @@ uninstall.
 
 Every byte across a model boundary earns its place. Seven knobs:
 
-**9.B.1 Model tiering** (per step, overridable in `derrick.yaml`):
+**9.B.1 Model tiering** (per role, overridable in `derrick.yaml`):
 
-| Step | Model | Why |
-|---|---|---|
-| `specify`, `clarify`, `tasks` | sonnet | Mechanical, structured |
-| `plan`, `analyze` | opus | Genuinely hard reasoning |
-| `assay` | codex (gpt-5) | Adversarial, different family |
-| `bridge`, `mayor` | n/a | Subprocess |
-| `dispatch-copilot`, `runner: copilot` | Copilot model | Mechanical at Copilot rates |
+| Step | Role | Default model | Why |
+|---|---|---|---|
+| `specify`, `clarify`, `tasks` | `drafter` | claude-sonnet | Mechanical, structured |
+| `plan`, `analyze` | `proposer` | claude-opus | Hard reasoning |
+| `assay` | `reviewer` | codex-gpt5 | Adversarial, different family |
+| `bridge`, `foreman` | — | n/a | Subprocess / in-process |
+| `runner: copilot` steps | `executor` | copilot | Mechanical at Copilot rates |
+| Inter-step summary | `summariser` | claude-sonnet (or `ollama` local) | Hot path; local is free |
+
+Re-binding a role re-routes every step that uses it. BYOM means
+you can bind `proposer` to a Bedrock-hosted Claude, or `reviewer`
+to Gemini, without touching the pipeline.
 
 **9.B.2 Scrubber (derrick-native, §3.1).** Per-tool output filters
 strip CLI noise before the next step sees it. `derrick scrub <cmd>`
@@ -1001,6 +1188,37 @@ entry). `state.json` is gitignored too. The yaml is committed.
     other. Open question: do we attempt to preserve ticket IDs
     across the move, or accept ID rewrite with a `legacy_id`
     label? Leaning: ID rewrite, document it loudly.
+
+14. **Brownfield constitution drafting.** `derrick init
+    --constitution-from-docs` runs an LLM pass over the repo's
+    existing docs (READMEs, CONTRIBUTING, ADRs, AGENTS.md) to
+    produce a constitution stub. Cheap and useful, but the
+    output is unreviewed prose. Should we require human edit
+    before any pipeline run uses it, or trust the LLM draft?
+    Leaning: mark drafts with a banner and refuse to run `plan`
+    against them until the user has removed the banner.
+
+15. **Role binding to host CLI.** §6.5 separates role / provider /
+    host. But not every provider works with every host (e.g.
+    `host: claude` + `provider: ollama` is nonsensical — Claude
+    Code calls Anthropic, not Ollama). Need a validation matrix
+    and a clear error when a user picks an invalid combination.
+    Probably ship a `derrick models check` subcommand.
+
+16. **Sub-agent / skill visibility from derrick.** §6.5 says
+    derrick doesn't see what sub-agents or skills the host
+    invokes. That's correct for context isolation but it makes
+    `derrick gain` blind to those costs. Open question: should
+    the host emit a token-summary side-channel derrick can read?
+    Probably not for v1 — it's a host change, not a derrick one.
+    Document the limit.
+
+17. **Provider auth.** API keys for BYOM live where? Options:
+    `~/.derrick/credentials.yaml`, environment variables only,
+    or delegate to the host CLI's own auth (Claude Code already
+    has `ANTHROPIC_API_KEY`; codex has its own). Leaning:
+    env-var-first, optional `~/.derrick/credentials.yaml` for
+    convenience, never repo-local credentials.
 
 ---
 
