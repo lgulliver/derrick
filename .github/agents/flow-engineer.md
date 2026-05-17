@@ -24,6 +24,12 @@ You're the agent users meet first via `derrick init` and
 - Adoption pass: walking AGENTS.md / CLAUDE.md / `.claude/` /
   constitution-like docs / existing trackers; producing the
   proposed `derrick.yaml` without writing anything until confirm.
+- Host hook installation (D29): writing
+  `PreToolUse`/`PostToolUse` entries into `.claude/settings.json`
+  and the equivalent in `.codex/` that pipe tool I/O through
+  `derrick scrub` and `derrick caveman --intensity lite`.
+  Brownfield-safe: adopt-additively, refuse to overwrite,
+  `--no-hooks` for opt-out.
 - `derrick.yaml` parsing, validation, defaults, and the
   `models:` / `roles:` / `tools:` schema.
 

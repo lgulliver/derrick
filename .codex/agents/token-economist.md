@@ -19,6 +19,12 @@ your job to keep honest.
   levels (`lite | full | ultra`). **Byte-identical to the caveman
   skill at matched intensities** (D7). Identifiers, paths, error
   messages preserved verbatim.
+- Both scrub and caveman fire at **every** model boundary (D29),
+  not just derrick's pipeline seams: derrick-internal handoffs,
+  host tool calls (via hooks `flow-engineer`/`adopt` writes),
+  and Copilot dispatch in both directions (input + output). The
+  hot path is *input* — the bytes about to be embedded in the
+  next prompt — because prompt caching compounds the saving.
 - Memory seeding on `derrick init`: project / reference /
   feedback / lessons entries, namespaced `derrick/<site>/...`.
 - Cross-feature lessons extraction with the quality gate from D9
