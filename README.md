@@ -14,7 +14,7 @@ architecture and pipeline contract before any code lands.
 ## What it does
 
 ```
-$ curl -fsSL https://derrick.dev/install | bash     # one-time
+$ curl -fsSL https://raw.githubusercontent.com/lgulliver/derrick/main/scripts/install.sh | bash    # one-time
 $ cd ~/repos/my-project && derrick init             # one-time per repo
 $ # then in Claude Code:
 $ /add-feature build a webhook ingest endpoint with idempotent dedupe

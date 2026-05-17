@@ -287,7 +287,7 @@ Templates use Go `text/template` with a small context (`prompt`, `rig`,
 ### 5.1 Install (one-time, per machine)
 
 ```
-$ curl -fsSL https://derrick.dev/install | bash
+$ curl -fsSL https://raw.githubusercontent.com/lgulliver/derrick/main/scripts/install.sh | bash
 ```
 
 Script does, in order:
@@ -1390,10 +1390,12 @@ entry). `state.json` is gitignored too. The yaml is committed.
   configs in `templates/.vscode/` and `templates/.idea/`, opt-in.
 - Templates for `.specify/`, `.claude/`, `derrick.yaml`,
   tasks-to-tickets bridge.
-- Marketplace JSON published at `derrick.dev/marketplace.json` for
-  one-line plugin install; install script health-checks with 2s
-  timeout and falls through to GitHub release artefacts silently
-  (D24).
+- Marketplace JSON published at
+  `https://raw.githubusercontent.com/lgulliver/derrick/main/marketplace.json`
+  for one-line plugin install (D28; supersedes D1 / D24 which
+  assumed a custom domain). GitHub is the sole host — install
+  script, marketplace JSON, and release artefacts all under
+  `github.com/lgulliver/derrick`.
 - Install paths (D26): `curl | bash` primary, `cargo install derrick`
   for Rust-native users, Homebrew tap for macOS. All three resolve
   to the same GitHub release artefact.
@@ -1448,6 +1450,7 @@ links back to the section where it lives.
 | D25 | **Foreman exit mode**: `derrick run` detaches the foreman to `.derrick/foreman.pid` and returns; a watch hint is printed (`derrick observe` or `derrick status --watch`). `--attach` for foreground for users who want it. | §8.2 |
 | D26 | **Install paths**: ship three. `curl | bash` (primary, one-line install), `cargo install derrick` (Rust-native), and a Homebrew tap (macOS native). All three resolve to the same release artefact. | §11 |
 | D27 | **Drop `site.role` and `pipeline[].role` for `runner: derrick` steps**: `site.role` was vestigial gastown vocabulary; the derrick substrate has one orchestrator (the foreman), no multi-role agent system. Pipeline steps with `runner: derrick` carry their own runner-specific fields (`executor_role`, `batch`, `inputs`) and do not also need a `role:` binding. Steps that need a model role still use `role:` (mutually exclusive with `runner:` in that case). | §4 |
+| D28 | **Supersedes D1 and D24 — GitHub-only distribution.** The `derrick.dev` domain was unavailable, so all derrick artefacts (install script, marketplace JSON, release binaries) live under `github.com/lgulliver/derrick`. The Claude Code marketplace JSON is fetched from `https://raw.githubusercontent.com/lgulliver/derrick/main/marketplace.json`. There is no longer a separate marketplace host to health-check, so D24's fallback logic collapses to a single GitHub-releases path; transient GitHub unavailability surfaces as a normal network error to the user with the documented recovery (`gh release download` or manual binary install). | §11 |
 
 ### Remaining open questions
 

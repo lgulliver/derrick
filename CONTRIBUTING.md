@@ -188,4 +188,5 @@ Open a GitHub issue. Include:
 - Expected vs actual.
 
 For security issues, see [`SECURITY.md`](./SECURITY.md) (TBD —
-file `security@derrick.dev` once the domain exists).
+use GitHub's private vulnerability reporting at
+`https://github.com/lgulliver/derrick/security/advisories/new`).
