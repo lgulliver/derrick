@@ -21,6 +21,13 @@ repos:
     hooks:
       - id: typos
 
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.6.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [feat, fix, docs, test, refactor, perf, build, ci, chore, style, revert]
+
   - repo: local
     hooks:
       - id: cargo-fmt

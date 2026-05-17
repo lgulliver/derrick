@@ -104,6 +104,69 @@ Open questions: file as a GitHub issue with the
 `design-question` label. Don't add them to DESIGN.md until
 they have a leaning.
 
+## Conventional Commits
+
+All commits follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/).
+The CI commit-message hook (and the local pre-commit hook) reject commits
+that don't.
+
+Format:
+
+```
+<type>(<scope>): <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+Allowed types:
+
+| Type | Use |
+|---|---|
+| `feat` | A new user-visible feature. |
+| `fix` | A bug fix. |
+| `docs` | Documentation only (including `DESIGN.md` updates). |
+| `test` | Adding or fixing tests; no production-code change. |
+| `refactor` | Code change that is not a feature or fix. |
+| `perf` | Performance improvement. |
+| `build` | Build system, Cargo, or workspace changes. |
+| `ci` | CI configuration changes. |
+| `chore` | Housekeeping (deps bumps, file moves, gitignore). |
+| `style` | Formatting only; no semantic change. |
+| `revert` | Reverts a prior commit (body must include the reverted SHA). |
+
+Scopes match crate names where applicable: `config`, `flow`,
+`substrate`, `assay`, `tui`, `stack`, `models`, `scrub`,
+`caveman`, `memory`, `cli`, `copilot`, `adopt`, `observe`,
+`tools`, `agents` (when changing `.claude/agents/`), `design`
+(when changing `DESIGN.md`), or omit when the change is
+workspace-wide.
+
+A footer of `BREAKING CHANGE: <description>` (or `!` after the
+type) marks a change that breaks downstream consumers — e.g.
+`feat(config)!: drop site.role field` would have been the
+right message for D27 had we written it under the convention.
+
+Examples:
+
+- `feat(config): add layered yaml load with merge semantics`
+- `fix(stack): bail on restack conflict per D19`
+- `docs(design): record D27 dropping site.role`
+- `test(scrub): cover rtk-equivalent rules for gt and gh`
+- `ci: add coverage gate at 80%`
+- `chore: bump tokio to 1.42`
+
+Ticket IDs go in the footer, not the subject:
+
+```
+feat(substrate): implement Hand trait
+
+Implements §8.2 with claude / copilot / human variants.
+
+Refs: T012
+```
+
 ## Pull requests
 
 - One concern per PR. The smaller the PR, the faster the review.
