@@ -33,6 +33,13 @@ every crate in the workspace.
 
 - **No mocked databases** (AGENTS.md house rule 5). Always real
   SQLite via `tempfile::tempdir()`.
+- **Stress-test parallelism before declaring a suite green.** Any
+  test that mutates process-global state (`env::set_var`,
+  `env::set_current_dir`, file locks in fixed paths) must hold a
+  shared `Mutex<()>` so concurrent tests don't race. Run the
+  suite at least 3× consecutively with default `--test-threads`
+  before claiming green; CI runners have more cores than most dev
+  machines and races bite there first.
 - **No network in unit tests.** Network-touching tests go in
   `tests/integration/` and are gated by an env var or
   `#[ignore]` with a clear opt-in.
