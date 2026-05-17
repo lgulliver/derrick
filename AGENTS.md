@@ -84,6 +84,31 @@ Practical contract:
 Engineering standards (style, SOLID, DRY, coverage) are in
 [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
+### Dogfooding milestone
+
+Once derrick can drive `/add-feature` end-to-end against itself,
+we switch to dogfooding: orchestration moves out of ad-hoc
+Claude Code + raw codex/copilot invocations and into derrick's
+own pipeline. The minimum bar is the four crates below being
+implemented well enough that a fresh `/add-feature "..."` run
+in this repo produces a working spec, an accepted assay verdict,
+and a `tasks.md` (the substrate-backed ticket dispatch is a
+bonus — not strictly required for the switch).
+
+| Crate | What unblocks |
+|---|---|
+| `derrick-config` ✅ (T001) | Pipeline reads its config |
+| `derrick-substrate` (T002, this ticket) | Tickets and batches exist as a contract |
+| `derrick-substrate-native` (T003+) | Tickets and batches exist as storage |
+| `derrick-cli` + `derrick-flow` minimal init / run | End-to-end driver |
+
+When that bar is met, the orchestrator (Claude main session)
+should propose the switch, get human confirmation, and from
+that point on every ticket goes through `/add-feature` rather
+than direct codex/copilot invocations. The agent contracts and
+quality gates stay the same — the difference is who issues the
+brief.
+
 ## House rules
 
 1. **Vocabulary**: derrick speaks site / ticket / batch / hand /
