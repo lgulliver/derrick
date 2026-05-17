@@ -7,3 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+regex = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

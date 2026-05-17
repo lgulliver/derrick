@@ -7,7 +7,13 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        # Test corpus fixtures encode exact bytes including trailing
+        # whitespace shapes; auto-fixing them defeats the test.
+        exclude: '^crates/[^/]+/tests/corpus/'
       - id: end-of-file-fixer
+        # Same: corpus files testing no-trailing-newline behaviour
+        # must keep their exact byte shape.
+        exclude: '^crates/[^/]+/tests/corpus/'
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict

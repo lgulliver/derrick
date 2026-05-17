@@ -1,0 +1,5 @@
+```rust
+fn main() {
+    let ticket_id = "drk-1";
+}
+```

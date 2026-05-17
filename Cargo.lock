@@ -108,6 +108,11 @@ version = "0.0.0"
 [[package]]
 name = "derrick-caveman"
 version = "0.0.0"
+dependencies = [
+ "regex",
+ "serde",
+ "thiserror",
+]
 
 [[package]]
 name = "derrick-cli"
