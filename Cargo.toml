@@ -29,6 +29,7 @@ authors = ["Liam Gulliver and derrick contributors"]
 
 [workspace.dependencies]
 # Async runtime
+async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
