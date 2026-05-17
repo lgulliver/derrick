@@ -1,13 +1,13 @@
-# Dark Factory — Design
+# Derrick — Design
 
-> **dark factory** *(n.)* A production line that runs lights-out — no
-> humans on the floor, work flowing from intake to shipment by itself.
-> The kit, not the foreman.
+> **derrick** *(n.)* The load-bearing tower over an oil well. The structure
+> that lifts every length of pipe in and out of the hole. Without it, the
+> rig is a hole in the ground.
 
-Dark Factory is a unified layer over **speckit**, **courtroom**, and
-**gastown**. One install, one config, one command (`/add-feature`). It
-works in any repo, for any user, without them needing to know how the
-underlying tools talk to each other.
+Derrick is a unified layer over **speckit**, **courtroom**, and **gastown**.
+One install, one config, one command (`/add-feature`). It works in any repo,
+for any user, without them needing to know how the underlying tools talk to
+each other.
 
 ---
 
@@ -38,27 +38,26 @@ We want: **any user, any repo, single command, `/add-feature` UX.**
 
 ### Goals
 
-- **One-line install**: `curl -fsSL <url> | bash` puts the `df` binary
+- **One-line install**: `curl -fsSL <url> | bash` puts the `derrick` binary
   and Claude Code plugin on the user's machine and verifies the deps.
-- **One-line init**: `df init` in a repo writes the config, the
+- **One-line init**: `derrick init` in a repo writes the config, the
   templates, the hooks, the constitution skeleton, and registers the rig
   with gastown.
 - **One primary command**: `/add-feature <prompt>` runs the full dark
   factory pipeline — spec → courtroom → plan → tasks → convoy → mayor.
-- **Reusable**: nothing in dark-factory assumes blacksmith. Project-specific
-  rules live in the repo's constitution + `dark-factory.yaml`, not in
-  dark-factory.
+- **Reusable**: nothing in derrick assumes blacksmith. Project-specific
+  rules live in the repo's constitution + `derrick.yaml`, not in derrick.
 - **Transparent**: every underlying tool call is logged and exit codes
   propagate. Nothing is magic. Power users can still call `gt`, `bd`,
   `claude /speckit.specify` directly.
 
 ### Non-goals (v1)
 
-- Re-implementing speckit, courtroom, or gastown. Dark Factory
-  **orchestrates**; it does not replace.
+- Re-implementing speckit, courtroom, or gastown. Derrick **orchestrates**;
+  it does not replace.
 - A GUI. CLI + slash command only.
 - Self-hosted dolt management. Users who use gastown inherit gastown's
-  dolt server contract; dark-factory will surface its health but not run it.
+  dolt server contract; derrick will surface its health but not run it.
 - Cross-language polyglot dispatching beyond what gastown already does.
 
 ---
@@ -68,24 +67,24 @@ We want: **any user, any repo, single command, `/add-feature` UX.**
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                      User (in any repo)                          │
-│   $ df init             $ /add-feature "build the X service"     │
+│   $ derrick init        $ /add-feature "build the X service"     │
 └─────────────────┬───────────────────────────┬────────────────────┘
                   │                           │
                   ▼                           ▼
         ┌──────────────────┐        ┌───────────────────────┐
-        │      df CLI      │        │  /add-feature command │
+        │   derrick CLI    │        │  /add-feature command │
         │     (Go bin)     │        │  (Claude Code plugin) │
         └────────┬─────────┘        └───────────┬───────────┘
                  │                              │
                  │  reads/writes                │ shells out via
-                 │  dark-factory.yaml           │ df run …
+                 │  derrick.yaml                │ derrick run …
                  ▼                              ▼
         ┌─────────────────────────────────────────────────┐
-        │            Dark Factory Orchestrator            │
+        │              Derrick Orchestrator               │
         │                                                 │
-        │   Phase pipeline  ←→  dark-factory.yaml (repo)  │
-        │   Tool detection  ←→  ~/.dark-factory/state.json│
-        │   Logging         ←→  .dark-factory/runs/<ts>/  │
+        │   Phase pipeline  ←→  derrick.yaml (per repo)   │
+        │   Tool detection  ←→  ~/.derrick/state.json     │
+        │   Logging         ←→  .derrick/runs/<ts>.log    │
         └──────────┬────────┬────────┬────────┬───────────┘
                    │        │        │        │
                    ▼        ▼        ▼        ▼
@@ -99,37 +98,27 @@ We want: **any user, any repo, single command, `/add-feature` UX.**
 
 | Component | Lang | Lives in | Purpose |
 |---|---|---|---|
-| `df` CLI | Go | `cmd/df` | Install, init, run, doctor, config |
+| `derrick` CLI | Go | `cmd/derrick` | Install, init, run, doctor, config |
 | Orchestrator | Go | `internal/flow` | Phase state machine, tool runner, logging |
 | Tool adapters | Go | `internal/tools` | Thin wrappers around `claude`, `codex`, `gt`, `bd`, `specify` |
-| Config | Go | `internal/config` | Load + validate `dark-factory.yaml` |
-| Repo templates | files | `templates/` | What `df init` copies in |
+| Config | Go | `internal/config` | Load + validate `derrick.yaml` |
+| Repo templates | files | `templates/` | What `derrick init` copies in |
 | Plugin | md+sh | `templates/.claude/` | `/add-feature` command + skill |
 | Install script | bash | `scripts/install.sh` | Curlable bootstrap |
 
 Why Go? Same toolchain as gastown/beads, single static binary for the
 install script, trivial to ship via Homebrew or GitHub release.
 
-### 3.2 Naming
-
-- Project / repo: **dark-factory**
-- Binary: **`df`** — short, two letters, common in muscle memory
-  already; we collide with the Unix `df(1)` so the install script will
-  warn and offer `dark-factory` as the long form if `df` is already on
-  PATH. (See §10 open question.)
-- Claude Code plugin: **`dark-factory`** with commands `/add-feature`,
-  `/df-doctor`, `/df-resume`.
-
 ---
 
-## 4. `dark-factory.yaml` — the per-repo contract
+## 4. `derrick.yaml` — the per-repo contract
 
-This is the only file dark-factory truly *owns* in the user's repo.
-Everything else (`.specify/`, `.claude/`, constitution) is content
-dark-factory writes once during `init` and the user then owns.
+This is the only file derrick truly *owns* in the user's repo. Everything
+else (`.specify/`, `.claude/`, constitution) is content derrick writes
+once during `init` and the user then owns.
 
 ```yaml
-# dark-factory.yaml — single source of truth for this repo's pipeline
+# derrick.yaml — single source of truth for this repo's pipeline
 version: 1
 
 # Identity for gastown
@@ -178,7 +167,7 @@ pipeline:
     command: "/speckit.tasks"
   - id: bridge
     runner: bash
-    command: "${DF_HOME}/scripts/tasks-to-beads.sh {{tasks_md}} --convoy={{convoy}}"
+    command: "${DERRICK_HOME}/scripts/tasks-to-beads.sh {{tasks_md}} --convoy={{convoy}}"
   - id: mayor
     runner: gt
     command: "prime --rig {{rig.name}} --role mayor"
@@ -189,16 +178,16 @@ guardrails:
   forbid_paths: []         # paths that may not be touched by a feature
   required_labels: []      # labels every bead must carry
 
-# Where dark-factory writes its own state inside the repo
+# Where derrick writes its own state inside the repo
 state:
-  dir: .dark-factory
+  dir: .derrick
   log_runs: true
 ```
 
 Resolution rules:
 
-- Repo `dark-factory.yaml` wins.
-- Falls back to `~/.dark-factory/config.yaml` for user defaults
+- Repo `derrick.yaml` wins.
+- Falls back to `~/.derrick/config.yaml` for user defaults
   (preferred model, courtroom rounds, etc).
 - Falls back to a baked-in default shipped with the binary.
 
@@ -212,20 +201,20 @@ Templates use Go `text/template` with a small context (`prompt`, `rig`,
 ### 5.1 Install (one-time, per machine)
 
 ```
-$ curl -fsSL https://dark-factory.dev/install | bash
+$ curl -fsSL https://derrick.dev/install | bash
 ```
 
 Script does, in order:
 
-1. Detect OS/arch, fetch the right `df` binary into `~/.local/bin`.
-2. Run `df doctor --install` which:
+1. Detect OS/arch, fetch the right `derrick` binary into `~/.local/bin`.
+2. Run `derrick doctor --install` which:
    - Verifies `claude`, `codex`, `gt`, `bd`, `git` are present.
    - If a tool is missing, prints the canonical install command (does
      **not** install it silently — these are auth-bearing tools).
-   - Installs the `dark-factory` Claude Code plugin
-     (`/add-feature`, `/df-doctor`) into `~/.claude/plugins/`.
-   - Writes `~/.dark-factory/config.yaml` with sensible defaults.
-3. Prints next-step: `cd your/repo && df init`.
+   - Installs the `derrick` Claude Code plugin (`/add-feature`,
+     `/derrick-doctor`) into `~/.claude/plugins/`.
+   - Writes `~/.derrick/config.yaml` with sensible defaults.
+3. Prints next-step: `cd your/repo && derrick init`.
 
 No repo touched at this stage.
 
@@ -233,7 +222,7 @@ No repo touched at this stage.
 
 ```
 $ cd ~/repos/my-project
-$ df init
+$ derrick init
 ```
 
 Interactive, but answers can be passed via flags / a config file for CI.
@@ -242,21 +231,20 @@ Steps:
 1. Detect or ask for: project name, rig prefix, primary language(s),
    default model preference.
 2. Refuse to clobber existing `.specify/`, `.claude/commands/add-feature.md`,
-   or `dark-factory.yaml` unless `--force`.
+   or `derrick.yaml` unless `--force`.
 3. Bootstrap:
-   - `dark-factory.yaml` from template.
+   - `derrick.yaml` from template.
    - `.specify/` skeleton (constitution stub, memory, scripts) by shelling
-     out to `specify init --here` then patching in dark-factory's
-     extensions.
-   - `.specify/extensions/dark-factory/scripts/tasks-to-beads.sh` (copy
-     of the blacksmith bridge, deblacksmith-ified).
+     out to `specify init --here` then patching in derrick's extensions.
+   - `.specify/extensions/derrick/scripts/tasks-to-beads.sh` (copy of the
+     blacksmith bridge, deblacksmith-ified).
    - `.claude/commands/add-feature.md` (the slash command).
    - `.claude/agents/` placeholders for the standard roles (mayor,
      courtroom, polecat-default). User can edit/extend.
-   - `CLAUDE.md` block appended (or created) pointing at dark-factory's docs.
+   - `CLAUDE.md` block appended (or created) pointing at derrick's docs.
 4. Register the rig with gastown (`gt rig add` or equivalent), unless
    `--no-gastown`.
-5. `df doctor` on the freshly initialised repo.
+5. `derrick doctor` on the freshly initialised repo.
 
 ### 5.3 `/add-feature` (the primary UX)
 
@@ -268,19 +256,19 @@ What the user types in Claude Code:
 
 What happens (this is the load-bearing flow):
 
-1. The slash command body resolves to `df run add-feature --prompt "..."`.
-2. `df` walks the `pipeline:` from `dark-factory.yaml`.
+1. The slash command body resolves to `derrick run add-feature --prompt "..."`.
+2. Derrick walks the `pipeline:` from `derrick.yaml`.
 3. Each step:
-   - Logs to `.dark-factory/runs/<utc-ts>/step-<id>.log`.
+   - Logs to `.derrick/runs/<utc-ts>/step-<id>.log`.
    - On `runner: claude`, shells out to `claude --model X "<command>"`.
    - On `runner: gt`/`bash`, shells out and streams output.
    - On `runner: human`, prompts on stdout and reads stdin (or auto-skips
      when `--no-checkpoint`).
-4. After `specify`, `df` reads `.specify/feature.json` to pin
+4. After `specify`, derrick reads `.specify/feature.json` to pin
    `feature_dir` for subsequent steps (mirrors flight.sh — solves the
    "stale feature.json" bug it already fixed).
 5. Failure of any step halts the pipeline with a numbered error and the
-   exact resume command (`df run add-feature --resume-from plan`).
+   exact resume command (`derrick run add-feature --resume-from plan`).
 
 Variants exposed as slash commands or flags:
 
@@ -293,15 +281,15 @@ Variants exposed as slash commands or flags:
 | `--phase <label>` | Apply a phase label to every bead |
 | `--resume-from <step>` | Restart from a given pipeline step |
 
-### 5.4 `df doctor`
+### 5.4 `derrick doctor`
 
 Inspects the local install + the current repo and prints a coloured
 checklist:
 
 - Binaries: `claude`, `codex`, `gt`, `bd`, `git` (versions + paths).
 - Claude Code plugin presence and version.
-- Repo: `dark-factory.yaml` valid, `.specify/memory/constitution.md`
-  exists and non-empty, gastown rig registered, dolt server reachable if
+- Repo: `derrick.yaml` valid, `.specify/memory/constitution.md` exists
+  and non-empty, gastown rig registered, dolt server reachable if
   gastown enabled.
 - Exit code is the count of failing checks (handy for CI).
 
@@ -310,7 +298,7 @@ checklist:
 ## 6. The Claude Code plugin
 
 Shipped alongside the binary, installed by the install script into
-`~/.claude/plugins/dark-factory/dark-factory/1.0.0/`.
+`~/.claude/plugins/derrick/derrick/1.0.0/`.
 
 Contents:
 
@@ -318,44 +306,44 @@ Contents:
 .claude-plugin/plugin.json
 commands/
   add-feature.md            # the primary UX
-  df-doctor.md              # wraps `df doctor`
-  df-resume.md              # wraps `df run --resume-from`
+  derrick-doctor.md         # wraps `derrick doctor`
+  derrick-resume.md         # wraps `derrick run --resume-from`
 skills/
   add-feature/SKILL.md      # full phase-by-phase instructions
 README.md
 ```
 
 `commands/add-feature.md` is intentionally thin: it parses arguments,
-verifies dark-factory is installed, and then defers to the skill for the
+verifies derrick is installed, and then defers to the skill for the
 actual workflow narrative — same pattern courtroom uses today.
 
 ---
 
 ## 7. Boundaries with the underlying tools
 
-We do **not** fork speckit, courtroom, or gastown. Dark Factory's contract:
+We do **not** fork speckit, courtroom, or gastown. Derrick's contract:
 
-- **speckit**: invoked via `claude /speckit.*`. Dark Factory assumes
-  speckit writes `.specify/feature.json` and a per-feature directory;
-  that's the same assumption flight.sh already makes.
-- **courtroom**: invoked via `claude /courtroom`. Dark Factory passes
-  the plan.md path through `--files` and reads the verdict file from
+- **speckit**: invoked via `claude /speckit.*`. Derrick assumes speckit
+  writes `.specify/feature.json` and a per-feature directory; that's the
+  same assumption flight.sh already makes.
+- **courtroom**: invoked via `claude /courtroom`. Derrick passes the
+  plan.md path through `--files` and reads the verdict file from
   `docs/courtroom/`.
 - **gastown**: invoked via `gt` and `bd` CLIs only. No DB poking, no
-  direct dolt access. Dark Factory will *surface* `gt dolt status`
-  warnings but never run `gt dolt stop`.
+  direct dolt access. Derrick will *surface* `gt dolt status` warnings
+  but never run `gt dolt stop`.
 
-If any of those tools change their CLI shape, dark-factory updates its
+If any of those tools change their CLI shape, derrick updates its
 adapter in `internal/tools/<tool>.go`. That's the only blast radius.
 
 ---
 
 ## 8. State and idempotency
 
-Per-repo dark-factory state lives in `.dark-factory/`:
+Per-repo derrick state lives in `.derrick/`:
 
 ```
-.dark-factory/
+.derrick/
   state.json            # last run id, last feature_dir, last convoy
   runs/
     20260517T091500Z/
@@ -369,8 +357,8 @@ Re-running `/add-feature` with the same prompt does **not** dedupe — the
 user is in charge. `--resume-from` reads `manifest.json` from the most
 recent run unless `--run <id>` is passed.
 
-`.dark-factory/runs/` is gitignored by default (init writes a
-`.gitignore` entry). `state.json` is gitignored too. The yaml is committed.
+`.derrick/runs/` is gitignored by default (init writes a `.gitignore`
+entry). `state.json` is gitignored too. The yaml is committed.
 
 ---
 
@@ -378,18 +366,19 @@ recent run unless `--run <id>` is passed.
 
 **v1 (this design):**
 
-- `df init`, `df run add-feature`, `df doctor`, `df config`.
-- `/add-feature`, `/df-doctor`, `/df-resume` slash commands.
-- Templates for `.specify/`, `.claude/`, `dark-factory.yaml`,
-  constitution stub, tasks-to-beads bridge.
+- `derrick init`, `derrick run add-feature`, `derrick doctor`,
+  `derrick config`.
+- `/add-feature`, `/derrick-doctor`, `/derrick-resume` slash commands.
+- Templates for `.specify/`, `.claude/`, `derrick.yaml`, constitution
+  stub, tasks-to-beads bridge.
 - macOS + Linux install script. Binary published as GitHub release.
 
 **Later:**
 
 - Homebrew formula and a Windows build.
-- `df run <custom-pipeline>` for repos that want flows beyond
+- `derrick run <custom-pipeline>` for repos that want flows beyond
   add-feature (e.g. "hotfix", "spike", "refactor").
-- A `df observe` TUI for watching a running mayor session live
+- A `derrick observe` TUI for watching a running mayor session live
   (currently you `gt status --rig <name>` yourself).
 - Optional Slack feedback hook so polecat completions ping a channel.
 
@@ -400,31 +389,37 @@ recent run unless `--run <id>` is passed.
 1. **Plugin distribution.** Claude Code plugins today come from a
    marketplace JSON. Do we publish to the same marketplace courtroom
    uses, or stand up our own? Leaning: stand up our own
-   (`dark-factory.dev/marketplace.json`) so install is a single curl.
+   (`derrick.dev/marketplace.json`) so install is a single curl.
 
 2. **Speckit init under the hood.** `specify init --here` writes a lot
-   of opinionated content. Dark Factory can either (a) shell out and
-   patch the result, or (b) ship its own minimal `.specify/` skeleton.
-   (a) is less code; (b) is more robust to speckit changes. Leaning:
-   (a) with a pinned speckit version range in `tools.speckit.version`.
+   of opinionated content. Derrick can either (a) shell out and patch
+   the result, or (b) ship its own minimal `.specify/` skeleton. (a) is
+   less code; (b) is more robust to speckit changes. Leaning: (a) with a
+   pinned speckit version range in `tools.speckit.version`.
 
 3. **What does "mayor" mean for a non-blacksmith repo?** Blacksmith has a
    five-agent topology (mayor / polecats / refinery / witness / deacon).
-   A small repo may not want polecats at all. The pipeline should allow
-   ending at `tasks` (no mayor, no convoy) for simple single-author
-   repos. Need a `mode: solo | crew` switch — default solo, opt into
-   crew when gastown is wired up.
+   A small repo may not want polecats at all. `derrick.yaml`'s pipeline
+   should allow ending at `tasks` (no mayor, no convoy) for simple
+   single-author repos. Need a `mode: solo | crew` switch — default
+   solo, opt into crew when gastown is wired up.
 
-4. **Binary name collision.** `df(1)` is a standard Unix utility for
-   disk-free. Shipping `df` on PATH will shadow it for anyone who
-   sources `~/.local/bin` ahead of `/usr/bin`. Options:
-   - Ship `dark-factory` as the canonical binary and a `df` symlink
-     that the install script declines to create if `which df` already
-     resolves to a non-empty path.
-   - Ship only `dark-factory` and let users alias.
-   Leaning: long name canonical, short symlink optional and
-   collision-aware.
+4. **Constitution defaults.** What ships in the constitution stub? A
+   blank file is unhelpful; blacksmith's is too prescriptive. Probably a
+   short template with placeholders and pointers to the speckit docs.
 
-5. **Constitution defaults.** What ships in the constitution stub? A
-   blank file is unhelpful; blacksmith's is too prescriptive. Probably
-   a short template with placeholders and pointers to the speckit docs.
+---
+
+## 11. Naming
+
+We're calling it **derrick**. Reasons:
+
+- The load-bearing structure over an oil well — fits the gastown /
+  petroleum metaphor lineage.
+- Single point that lifts every length of pipe in and out — matches the
+  "single point of entry" framing.
+- Short, lowercase, doesn't collide with an existing common CLI on PATH
+  (verified locally — there's no `derrick` in homebrew core formulas at
+  the time of writing; will re-check before publishing).
+
+Binary: `derrick`. Repo: `derrick`. Plugin: `derrick`.
