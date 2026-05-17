@@ -171,7 +171,6 @@ version: 1
 site:
   name: my-project
   prefix: mp           # ticket prefix (mp-1, mp-2 …)
-  role: foreman        # default role when the foreman is started
 
 # Model registry — define providers once, name them in roles
 models:
@@ -251,7 +250,6 @@ pipeline:
   - id: foreman
     runner: derrick               # starts the foreman loop
     executor_role: executor       # which role hands run as
-    role: "{{site.role}}"
 
 # Project-specific guardrails surfaced into prompts and checkpoints
 guardrails:
@@ -1449,6 +1447,7 @@ links back to the section where it lives.
 | D24 | **Marketplace install fallback**: install script health-checks `derrick.dev/marketplace.json` with a 2s timeout and falls through silently to GitHub release artefacts. User sees a successful install either way. | §11 |
 | D25 | **Foreman exit mode**: `derrick run` detaches the foreman to `.derrick/foreman.pid` and returns; a watch hint is printed (`derrick observe` or `derrick status --watch`). `--attach` for foreground for users who want it. | §8.2 |
 | D26 | **Install paths**: ship three. `curl | bash` (primary, one-line install), `cargo install derrick` (Rust-native), and a Homebrew tap (macOS native). All three resolve to the same release artefact. | §11 |
+| D27 | **Drop `site.role` and `pipeline[].role` for `runner: derrick` steps**: `site.role` was vestigial gastown vocabulary; the derrick substrate has one orchestrator (the foreman), no multi-role agent system. Pipeline steps with `runner: derrick` carry their own runner-specific fields (`executor_role`, `batch`, `inputs`) and do not also need a `role:` binding. Steps that need a model role still use `role:` (mutually exclusive with `runner:` in that case). | §4 |
 
 ### Remaining open questions
 
