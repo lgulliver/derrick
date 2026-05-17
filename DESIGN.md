@@ -121,7 +121,7 @@ modules can be tested, profiled, and (later) ported in isolation.
 |---|---|---|
 | `derrick` CLI | `crates/derrick-cli` | clap-based binary; subcommands route to other crates |
 | Orchestrator | `crates/derrick-flow` | Pipeline state machine, step runner, structured logging (`tracing`) |
-| Tool adapters | `crates/derrick-tools` | Thin wrappers around `claude`, `codex`, `gh copilot`, `specify` (tokio::process) |
+| Tool adapters | `crates/derrick-tools` | Thin wrappers around `claude`, `codex`, `copilot`, `specify` (tokio::process) |
 | Assay | `crates/derrick-assay` | Adversarial plan review; calls the reviewer role(s) directly (see §7) |
 | Memory | `crates/derrick-memory` | Seeds host memory files on init + per-step context budgets |
 | Scrubber | `crates/derrick-scrub` | Subprocess output filter (RTK-equivalent), pure functions, zero-copy where possible |
@@ -176,7 +176,7 @@ models:
   claude-opus:    { provider: anthropic, model: "claude-opus-4-7" }
   claude-sonnet:  { provider: anthropic, model: "claude-sonnet-4-6" }
   codex-gpt5:     { provider: openai-cli, cli: "codex exec", model: "gpt-5" }
-  copilot:        { provider: gh-copilot, cli: "gh copilot",  model: "gpt-5-codex" }
+  copilot:        { provider: copilot-cli, cli: "copilot",  model: "gpt-5-codex" }
   # examples of BYOM (none enabled by default):
   # gemini-pro:   { provider: google,  model: "gemini-2.5-pro" }
   # local-llama:  { provider: ollama,  base_url: "http://localhost:11434", model: "llama3.3:70b" }
@@ -267,7 +267,7 @@ parallelism:
 state:
   dir: .derrick
   log_runs: true
-  lock_ttl: 1h         # multi-feature lock TTL (§9.C.5)
+  worktree_root: .derrick/worktrees   # per-run isolation (§9.C.5)
 ```
 
 Resolution rules:
@@ -322,10 +322,20 @@ See §5.6 for the full brownfield adoption contract; the short version:
 3. **Propose.** Print the proposed `derrick.yaml` and the list of
    files derrick would create or append to. Nothing is moved or
    rewritten unless the user opts in.
-4. **Bootstrap (only after confirm)**:
+4. **Constitution comes from speckit, not from derrick.** Derrick
+   does *not* ship a constitution template. If no constitution
+   exists, init runs speckit's own constitution flow
+   (`/speckit.constitution` via the detected host CLI, or
+   `specify init --here` if a host CLI isn't available — see §5.2.1
+   for the detect-then-defer logic). Brownfield repos with an
+   existing constitution-like doc are referenced via
+   `guardrails.constitution_path` instead. Either way the
+   constitution belongs to speckit; derrick only points at it.
+5. **Bootstrap (only after confirm)**:
    - `derrick.yaml` from template, pointing at *existing* paths
      wherever they were found.
-   - `.specify/` skeleton — only if not already present.
+   - `.specify/` only if speckit isn't already present (handled
+     by the detect-then-defer logic above).
    - `.specify/extensions/derrick/scripts/tasks-to-tickets.sh`.
    - `.claude/commands/add-feature.md` — refuses to overwrite an
      existing command of the same name without `--force`.
@@ -333,9 +343,21 @@ See §5.6 for the full brownfield adoption contract; the short version:
      collide with the user's existing agents are skipped.
    - `CLAUDE.md` block appended only with `--append-agents-md` or
      the equivalent confirm.
-5. Register the site with the substrate (native SQLite), unless
+6. Register the site with the substrate (native SQLite), unless
    `--no-substrate`.
-6. `derrick doctor` on the freshly initialised repo.
+7. `derrick doctor` on the freshly initialised repo.
+
+### 5.2.1 Speckit detect-then-defer
+
+- If `specify` CLI is on PATH and the user's host CLI accepts the
+  `/speckit.*` slash commands, derrick prefers them: it runs
+  `specify init --here` for the skeleton and `/speckit.constitution`
+  via the host for the actual constitution authoring.
+- If neither is available, derrick ships a minimal `.specify/`
+  skeleton (templates, scripts, empty constitution file with a
+  banner: *"Run `/speckit.constitution` to author this."*) and
+  refuses to run the pipeline until the constitution file has had
+  the banner removed.
 
 `derrick init --greenfield` is the opt-in for an empty repo where
 derrick may write authoritatively.
@@ -537,11 +559,11 @@ Derrick separates three concerns most tools conflate:
 
 - **Provider** — *who serves the inference*. Anthropic API,
   OpenAI API, Google Gemini, Bedrock, Azure OpenAI, Ollama,
-  llama.cpp, or a CLI shell (`codex exec`, `gh copilot`,
+  llama.cpp, or a CLI shell (`codex exec`, `copilot`,
   `claude --print`). Adapters live in
   `internal/models/providers/<name>.go`.
 - **Host** — *who the user is conversing with*. `claude` (the
-  Claude Code CLI), `codex` (the Codex CLI), `gh copilot`, raw
+  Claude Code CLI), `codex` (the Codex CLI), `copilot`, raw
   HTTP, or none. The host loads its own context: AGENTS.md,
   sub-agents, skills, plugins. Hosts are configured per pipeline
   step (`host: claude`) or implied by the provider.
@@ -563,7 +585,8 @@ Gemini is one line in `models:`; no pipeline edits.
 | `google` | API | Gemini. |
 | `bedrock` | API | AWS Bedrock. Region + model-id. |
 | `azure-openai` | API | Endpoint + deployment. |
-| `gh-copilot` | CLI | `gh copilot` for ticket dispatch. |
+| `copilot-cli` | CLI | Standalone `copilot` CLI (`@github/copilot`) for ticket dispatch. v1 default. |
+| `copilot-sdk` | Lib | GitHub Copilot SDK in-process. v1.1 research target. |
 | `ollama` | Local | `base_url` + model tag. Sensible for `summariser` role to keep tokens off the network entirely. |
 | `llamacpp` | Local | Same idea. |
 | `shell` | Generic | Any command that takes a prompt on stdin and emits a response on stdout. Escape hatch. |
@@ -571,7 +594,7 @@ Gemini is one line in `models:`; no pipeline edits.
 #### Respecting the host's own rules
 
 When derrick invokes a step on a **host** CLI (claude / codex /
-gh copilot), it deliberately does **not** inject a system prompt,
+copilot), it deliberately does **not** inject a system prompt,
 override the host's context, or bypass the host's rule loading.
 The contract:
 
@@ -589,8 +612,11 @@ The contract:
   custom skills) run inside the host. Derrick's *own* caveman
   implementation is for inter-step compression, not in-session.
 - Derrick records *what command it sent* and *what artifact came
-  back*. It does not record the host's internal context, prompt
-  expansion, or subagent transcripts — those belong to the host.
+  back*. It does not influence the host's internal context,
+  prompt expansion, or subagent behaviour. It *does* read the
+  host's transcript file after the step for token telemetry only
+  (§9.B.7) — read-only, post-hoc, never used to alter the host's
+  next call.
 
 This means: a brownfield repo with a carefully tuned AGENTS.md
 and twenty agents gets exactly the same Claude Code behaviour
@@ -623,6 +649,39 @@ models:
 
 Cost hints are optional but power the §9.B.7 telemetry — without
 them, `derrick gain` reports token counts only, not dollars.
+
+#### Validation: `derrick models check`
+
+Not every role / host / provider combination is sensible
+(`host: claude` + `provider: ollama` is nonsense — Claude Code
+calls Anthropic, not Ollama). v1 ships:
+
+- `derrick models check` — explicit subcommand; verifies every
+  binding in `derrick.yaml` resolves to a real provider, that
+  required env vars / credentials exist, and that the host/
+  provider pairing is supported. Exit code is the count of
+  failing checks.
+- Warnings (not errors) emitted at `derrick init` and `derrick
+  run` if validation finds anything off, so issues surface early
+  without blocking experiments.
+
+#### Auth
+
+Credentials are sensitive and live outside the repo:
+
+- **Env vars first** (CI-friendly): `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `AWS_*` for Bedrock, etc.
+  Derrick documents the env var per provider.
+- **Optional** `~/.derrick/credentials.yaml` for desktop
+  convenience: one file, one set of keys, never repo-local. Mode
+  0600. `derrick auth set <provider>` and `derrick auth list` for
+  ergonomics.
+- **Never** committed to a repo. `.gitignore` for `derrick.yaml`
+  is *not* defaulted (we want it in version control), so secrets
+  go through env vars or `~/.derrick/credentials.yaml` only.
+- **Host-delegated providers** (claude, codex, copilot) inherit
+  auth from the host CLI's own mechanism — derrick doesn't see
+  those keys.
 
 ---
 
@@ -792,9 +851,10 @@ hooks. When `derrick run add-feature` returns, the foreman either:
   logs` tails it.
 
 **Hands**:
-- `copilot` hand shells to `gh copilot agent run --task <body>
-  --label "derrick/ticket=<id>"` and watches the resulting PR
-  for the ticket-id label to detect completion.
+- `copilot` hand shells to the standalone `copilot` CLI
+  (`copilot agent run --task <body> --label
+  "derrick/ticket=<id>"`) and watches the resulting PR for the
+  ticket-id label to detect completion.
 - `human` hand just marks the ticket `in_flight` and waits for
   the user to flip it `done` via `derrick ticket done <id>`.
 - `claude` hand writes a `.derrick/queue/<ticket-id>.md` file
@@ -838,6 +898,22 @@ Copilot remains both a pipeline-step runner (`runner: copilot`
 on any step) and the batch executor in `mode: copilot`. The
 Copilot adapter (`crates/derrick-copilot`) sits behind the
 substrate trait when the foreman is running.
+
+**Backend choice in v1.** GitHub ships two surfaces we can use:
+
+- The standalone **`copilot` CLI** (`@github/copilot` / `npm i -g
+  @github/copilot`) — purpose-built for agent dispatch.
+- **`gh copilot`** as a `gh` extension — older, narrower (chat /
+  suggestions, less agent-oriented).
+- The **GitHub Copilot SDK** (`@github/copilot-sdk`) for embedded
+  use — to be researched; could be the right path for native fan-out
+  without shelling out per task.
+
+v1 default: the standalone `copilot` CLI. The adapter abstracts
+behind a `CopilotBackend` trait so we can add an SDK-based backend
+later without changing the rest of derrick. (Recorded as a v1.1
+research task: "evaluate `@github/copilot-sdk` for parallel fan-out
+and in-process dispatch.")
 
 ### 8.5 Extension point: adding more backends later
 
@@ -899,6 +975,13 @@ appended as low-priority context. It's the only memory layer that
 grows over time, and it's pruned via `derrick memory prune
 --older-than 90d`.
 
+**Quality gate**: every extracted lesson must reference at least
+one specific ticket id *or* a constitution section anchor; if not,
+it's discarded. This keeps the lessons file specific and citable,
+and prevents the LLM extractor from polluting it with vague
+maxims ("be careful with concurrency"). The gate is mechanical
+(regex check), runs before the lesson is written.
+
 **9.A.5 Lifecycle.** `derrick memory list | show | prune | unmemoize`.
 Unmemoize removes everything under `derrick/<rig>/` for clean
 uninstall.
@@ -953,8 +1036,17 @@ caveman pre-compresses and the verdict notes the compression.
 **9.B.7 Telemetry.** `derrick run --tokens` prints per-step token
 estimate after the run. `derrick gain` shows aggregate savings:
 raw estimate, what scrubber/caveman/tiering/caching/memory each
-saved, actual usage. This is the feedback loop that keeps the
-other six knobs honest.
+saved, actual usage.
+
+Sub-agents and skills invoked *inside* a host step (Claude
+spawning Explore via Agent, a skill triggering caveman, etc.)
+are invisible to derrick — but **not** to the host. Claude Code
+persists session transcripts under `~/.claude/projects/<repo>/
+*.jsonl`. After every step `crates/derrick-observe` reads the
+transcript file matching the run's session id, sums token usage
+across all turns (including sub-agent ones), and writes the real
+number into the run manifest. Falls back to estimate when no
+transcript is available (codex, copilot, raw API).
 
 ### 9.C — Parallelism
 
@@ -977,11 +1069,21 @@ parallelism:
 ```
 
 **9.C.2 Multi-reviewer assay.** `tools.assay.reviewers` accepts a
-list. If two are configured (e.g. `[codex, gemini]`), they run in
-parallel against the same brief. Derrick reconciles: unanimous
-accept → accept; any reject → reject; split → user-decides or
-re-plan, per `on_split:`. Cost is one extra reviewer call;
-benefit is meaningfully harder-to-game adversarial review.
+list. v1 ships with `[reviewer]` (codex only) as the default;
+adding `gemini` or a local model is a config edit. When multiple
+reviewers are configured they run in parallel against the same
+brief. Derrick reconciles by `on_split:`:
+
+```yaml
+tools:
+  assay:
+    on_split: reject     # reject (default, fail-closed) | human | majority
+```
+
+- `reject` (default) — any reviewer's reject is binding. Conservative.
+- `human` — prompt the user; surfaces both verdicts.
+- `majority` — needs an odd reviewer count; otherwise treated as
+  `reject`.
 
 **9.C.3 Concurrent observability reads.** `derrick status`
 aggregates from `gt status`, `bd query`, `gt dolt status`, and the
@@ -996,13 +1098,31 @@ validation). v1 does **not** parallelise `specify → plan → assay
 → tasks` — that chain stays sequential because each consumes the
 previous.
 
-**9.C.5 Multi-feature parallelism.** Two `/add-feature`
-invocations against the same repo, at the same time, must not
-clobber each other's `.specify/feature.json`. Each derrick run
-gets a private feature_dir lock (`.derrick/locks/<run-id>`) and
-passes `SPECIFY_FEATURE_DIRECTORY` to every sub-claude call,
-mirroring the flight.sh fix. The lock auto-expires on run
-completion or after `state.lock_ttl`.
+**9.C.5 Multi-feature parallelism — git worktrees.** Two
+`/add-feature` invocations against the same repo, at the same
+time, must not clobber each other's `.specify/feature.json`
+(or anything else under `specs/`, `.derrick/`, working tree
+state). The clean answer is git worktrees:
+
+- Each run creates `.derrick/worktrees/<run-id>/` as a fresh
+  worktree of the repo at the current HEAD, on a branch named
+  `derrick/<feature-slug>-<run-id>`.
+- The entire pipeline executes inside that worktree. Speckit,
+  assay, and the foreman all see an isolated working tree and
+  an isolated `.specify/feature.json`.
+- The substrate DB at `.derrick/derrick.db` lives in the
+  *main* checkout, not the worktree, and is shared. Tickets
+  from concurrent runs coexist; their batches are distinct.
+- On success the worktree's branch is left for the user to
+  inspect, push, or PR. On failure the worktree is preserved
+  with the partial state so `--resume-from` can pick up.
+- `derrick run --cleanup` (and `derrick worktrees prune`)
+  remove orphaned worktrees once their branches are merged or
+  abandoned.
+
+This obsoletes the file-lock / `SPECIFY_FEATURE_DIRECTORY` env
+trick from flight.sh. Worktrees give us *real* isolation, not
+just polite cooperation between sub-processes.
 
 **9.C.6 What isn't parallel** (by design): the sequential spine
 above; assay rounds within a single reviewer (round N reads round
@@ -1057,15 +1177,25 @@ entry). `state.json` is gitignored too. The yaml is committed.
 **v1 (this design):**
 
 - `derrick init`, `derrick run add-feature`, `derrick doctor`,
-  `derrick config`.
+  `derrick config`, `derrick uninstall` (reverses init cleanly).
 - Observability surface (§5.5): `derrick status`, `tickets`,
   `ticket`, `batch`, `foreman`, `activity`, `hands`, `orphans`,
   `runs`.
 - Token tooling: `derrick scrub`, `derrick caveman`, `derrick gain`.
+- BYOM tooling: `derrick models check`, `derrick auth set/list`.
 - `/add-feature`, `/derrick-doctor`, `/derrick-resume`,
   `/derrick-status` slash commands.
-- Templates for `.specify/`, `.claude/`, `derrick.yaml`, constitution
-  stub, tasks-to-tickets bridge.
+- Codex CLI wrapper config: derrick writes a `.codex/instructions.md`
+  (or whatever Codex's equivalent is) during init so the assay
+  reviewer sees the project constitution.
+- Shell completions: bash, zsh, fish, generated via `clap_complete`.
+- Editor integrations: VS Code task definitions and JetBrains run
+  configs in `templates/.vscode/` and `templates/.idea/`, opt-in.
+- Templates for `.specify/`, `.claude/`, `derrick.yaml`,
+  tasks-to-tickets bridge.
+- Marketplace JSON published at `derrick.dev/marketplace.json` for
+  one-line plugin install; GitHub release artefacts as the fallback
+  for manual install.
 - macOS + Linux install script. Binary published as GitHub release.
 
 **Later:**
@@ -1074,124 +1204,62 @@ entry). `state.json` is gitignored too. The yaml is committed.
 - `derrick run <custom-pipeline>` for repos that want flows beyond
   add-feature (e.g. "hotfix", "spike", "refactor").
 - `derrick observe` — full TUI built on top of the §5.5 read APIs.
-- Copilot Workspace HTTP API backend (replaces `gh copilot` CLI in
-  `mode: copilot`).
+- Evaluate `@github/copilot-sdk` for in-process Copilot dispatch
+  (potential replacement for the `copilot` CLI backend).
 - Optional Slack feedback hook so hand completions ping a channel.
 
 ---
 
-## 12. Open questions to resolve before coding
+## 12. Decisions (resolved) and remaining open questions
 
-1. **Plugin distribution.** Claude Code plugins today come from a
-   marketplace JSON. Stand up our own (`derrick.dev/marketplace.json`)
-   so install is a single curl.
+### Decisions taken
 
-2. **Speckit init under the hood.** `specify init --here` writes a lot
-   of opinionated content. Derrick can either (a) shell out and patch
-   the result, or (b) ship its own minimal `.specify/` skeleton. (a) is
-   less code; (b) is more robust to speckit changes. Leaning: (a) with a
-   pinned speckit version range in `tools.speckit.version`.
+These were open during design and have now been resolved. Each
+links back to the section where it lives.
 
-3. **Constitution defaults.** What ships in the constitution stub? A
-   blank file is unhelpful; blacksmith's is too prescriptive. Probably
-   a short template with placeholders and pointers to the speckit docs.
+| # | Decision | Locus |
+|---|---|---|
+| D1 | **Plugin distribution**: own marketplace at `derrick.dev/marketplace.json` (primary) + GitHub release artefacts (fallback). | §11 |
+| D2 | **Speckit init**: detect-then-defer — use speckit if installed; fall back to a minimal `.specify/` skeleton derrick ships, with a banner requiring the user to author the constitution via `/speckit.constitution` before any pipeline runs. | §5.2 / §5.2.1 |
+| D3 | **Constitution stub**: derrick does not ship a constitution template at all — speckit owns that file. Brownfield init points at the existing constitution-like doc; greenfield init forces the speckit constitution flow. | §5.2 |
+| D4 | **Brownfield `--constitution-from-docs` drafts**: marked with a banner; `plan` step refuses to run until the user removes the banner. | §5.6 |
+| D5 | **Assay reviewers in v1**: codex only. Other providers slot in via the model abstraction later — no extra v1 work. | §7 |
+| D6 | **Split-verdict policy**: configurable per repo via `on_split:` (`reject` default fail-closed, `human`, `majority`). | §9.C.2 |
+| D7 | **Scrubber/caveman compatibility**: caveman is byte-identical to the original skill at matched intensities; scrubber is drift-tolerant (CLI output evolves upstream). | §9.B.2 / §9.B.3 |
+| D8 | **Caveman invocation**: in-process Rust default; falls back to invoking the caveman skill via the host when an unknown artifact type is encountered. | §9.B.3 |
+| D9 | **Cross-feature lessons**: shipped in v1 with a mechanical quality gate — each lesson must reference a specific ticket id or constitution section anchor, else discarded. | §9.A.4 |
+| D10 | **Multi-feature parallelism**: git worktrees per run (`.derrick/worktrees/<run-id>/`), not file locks. Substrate DB stays in the main checkout and is shared. | §9.C.5 |
+| D11 | **Native substrate scope discipline**: additions require explicit sign-off and a DESIGN.md note; an OSS-facing policy in `CONTRIBUTING.md` keeps the rule visible to external contributors. | §8.1 |
+| D12 | **Provider auth**: env vars first; optional `~/.derrick/credentials.yaml` (mode 0600) for desktop convenience; never repo-local; host-delegated providers inherit auth from the host CLI. | §6.5 |
+| D13 | **Copilot backend in v1**: standalone `copilot` CLI (`@github/copilot`). `gh copilot` is the older extension, not what we use. Backend trait allows an SDK-based path later. `@github/copilot-sdk` recorded as a v1.1 research target. | §8.4 |
+| D14 | **Sub-agent / skill telemetry**: derrick parses Claude Code's session transcript files (`~/.claude/projects/<repo>/*.jsonl`) post-step for accurate token counts; falls back to estimates for codex / copilot / raw API. | §9.B.7 |
+| D15 | **Role/host validation**: `derrick models check` subcommand for explicit verification; warnings (not errors) emitted at `derrick init` and `derrick run` so issues surface early. | §6.5 |
+| D16 | **v1 install surface (beyond CLI + plugin)**: shell completions (clap_complete: bash/zsh/fish), VS Code + JetBrains editor configs in templates (opt-in), `.codex/instructions.md` wrapper config written during init so codex sees the constitution, `derrick uninstall` to cleanly reverse init. | §11 |
 
-4. **Assay reviewer default.** `codex` is the obvious v1 choice
-   (already installed for courtroom, stable non-interactive mode).
-   But should we ship a `gemini` adapter in v1 as well so users
-   without Codex auth can still get adversarial review? Leaning:
-   codex-only v1, gemini in v1.1.
+### Remaining open questions
 
-5. **Caveman in-process vs. via skill.** §9.3 describes inter-step
-   summarisation. Cleanest is to invoke the existing `caveman` skill
-   via `claude` for the summary. Cheapest is to apply the caveman
-   shaping rules in Go directly. Leaning: in-process for speed and to
-   avoid recursive Claude invocations, fall back to the skill if our
-   ruleset misses an artifact type.
+Genuinely undecided, listed for explicit attention before or
+during implementation:
 
-6. **Memory namespacing.** §9.4 writes into the user's global memory
-   dir. We need a stable prefix (`derrick/<rig-name>/...`) so multiple
-   derrick-managed repos on the same machine don't collide, and so
-   `derrick init --unmemoize` can clean up without touching unrelated
-   memories.
+1. **Worktree merge UX.** D10 leaves each successful run on a
+   branch for the user to merge or PR. Do we *also* offer
+   `derrick run --auto-pr` (open a PR via `gh pr create` at the
+   end of a successful run) as a convenience, or is that out of
+   scope for v1? Leaning: ship it, default off.
 
-7. **Scrubber / caveman compatibility with the originals.** We're
-   shipping our own implementations (§9.2, §9.3). Should we treat
-   byte-for-byte compatibility with RTK and the caveman skill as a
-   contract (so users can swap freely), or just call ours
-   "RTK-inspired" / "caveman-inspired" and diverge as needed?
-   Leaning: caveman byte-identical at matched intensities (it's a
-   pure shaping function); scrubber drift-tolerant (CLI output shapes
-   change upstream too often to chase).
+2. **Lessons writeback for brownfield.** D9's quality gate
+   requires references to ticket ids or constitution sections.
+   In a brownfield repo with no constitution authored yet
+   (D2/D3 flow), the gate will reject almost every lesson. Do
+   we relax the gate until a constitution exists, or just
+   accept that lessons start empty? Leaning: accept empty.
 
-8. **Copilot Workspace API timing.** §8.3 says v1 = `gh copilot` CLI,
-   v1.1 = Workspace HTTP API. The API isn't fully GA at design time.
-   If it slips, the `mode: copilot` experience is degraded (CLI is
-   single-task, no good parallelism). Do we hold `mode: copilot` for
-   v1.1, or ship a CLI-only v1 with documented limits? Leaning: ship
-   CLI-only v1 with `--serialise` default = true so it's predictable,
-   document the upgrade path.
-
-9. **Multi-reviewer assay split-verdict policy** (§9.C.2). If two
-   reviewers disagree (codex: accept, gemini: reject), the safe
-   default is fail-closed (=reject). But that gives veto power to
-   the more pessimistic model. Alternative: `on_split: human`
-   prompts the user. Leaning: `on_split: reject` default,
-   `on_split: human` opt-in for solo mode.
-
-10. **Cross-feature lessons quality control** (§9.A.4). The lesson
-    extractor is itself an LLM call after each batch closes. If
-    its output is noisy, it pollutes future plans. Need a quality
-    gate — probably "lesson must reference at least one specific
-    ticket id or constitution section, else discard." Worth
-    piloting before turning on by default.
-
-11. **Lock contention in multi-feature mode** (§9.C.5). The
-    `SPECIFY_FEATURE_DIRECTORY` env var solves serial conflicts
-    but the underlying speckit may still write shared state we
-    haven't audited. v1 should ship with a loud warning if two
-    `derrick run`s overlap, and only relax to silent parallelism
-    once we've verified speckit is fully feature-dir-scoped.
-
-12. **Native substrate scope creep** (§8.1). We've excluded mail,
-    federation, watchdogs, merge queue, persistent agent identity
-    beyond per-ticket ownership, epic staging. Risk: feature-by-
-    feature these get reintroduced and the substrate grows into
-    something it shouldn't be. Mitigation: every addition needs
-    explicit sign-off; if we're adding three of these in a quarter,
-    the answer is "ship a different backend behind the trait," not
-    "extend the native one."
-
-13. **Brownfield constitution drafting.** `derrick init
-    --constitution-from-docs` runs an LLM pass over the repo's
-    existing docs (READMEs, CONTRIBUTING, ADRs, AGENTS.md) to
-    produce a constitution stub. Cheap and useful, but the
-    output is unreviewed prose. Should we require human edit
-    before any pipeline run uses it, or trust the LLM draft?
-    Leaning: mark drafts with a banner and refuse to run `plan`
-    against them until the user has removed the banner.
-
-14. **Role binding to host CLI.** §6.5 separates role / provider /
-    host. But not every provider works with every host (e.g.
-    `host: claude` + `provider: ollama` is nonsensical — Claude
-    Code calls Anthropic, not Ollama). Need a validation matrix
-    and a clear error when a user picks an invalid combination.
-    Probably ship a `derrick models check` subcommand.
-
-15. **Sub-agent / skill visibility from derrick.** §6.5 says
-    derrick doesn't see what sub-agents or skills the host
-    invokes. That's correct for context isolation but it makes
-    `derrick gain` blind to those costs. Open question: should
-    the host emit a token-summary side-channel derrick can read?
-    Probably not for v1 — it's a host change, not a derrick one.
-    Document the limit.
-
-16. **Provider auth.** API keys for BYOM live where? Options:
-    `~/.derrick/credentials.yaml`, environment variables only,
-    or delegate to the host CLI's own auth (Claude Code already
-    has `ANTHROPIC_API_KEY`; codex has its own). Leaning:
-    env-var-first, optional `~/.derrick/credentials.yaml` for
-    convenience, never repo-local credentials.
+3. **Marketplace dependency in install script.** D1's primary
+   path is the marketplace JSON. If `derrick.dev` is down at
+   install time we fall back to GitHub releases — but the
+   install script needs to detect that. Health-check the
+   marketplace URL with a 2s timeout, then fall through. Worth
+   confirming this is acceptable before we hard-wire it.
 
 ---
 
