@@ -106,6 +106,7 @@ We want: **any user, any repo, single command, `/add-feature` UX.**
 | Scrubber | Go | `internal/scrub` | Derrick-native subprocess output filter (RTK-equivalent) |
 | Caveman | Go | `internal/caveman` | Derrick-native text compressor for inter-step handoff |
 | Copilot adapter | Go | `internal/copilot` | Dispatches steps or beads to Copilot agents (CLI + Workspace API) |
+| Observe | Go | `internal/observe` | Aggregated read-only view over gastown (rig, convoy, beads, mail, trail) |
 | Config | Go | `internal/config` | Load + validate `derrick.yaml` |
 | Repo templates | files | `templates/` | What `derrick init` copies in |
 | Plugin | md+sh | `templates/.claude/` | `/add-feature` command + skill |
@@ -299,12 +300,76 @@ Variants exposed as slash commands or flags:
 Inspects the local install + the current repo and prints a coloured
 checklist:
 
-- Binaries: `claude`, `codex`, `gt`, `bd`, `git` (versions + paths).
+- Binaries: `claude`, `codex`, `gh`, `gt`, `bd`, `git` (versions + paths).
 - Claude Code plugin presence and version.
 - Repo: `derrick.yaml` valid, `.specify/memory/constitution.md` exists
   and non-empty, gastown rig registered, dolt server reachable if
   gastown enabled.
 - Exit code is the count of failing checks (handy for CI).
+
+### 5.5 Observability — derrick as the front door for "what's going on?"
+
+Once a feature is in flight, the user shouldn't need to remember
+which underlying tool answers which question. Derrick exposes a
+flat, predictable surface that aggregates gastown/bd/Copilot reads
+into one view. Everything here is **read-only** — these commands
+never mutate state.
+
+| Command | What it shows | Wraps |
+|---|---|---|
+| `derrick status` | Dashboard: rig health, active convoy, beads by state, mayor session, dolt health, last assay verdict | `gt status`, `bd query`, `bd ready`, `gt dolt status` |
+| `derrick status --watch` | Same, live-refreshing every N seconds | tick loop |
+| `derrick beads [filter]` | List beads with state, owner, labels, age. Filters: `ready`, `in-flight`, `blocked`, `done`, `mine`, `convoy=<name>`, `phase=<label>` | `bd list`, `bd query` |
+| `derrick bead <id>` | Full detail on one bead — body, comments, blockers, history, polecat assignment, PR link | `bd show`, `bd comments` |
+| `derrick convoy [name]` | Convoy state: order, blockers, who's working what, ETA estimate | `gt convoy`, `bd query` |
+| `derrick mayor` | Mayor session status, current focus, recent escalations | `gt mayor`, `gt mail` |
+| `derrick mail [--human \| --since 1h]` | Agent mail aggregated and de-noised — human escalations bubble to the top | `gt mail` |
+| `derrick trail [--rig \| --convoy]` | Recent agent activity timeline | `gt trail` |
+| `derrick polecats` | Polecats registered to this rig, current task, last heartbeat | `gt polecat`, `gt agents` |
+| `derrick orphans` | Lost polecat work (beads with no live owner) | `gt orphans` |
+| `derrick runs` | Last N derrick pipeline runs, exit status per step | local `.derrick/runs/` |
+| `derrick run <id>` | Replay the manifest of one specific run | local |
+
+Design rules for the observability surface:
+
+- **Scrubbed by default.** Output goes through `internal/scrub`
+  (§9.2) so a copy-paste into a Claude prompt is already token-tight.
+  `--raw` opts out.
+- **Caveman-aware.** `derrick status --caveman` produces a
+  one-screen summary good for pasting into stand-ups or feeding back
+  into `/add-feature` resume contexts.
+- **Mode-aware.** In `mode: solo` most of these collapse — `derrick
+  status` shows the current spec dir and tasks.md progress, no
+  beads. In `mode: copilot` it shows Copilot agent dispatch state,
+  no mayor. In `mode: crew` it shows the lot.
+- **No mutation.** If the user wants to claim/close/comment, they
+  use `bd` directly. Derrick is deliberately not a wrapper around
+  every write path; that surface is gastown's by design and
+  derrick doesn't want to keep up.
+- **JSON when piped.** `--format json` (or auto-detected from
+  non-TTY) emits structured output for scripting and for the future
+  `derrick observe` TUI.
+
+`derrick status` example output (crew mode, mid-flight):
+
+```
+$ derrick status
+rig          taxi-ingest                            mode: crew
+convoy       001-webhook-ingest      11 beads       3 done • 2 in-flight • 6 ready
+mayor        running (pid 28411, 14m)               last escalation: none
+dolt         healthy                latency 18ms     orphans: 0
+last assay   2026-05-17 09:18  →  accept (round 2)  by codex/gpt-5
+
+in flight:
+  ti-50  ▸  polecat:bramble    storage layer with idempotent dedupe   12m
+  ti-51  ▸  polecat:sumac      replay-safe migration                   4m
+ready next:
+  ti-52     handler wiring                  blocked by: ti-50
+  ti-53     contract test for /ingest      blocked by: ti-50, ti-51
+  …
+```
+
+This is what users actually want at 09:30 standup. One command.
 
 ---
 
@@ -319,6 +384,7 @@ Contents:
 .claude-plugin/plugin.json
 commands/
   add-feature.md            # the primary UX
+  derrick-status.md         # wraps `derrick status` (caveman-formatted)
   derrick-doctor.md         # wraps `derrick doctor`
   derrick-resume.md         # wraps `derrick run --resume-from`
 skills/
@@ -490,8 +556,9 @@ struct so the rest of derrick is backend-agnostic.
 - **Phase labelling** — `--phase <label>` is passed through to the
   bridge so every bead carries it. Useful for "phase-7" rollups.
 - **Mayor handoff** — derrick stops at "Mayor session running. Watch
-  with `gt status --rig <name>`." It does **not** stay attached. The
-  pipeline run is done.
+  with `derrick status` (or `derrick status --watch`)." It does
+  **not** stay attached. The pipeline run is done; the observability
+  surface (§5.5) takes over.
 - **Resume** — `derrick run add-feature --resume-from bridge` is the
   canonical recovery path when speckit succeeded but gastown wobbled.
 
@@ -657,7 +724,11 @@ entry). `state.json` is gitignored too. The yaml is committed.
 
 - `derrick init`, `derrick run add-feature`, `derrick doctor`,
   `derrick config`.
-- `/add-feature`, `/derrick-doctor`, `/derrick-resume` slash commands.
+- Observability surface (§5.5): `derrick status`, `beads`, `bead`,
+  `convoy`, `mayor`, `mail`, `trail`, `polecats`, `orphans`, `runs`.
+- Token tooling: `derrick scrub`, `derrick caveman`, `derrick gain`.
+- `/add-feature`, `/derrick-doctor`, `/derrick-resume`,
+  `/derrick-status` slash commands.
 - Templates for `.specify/`, `.claude/`, `derrick.yaml`, constitution
   stub, tasks-to-beads bridge.
 - macOS + Linux install script. Binary published as GitHub release.
@@ -667,8 +738,9 @@ entry). `state.json` is gitignored too. The yaml is committed.
 - Homebrew formula and a Windows build.
 - `derrick run <custom-pipeline>` for repos that want flows beyond
   add-feature (e.g. "hotfix", "spike", "refactor").
-- A `derrick observe` TUI for watching a running mayor session live
-  (currently you `gt status --rig <name>` yourself).
+- `derrick observe` — full TUI built on top of the §5.5 read APIs.
+- Copilot Workspace HTTP API backend (replaces `gh copilot` CLI in
+  `mode: copilot`).
 - Optional Slack feedback hook so polecat completions ping a channel.
 
 ---
