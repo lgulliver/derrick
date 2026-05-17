@@ -57,8 +57,8 @@ Plus the product surface:
   templates, the hooks, the constitution skeleton, and registers the
   rig with gastown.
 - **One primary command**: `/add-feature <prompt>` runs the full
-  dark factory pipeline — spec → assay → plan → tasks → convoy →
-  mayor / Copilot agents.
+  dark factory pipeline — spec → assay → plan → tasks → batch →
+  foreman / Copilot agents.
 - **One front door for observability**: `derrick status` is the
   answer to "what's going on?" — never `gt status` + `bd query` +
   `gt mail` separately.
@@ -148,11 +148,11 @@ once during `init` and the user then owns.
 # derrick.yaml — single source of truth for this repo's pipeline
 version: 1
 
-# Identity for gastown
-rig:
+# Identity for the substrate
+site:
   name: my-project
-  prefix: mp           # bead prefix (mp-1, mp-2 …)
-  role: mayor          # default role when `gt prime` is called
+  prefix: mp           # ticket prefix (mp-1, mp-2 …)
+  role: foreman        # default role when the foreman is started
 
 # Underlying tool versions / opt-outs
 tools:
@@ -165,7 +165,7 @@ tools:
     enabled: true
     cli: "gh copilot"           # gh copilot CLI; Workspace API later
     model: "gpt-5-codex"        # whichever Copilot model the user has
-    agent_identity: derrick-polecat  # for crew mode handoff
+    agent_identity: derrick-hand     # for crew mode handoff
   # No external rtk/caveman dependency — derrick ships its own (see §9).
 
 # /add-feature pipeline. Steps run in order; any can be skipped via flag.
@@ -203,21 +203,22 @@ pipeline:
     model: sonnet
     command: "/speckit.tasks"
   - id: bridge
-    runner: bash
-    command: "${DERRICK_HOME}/scripts/tasks-to-beads.sh {{tasks_md}} --convoy={{convoy}}"
-  - id: mayor
-    runner: gt
-    command: "prime --rig {{rig.name}} --role mayor"
+    runner: derrick                # creates tickets in the substrate (native or gastown shim)
+    inputs: [{{tasks_md}}]
+    batch: "{{batch}}"
+  - id: foreman
+    runner: derrick                # starts the foreman loop (in-proc native, or gastown's mayor via shim)
+    role: "{{site.role}}"
 
 # Project-specific guardrails surfaced into prompts and checkpoints
 guardrails:
   constitution_path: .specify/memory/constitution.md
   forbid_paths: []         # paths that may not be touched by a feature
-  required_labels: []      # labels every bead must carry
+  required_labels: []      # labels every ticket must carry
 
 # Parallelism budgets (see §9.C)
 parallelism:
-  convoy_max: 8        # max polecats / copilot agents in flight at once
+  batch_max: 8         # max hands / copilot agents in flight at once
   step_max:   4        # max parallel sub-tasks within one pipeline step
   assay_max:  2        # max concurrent reviewers in multi-reviewer assay
 
@@ -236,7 +237,7 @@ Resolution rules:
 - Falls back to a baked-in default shipped with the binary.
 
 Templates use Go `text/template` with a small context (`prompt`, `rig`,
-`feature_dir`, `tasks_md`, `convoy`, env). No general expression language.
+`feature_dir`, `tasks_md`, `batch`, env). No general expression language.
 
 ---
 
@@ -280,11 +281,12 @@ Steps:
    - `derrick.yaml` from template.
    - `.specify/` skeleton (constitution stub, memory, scripts) by shelling
      out to `specify init --here` then patching in derrick's extensions.
-   - `.specify/extensions/derrick/scripts/tasks-to-beads.sh` (copy of the
-     blacksmith bridge, deblacksmith-ified).
+   - `.specify/extensions/derrick/scripts/tasks-to-tickets.sh`
+     (derived from the blacksmith bridge but speaking derrick's
+     vocabulary; emits to whichever substrate backend is selected).
    - `.claude/commands/add-feature.md` (the slash command).
-   - `.claude/agents/` placeholders for the standard roles (mayor,
-     assay-reviewer, polecat-default). User can edit/extend.
+   - `.claude/agents/` placeholders for the standard roles
+     (foreman, assay-reviewer, hand-default). User can edit/extend.
    - `CLAUDE.md` block appended (or created) pointing at derrick's docs.
 4. Register the rig with gastown (`gt rig add` or equivalent), unless
    `--no-gastown`.
@@ -345,20 +347,27 @@ flat, predictable surface that aggregates gastown/bd/Copilot reads
 into one view. Everything here is **read-only** — these commands
 never mutate state.
 
-| Command | What it shows | Wraps |
+All commands talk to the substrate interface. Output uses
+derrick's vocabulary; if the gastown backend is selected, the
+shim translates inbound (`bead → ticket`, `convoy → batch`,
+`polecat → hand`, `mayor → foreman`, `rig → site`).
+
+| Command | What it shows | Substrate calls |
 |---|---|---|
-| `derrick status` | Dashboard: rig health, active convoy, beads by state, mayor session, dolt health, last assay verdict | `gt status`, `bd query`, `bd ready`, `gt dolt status` |
+| `derrick status` | Dashboard: site health, active batch, tickets by state, foreman session, last assay verdict | `Site.Health`, `Batch.Current`, `Ticket.List` |
 | `derrick status --watch` | Same, live-refreshing every N seconds | tick loop |
-| `derrick beads [filter]` | List beads with state, owner, labels, age. Filters: `ready`, `in-flight`, `blocked`, `done`, `mine`, `convoy=<name>`, `phase=<label>` | `bd list`, `bd query` |
-| `derrick bead <id>` | Full detail on one bead — body, comments, blockers, history, polecat assignment, PR link | `bd show`, `bd comments` |
-| `derrick convoy [name]` | Convoy state: order, blockers, who's working what, ETA estimate | `gt convoy`, `bd query` |
-| `derrick mayor` | Mayor session status, current focus, recent escalations | `gt mayor`, `gt mail` |
-| `derrick mail [--human \| --since 1h]` | Agent mail aggregated and de-noised — human escalations bubble to the top | `gt mail` |
-| `derrick trail [--rig \| --convoy]` | Recent agent activity timeline | `gt trail` |
-| `derrick polecats` | Polecats registered to this rig, current task, last heartbeat | `gt polecat`, `gt agents` |
-| `derrick orphans` | Lost polecat work (beads with no live owner) | `gt orphans` |
+| `derrick tickets [filter]` | List tickets with state, owner, labels, age. Filters: `ready`, `in-flight`, `blocked`, `done`, `mine`, `batch=<name>`, `phase=<label>` | `Ticket.List` |
+| `derrick ticket <id>` | Full detail on one ticket — body, comments, blockers, history, hand assignment, PR link | `Ticket.Get` |
+| `derrick batch [name]` | Batch state: order, blockers, who's working what, ETA estimate | `Batch.Get` |
+| `derrick foreman` | Foreman session status, current focus, recent escalations | `Foreman.Status` |
+| `derrick activity [--site \| --batch]` | Recent agent activity timeline | `Event.Tail` |
+| `derrick hands` | Hands registered to this site, current task, last heartbeat | `Hand.List` |
+| `derrick orphans` | Lost work (tickets with no live owner) | `Ticket.Orphans` |
 | `derrick runs` | Last N derrick pipeline runs, exit status per step | local `.derrick/runs/` |
 | `derrick run <id>` | Replay the manifest of one specific run | local |
+
+(Gastown backend only: `derrick mail` exposes `gt mail`. Native
+backend doesn't ship mail in v1.)
 
 Design rules for the observability surface:
 
@@ -370,8 +379,8 @@ Design rules for the observability surface:
   into `/add-feature` resume contexts.
 - **Mode-aware.** In `mode: solo` most of these collapse — `derrick
   status` shows the current spec dir and tasks.md progress, no
-  beads. In `mode: copilot` it shows Copilot agent dispatch state,
-  no mayor. In `mode: crew` it shows the lot.
+  tickets. In `mode: copilot` it shows Copilot agent dispatch
+  state, no foreman. In `mode: crew` it shows the lot.
 - **No mutation.** If the user wants to claim/close/comment, they
   use `bd` directly. Derrick is deliberately not a wrapper around
   every write path; that surface is gastown's by design and
@@ -384,15 +393,15 @@ Design rules for the observability surface:
 
 ```
 $ derrick status
-rig          taxi-ingest                            mode: crew
-convoy       001-webhook-ingest      11 beads       3 done • 2 in-flight • 6 ready
-mayor        running (pid 28411, 14m)               last escalation: none
-dolt         healthy                latency 18ms     orphans: 0
+site         taxi-ingest                            mode: crew
+batch        001-webhook-ingest      11 tickets     3 done • 2 in-flight • 6 ready
+foreman      running (pid 28411, 14m)               last escalation: none
+backend      native                                 orphans: 0
 last assay   2026-05-17 09:18  →  accept (round 2)  by codex/gpt-5
 
 in flight:
-  ti-50  ▸  polecat:bramble    storage layer with idempotent dedupe   12m
-  ti-51  ▸  polecat:sumac      replay-safe migration                   4m
+  ti-50  ▸  hand:bramble       storage layer with idempotent dedupe   12m
+  ti-51  ▸  hand:sumac         replay-safe migration                   4m
 ready next:
   ti-52     handler wiring                  blocked by: ti-50
   ti-53     contract test for /ingest      blocked by: ti-50, ti-51
@@ -498,8 +507,29 @@ That's the only blast radius.
 ## 8. Execution substrate — derrick-native by default, gastown optional
 
 The pipeline produces a `tasks.md`. *Something* then has to track
-those tasks as work units, sequence them, dispatch them to workers,
+those tasks as work units, sequence them, dispatch them to hands,
 and report state. That something is the **execution substrate**.
+
+### 8.-1 Glossary (derrick's vocabulary)
+
+We deliberately do **not** reuse gastown's nouns. When both systems
+are in play this makes them distinguishable; when only derrick is in
+play the words stand on their own.
+
+| Derrick | Role | Gastown equivalent (when `backend: gastown`) |
+|---|---|---|
+| **site** | Workspace registered with the substrate | rig |
+| **ticket** | One unit of work | bead |
+| **batch** | Ordered named group of tickets for one feature | convoy |
+| **hand** | An executor (claude / copilot / human) | polecat |
+| **foreman** | Orchestrator loop that walks ready tickets and dispatches | mayor |
+| **dispatch** | The verb for assigning a ticket to a hand | sling |
+| **activity** | Recent event timeline | trail |
+| **link / blocks** | Typed edges between tickets | (same) |
+| **prefix** | Short site code, e.g. `ti` → `ti-47` | (same) |
+
+The gastown shim translates inbound (`bead → ticket`, etc.) so
+derrick's CLI output is consistent regardless of backend.
 
 ### 8.0 The decision: own it
 
@@ -527,60 +557,67 @@ tools:
 
 ### 8.1 The model (one shape, two backends)
 
-We define **one** logical model and implement it twice (once
-natively, once as a thin shim over gastown). The rest of derrick —
-observability surface, runners, memory layers — talks to the model,
-not the backend.
+We define **one** logical model with **derrick's own vocabulary**
+and implement it twice (once natively, once as a thin shim over
+gastown). The rest of derrick — observability surface, runners,
+memory layers — talks to the model, not the backend.
 
-- **Rig** — a workspace registered with the substrate. One per repo.
-  Has a name and a bead prefix.
-- **Bead** — a single unit of work with state
+- **Site** — a workspace registered with the substrate. One per
+  repo. Has a name and a ticket prefix.
+- **Ticket** — a single unit of work with state
   (`ready | in_flight | blocked | done | rejected`), labels, body,
-  links to other beads, owner.
-- **Link** — typed edge between beads. v1 supports `blocks`
+  links to other tickets, owner.
+- **Link** — typed edge between tickets. v1 supports `blocks`
   (sequencing) and `related` (informational).
-- **Convoy** — an ordered named group of beads representing one
-  feature. Closes when all member beads close.
-- **Worker** — anything that can execute a bead. v1 worker types:
+- **Batch** — an ordered named group of tickets representing one
+  feature. Closes when all member tickets close.
+- **Hand** — anything that can execute a ticket. v1 hand types:
   `claude` (interactive human-driven), `copilot` (agent dispatch),
   `human` (just claimed by a person).
-- **Run loop (mayor)** — a process that walks ready beads, applies
-  routing rules, dispatches to a worker, polls completion, reports.
+- **Foreman** — the orchestrator that walks ready tickets, applies
+  routing rules, dispatches to a hand, polls completion, reports.
   v1 runs in-process inside derrick; out-of-process daemon later.
 
+Deliberate vocabulary split from gastown: site/ticket/batch/hand/
+foreman/dispatch are derrick's terms, used in the CLI, the docs,
+and all user-facing output regardless of which backend is in play.
+When `backend: gastown` is selected, gastown's own terms
+(rig/bead/convoy/polecat/mayor) apply *behind* the shim — they
+never leak through.
+
 Things gastown has that the native substrate **does not** ship in
-v1: agent mail, multi-rig federation (`wl` wasteland commands),
-witness/deacon watchdogs, refinery merge queue, persistent agent
-identity beyond per-bead ownership, mountain-eater epic staging.
-Users who need these flip to `execution_substrate: gastown`.
+v1: agent mail, multi-site federation, watchdog services, merge
+queue, persistent agent identity beyond per-ticket ownership,
+epic staging. Users who need these flip to `backend: gastown`.
 
 ### 8.2 The native substrate
 
 **Storage**: SQLite at `.derrick/derrick.db`. Schema is small —
-`beads`, `links`, `convoys`, `workers`, `events`. WAL mode, single
-writer (the in-process mayor), many readers (observability surface).
-File-based means no server, trivial backup, trivial gitignore.
+`tickets`, `links`, `batches`, `hands`, `events`. WAL mode, single
+writer (the in-process foreman), many readers (observability
+surface). File-based means no server, trivial backup, trivial
+gitignore.
 
-**Mayor loop**: a goroutine in the derrick process that polls
-ready beads, dispatches, and watches for completion via worker
-hooks. When `derrick run add-feature` returns, the mayor either:
-- exits cleanly if all beads are `done`, or
-- detaches into `.derrick/mayor.pid` and continues in the
-  background. `derrick mayor stop` ends it; `derrick mayor logs`
-  tails it.
+**Foreman loop**: a goroutine in the derrick process that polls
+ready tickets, dispatches, and watches for completion via hand
+hooks. When `derrick run add-feature` returns, the foreman either:
+- exits cleanly if all tickets are `done`, or
+- detaches into `.derrick/foreman.pid` and continues in the
+  background. `derrick foreman stop` ends it; `derrick foreman
+  logs` tails it.
 
-**Workers**:
-- `copilot` worker shells to `gh copilot agent run --task <body>
-  --label "derrick/bead=<id>"` and watches the resulting PR for
-  the bead-id label to detect completion.
-- `human` worker just marks the bead `in_flight` and waits for
-  the user to flip it `done` via `derrick bead done <id>`.
-- `claude` worker writes a `.derrick/queue/<bead-id>.md` file
+**Hands**:
+- `copilot` hand shells to `gh copilot agent run --task <body>
+  --label "derrick/ticket=<id>"` and watches the resulting PR
+  for the ticket-id label to detect completion.
+- `human` hand just marks the ticket `in_flight` and waits for
+  the user to flip it `done` via `derrick ticket done <id>`.
+- `claude` hand writes a `.derrick/queue/<ticket-id>.md` file
   and prints a hint — the user picks it up in their Claude
   Code session.
 
-**Concurrency**: §9.C `parallelism.convoy_max` caps how many
-workers run at once. The mayor honours `blocks` links strictly.
+**Concurrency**: §9.C `parallelism.batch_max` caps how many hands
+run at once. The foreman honours `blocks` links strictly.
 
 **Mutation API**: in-process Go, plus a small subset of CLI
 write commands derrick *does* expose (it can't be entirely
@@ -588,24 +625,27 @@ read-only against its own substrate):
 
 | Command | Purpose |
 |---|---|
-| `derrick bead new` | Create a bead (used internally by `bridge`) |
-| `derrick bead done <id>` | Mark complete |
-| `derrick bead block <id> --on <id>` | Add a `blocks` link |
-| `derrick bead reopen <id>` | Re-ready a done/rejected bead |
-| `derrick convoy close <name>` | Force-close a convoy |
+| `derrick ticket new` | Create a ticket (used internally by `bridge`) |
+| `derrick ticket done <id>` | Mark complete |
+| `derrick ticket block <id> --on <id>` | Add a `blocks` link |
+| `derrick ticket reopen <id>` | Re-ready a done/rejected ticket |
+| `derrick batch close <name>` | Force-close a batch |
 
-Reads (status, beads, bead, convoy, etc.) are §5.5 already.
+Reads (status, tickets, ticket, batch, etc.) are §5.5 already.
 
 ### 8.3 The gastown backend (opt-in)
 
-When `tools.execution_substrate: gastown`, derrick:
+When `tools.substrate.backend: gastown`, derrick:
 
 - Skips creating `.derrick/derrick.db`.
-- The `bridge` step shells to `bd create` / `bd link` as the
-  existing tasks-to-beads.sh does today.
-- The `mayor` step shells to `gt prime --rig <name> --role mayor`.
+- The `bridge` step shells to `bd create` / `bd link` (gastown
+  creates beads; derrick's CLI still calls them tickets to the user).
+- The `foreman` step shells to `gt prime --rig <name> --role mayor`
+  (gastown spins up its mayor; derrick still calls it the foreman).
 - The observability surface (§5.5) reads from gastown CLIs
-  instead of SQLite.
+  instead of SQLite and translates terms inbound:
+  `bead → ticket`, `convoy → batch`, `polecat → hand`,
+  `mayor → foreman`, `rig → site`.
 - The mutation commands above proxy to `bd` / `gt`.
 
 The shim lives in `internal/substrate/gastown/`. The native
@@ -622,17 +662,17 @@ new package, not a rewrite.
 - **`solo`** — `execution_substrate: none`. Pipeline ends at
   `tasks.md`. The user works from the markdown.
 - **`copilot`** — substrate present (native by default), but no
-  mayor: tasks are dispatched directly to Copilot agents and
-  derrick polls completions inline.
-- **`crew`** — substrate present, mayor running, workers fanning
+  foreman loop: tickets are dispatched directly to Copilot agents
+  and derrick polls completions inline.
+- **`crew`** — substrate present, foreman running, hands fanning
   out. This is the dark-factory mode.
 
 ### 8.5 Copilot as a first-class runner
 
 (Unchanged from previous design — Copilot is still both a
-pipeline-step runner and the convoy executor in `mode: copilot`.
+pipeline-step runner and the batch executor in `mode: copilot`.
 The Copilot adapter `internal/copilot/` now sits *behind* the
-substrate interface in crew mode, called by the mayor.)
+substrate interface in crew mode, called by the foreman.)
 
 ### 8.6 Dolt awareness (gastown backend only)
 
@@ -669,11 +709,12 @@ re-send. Three layers, all written by derrick and namespaced
 **9.A.1 Init-time seeding.** `derrick init` writes into the user's
 auto-memory dir (`~/.claude/projects/.../memory/derrick/<rig>/`):
 
-- *project memory*: rig name, bead prefix, mode, primary language(s),
-  constitution path. One file each, one-line entries in `MEMORY.md`.
+- *project memory*: site name, ticket prefix, mode, primary
+  language(s), constitution path. One file each, one-line entries
+  in `MEMORY.md`.
 - *reference memory*: where specs/tasks/verdicts/logs live.
 - *feedback memory*: derrick's own guardrails ("never `gt dolt stop`",
-  "convoys never re-ordered after creation", "assay verdict is
+  "batches never re-ordered after creation", "assay verdict is
   binding unless `--no-assay`").
 
 **9.A.2 Per-run memory** (`.derrick/runs/<ts>/memory.md`). After
@@ -683,13 +724,13 @@ The next step reads this instead of replaying transcripts.
 
 **9.A.3 Per-feature memory** (`.derrick/state.json` →
 `features.<slug>`). Persists across runs of the same feature: the
-spec dir, the convoy id, the last assay verdict, open polecat
+spec dir, the batch id, the last assay verdict, open hand
 assignments. `--resume-from` reads this. When a feature ships and
-its convoy closes, derrick auto-prunes the entry.
+its batch closes, derrick auto-prunes the entry.
 
-**9.A.4 Cross-feature lessons.** Once a convoy closes, derrick
+**9.A.4 Cross-feature lessons.** Once a batch closes, derrick
 extracts non-obvious lessons (constitution amendments touched,
-assay rejections by reason, polecat orphan count) into
+assay rejections by reason, orphan ticket count) into
 `.derrick/lessons.md`. Future `plan` and `assay` steps get this
 appended as low-priority context. It's the only memory layer that
 grows over time, and it's pruned via `derrick memory prune
@@ -753,18 +794,18 @@ The pipeline has a sequential spine (`specify → plan → assay →
 tasks`), but everything *around* and *after* it is parallel by
 default. Derrick treats serial work as a justified exception.
 
-**9.C.1 Convoy fan-out.** Independent beads in a convoy run
-concurrently. The substrate's mayor (native in-process loop, or
-gastown's `gt prime`) walks ready beads and dispatches them to
-workers, serialising only across explicit `blocks` dependencies.
-Default concurrency is `min(8, len(ready_beads))`; configurable
-in `derrick.yaml`:
+**9.C.1 Batch fan-out.** Independent tickets in a batch run
+concurrently. The substrate's foreman (native in-process loop,
+or gastown's `gt prime` behind the shim) walks ready tickets and
+dispatches them to hands, serialising only across explicit
+`blocks` dependencies. Default concurrency is
+`min(8, len(ready_tickets))`; configurable in `derrick.yaml`:
 
 ```yaml
 parallelism:
-  convoy_max: 8        # max polecats / copilot agents in flight
-  step_max:   4        # max parallel sub-tasks within one step
-  assay_max:  2        # max concurrent reviewers in multi-reviewer assay
+  batch_max: 8         # max hands / copilot agents in flight
+  step_max:  4         # max parallel sub-tasks within one step
+  assay_max: 2         # max concurrent reviewers in multi-reviewer assay
 ```
 
 **9.C.2 Multi-reviewer assay.** `tools.assay.reviewers` accepts a
@@ -797,8 +838,8 @@ completion or after `state.lock_ttl`.
 
 **9.C.6 What isn't parallel** (by design): the sequential spine
 above; assay rounds within a single reviewer (round N reads round
-N-1's rebuttal); `bridge → mayor` handoff (mayor depends on
-beads existing). Documented so users don't expect a free win there.
+N-1's rebuttal); `bridge → foreman` handoff (foreman depends on
+tickets existing). Documented so users don't expect a free win there.
 
 **9.C.7 Failure isolation.** When one parallel branch fails,
 others complete cleanly. Derrick reports per-branch exit codes in
@@ -814,7 +855,7 @@ The three pillars sit behind a single dashboard:
 $ derrick gain --pillars
 memory       seeded 14 entries  •  per-turn save ~3.2k tokens
 tokens       this week: 412k raw → 54k actual  (-87%)
-parallelism  avg 4.1 polecats in flight, peak 7  •  zero lock conflicts
+parallelism  avg 4.1 hands in flight, peak 7  •  zero lock conflicts
 ```
 
 ---
@@ -825,7 +866,7 @@ Per-repo derrick state lives in `.derrick/`:
 
 ```
 .derrick/
-  state.json            # last run id, last feature_dir, last convoy
+  state.json            # last run id, last feature_dir, last batch
   runs/
     20260517T091500Z/
       manifest.json     # pipeline, prompt, flags, exit codes per step
@@ -849,13 +890,14 @@ entry). `state.json` is gitignored too. The yaml is committed.
 
 - `derrick init`, `derrick run add-feature`, `derrick doctor`,
   `derrick config`.
-- Observability surface (§5.5): `derrick status`, `beads`, `bead`,
-  `convoy`, `mayor`, `mail`, `trail`, `polecats`, `orphans`, `runs`.
+- Observability surface (§5.5): `derrick status`, `tickets`,
+  `ticket`, `batch`, `foreman`, `activity`, `hands`, `orphans`,
+  `runs`.
 - Token tooling: `derrick scrub`, `derrick caveman`, `derrick gain`.
 - `/add-feature`, `/derrick-doctor`, `/derrick-resume`,
   `/derrick-status` slash commands.
 - Templates for `.specify/`, `.claude/`, `derrick.yaml`, constitution
-  stub, tasks-to-beads bridge.
+  stub, tasks-to-tickets bridge.
 - macOS + Linux install script. Binary published as GitHub release.
 
 **Later:**
@@ -866,7 +908,7 @@ entry). `state.json` is gitignored too. The yaml is committed.
 - `derrick observe` — full TUI built on top of the §5.5 read APIs.
 - Copilot Workspace HTTP API backend (replaces `gh copilot` CLI in
   `mode: copilot`).
-- Optional Slack feedback hook so polecat completions ping a channel.
+- Optional Slack feedback hook so hand completions ping a channel.
 
 ---
 
@@ -930,11 +972,11 @@ entry). `state.json` is gitignored too. The yaml is committed.
    `on_split: human` opt-in for solo mode.
 
 10. **Cross-feature lessons quality control** (§9.A.4). The lesson
-    extractor is itself an LLM call after each convoy closes. If
+    extractor is itself an LLM call after each batch closes. If
     its output is noisy, it pollutes future plans. Need a quality
     gate — probably "lesson must reference at least one specific
-    bead id or constitution section, else discard." Worth piloting
-    before turning on by default.
+    ticket id or constitution section, else discard." Worth
+    piloting before turning on by default.
 
 11. **Lock contention in multi-feature mode** (§9.C.5). The
     `SPECIFY_FEATURE_DIRECTORY` env var solves serial conflicts
@@ -955,10 +997,10 @@ entry). `state.json` is gitignored too. The yaml is committed.
 13. **Migration path between backends.** A user starts on native,
     hits a scale wall, wants gastown. Or vice-versa. v1 ships a
     `derrick migrate-backend --to gastown` (and `--to native`) that
-    exports beads/convoys/links from one and imports into the other.
-    Open question: do we attempt to preserve bead IDs across the
-    move, or accept ID rewrite with a `legacy_id` label?
-    Leaning: ID rewrite, document it loudly.
+    exports tickets/batches/links from one and imports into the
+    other. Open question: do we attempt to preserve ticket IDs
+    across the move, or accept ID rewrite with a `legacy_id`
+    label? Leaning: ID rewrite, document it loudly.
 
 ---
 
