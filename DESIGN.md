@@ -132,6 +132,7 @@ modules can be tested, profiled, and (later) ported in isolation.
 | Substrate trait | `crates/derrick-substrate` | One async trait (`Substrate`); a native impl, future impls slot in behind it |
 | Native substrate | `crates/derrick-substrate-native` | SQLite-backed execution substrate + in-process foreman |
 | Stack | `crates/derrick-stack` | PR stacking: trait + native / graphite / git-spice backends (see §8.5) |
+| TUI | `crates/derrick-tui` | `derrick observe` — ratatui-based interactive dashboard (see §5.7) |
 | Observe | `crates/derrick-observe` | Aggregated read-only view (talks to substrate trait) |
 | Config | `crates/derrick-config` | Load + validate `derrick.yaml` (serde) |
 | Repo templates | `templates/` | What `derrick init` copies in |
@@ -529,6 +530,90 @@ $ derrick init --import-tasks <file>    # seed the substrate with existing tasks
 
 The brownfield path is the default because most real repos are
 brownfield. Greenfield is the explicit opt-in.
+
+### 5.7 `derrick observe` — the TUI dashboard
+
+`derrick status` is a one-shot snapshot (`--watch` refreshes the
+whole screen). `derrick observe` is an interactive, persistent
+TUI you leave open in a tmux pane while work runs. Same data,
+much higher information density, and you can drill in without
+typing another command.
+
+Built on **ratatui** + **crossterm**. Lives in `crates/derrick-tui`.
+Reads exclusively through the `Substrate` trait and the local run
+manifests — no mutations from the TUI in v1, so a runaway TUI
+can't damage state.
+
+#### Layout
+
+```
+┌── derrick · site: taxi-ingest · mode: crew · backend: native ────────── 09:47 ─┐
+│  [1] Overview   [2] Tickets   [3] Stack   [4] Activity   [5] Tokens   [6] Memory │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  Active batch  001-webhook-ingest                                                │
+│  ▰▰▰▰▰▱▱▱▱▱▱   3 / 11 done · 2 in-flight · 6 ready · 0 blocked                  │
+│  Foreman       running (pid 28411, 14m)         escalations: 0                  │
+│  Stack         native  ● 3 merged · 2 open · 6 pending     restack: ok           │
+│  Last assay    accept (round 2) · codex/gpt-5 · 09:18                            │
+│  Tokens today  raw 312k → actual 41k  (-87%)                                     │
+│                                                                                  │
+│  In flight:                                                                      │
+│    ti-50  ▸ hand:bramble    storage layer with idempotent dedupe        12m04s  │
+│    ti-51  ▸ hand:sumac      replay-safe migration                        4m12s  │
+│  Ready next:                                                                     │
+│    ti-52    handler wiring                              blocked by ti-50         │
+│    ti-53    contract test for /ingest                   blocked by ti-50,51      │
+├──────────────────────────────────────────────────────────────────────────────────┤
+│  q quit   r refresh   ↑↓ nav   ⏎ open   / search   ? help                        │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Tabs
+
+1. **Overview** — the screen above. The 09:30-standup view.
+2. **Tickets** — a sortable, filterable table. Filters mirror the
+   CLI (`ready | in-flight | blocked | done | mine`). `⏎`
+   opens a ticket detail pane (body, blockers, hand history, PR
+   link, recent comments).
+3. **Stack** — current PR graph as an ASCII tree. Shows merge
+   state per PR; flags `restack-conflict` tickets in red.
+   `⏎` on a node opens the PR URL in the user's browser.
+4. **Activity** — live tail of the event log
+   (substrate `events` table). Filter by ticket, hand, run id.
+5. **Tokens** — `derrick gain --pillars` rendered live. Per-step
+   cost, model-tier breakdown, savings attribution to each of
+   §9.B's seven knobs.
+6. **Memory** — current site's memory entries (project /
+   reference / feedback / lessons). Lets the user spot stale or
+   wrong entries; `d` flags one for deletion (writes to a queue,
+   not applied until the user runs `derrick memory prune`).
+
+#### Live updates
+
+Two mechanisms, both running:
+
+- **File watcher** (notify crate) on `.derrick/derrick.db`,
+  `.derrick/runs/`, `.derrick/foreman.pid`. Fires the moment
+  anything changes.
+- **Tick timer** (1s) as a fallback for things the watcher
+  doesn't surface (e.g. age counters in the in-flight pane,
+  remote PR state freshness).
+
+Refresh is incremental — only the affected pane redraws, not the
+whole screen. Important for long-running tmux sessions.
+
+#### Invocation
+
+```
+$ derrick observe                       # default: opens on Overview tab
+$ derrick observe --tab stack           # jump straight to a tab
+$ derrick observe --site <name>         # in case the user runs from outside the repo
+$ derrick observe --read-only           # belt-and-braces; refuses any future write features
+```
+
+The TUI is the *only* path that ever shows multi-tab live data
+in one place. `derrick status --watch` remains the headless
+equivalent for tmux purists and CI logs.
 
 ---
 
@@ -1276,6 +1361,9 @@ entry). `state.json` is gitignored too. The yaml is committed.
 - PR stacking: `derrick stack` / `derrick stack restack` /
   `derrick stack submit`; native backend default, graphite and
   git-spice adapters detected and offered at init time.
+- TUI dashboard: `derrick observe` (ratatui), six tabs covering
+  Overview / Tickets / Stack / Activity / Tokens / Memory.
+  Live-updating via filesystem watcher + 1s tick.
 - `/add-feature`, `/derrick-doctor`, `/derrick-resume`,
   `/derrick-status` slash commands.
 - Codex CLI wrapper config: derrick writes a `.codex/instructions.md`
@@ -1296,7 +1384,8 @@ entry). `state.json` is gitignored too. The yaml is committed.
 - Homebrew formula and a Windows build.
 - `derrick run <custom-pipeline>` for repos that want flows beyond
   add-feature (e.g. "hotfix", "spike", "refactor").
-- `derrick observe` — full TUI built on top of the §5.5 read APIs.
+- `derrick observe` mutation features (claim/close from inside
+  the TUI; v1 is read-only).
 - Evaluate `@github/copilot-sdk` for in-process Copilot dispatch
   (potential replacement for the `copilot` CLI backend).
 - Optional Slack feedback hook so hand completions ping a channel.
@@ -1329,6 +1418,7 @@ links back to the section where it lives.
 | D15 | **Role/host validation**: `derrick models check` subcommand for explicit verification; warnings (not errors) emitted at `derrick init` and `derrick run` so issues surface early. | §6.5 |
 | D16 | **v1 install surface (beyond CLI + plugin)**: shell completions (clap_complete: bash/zsh/fish), VS Code + JetBrains editor configs in templates (opt-in), `.codex/instructions.md` wrapper config written during init so codex sees the constitution, `derrick uninstall` to cleanly reverse init. | §11 |
 | D17 | **PR stacking ships in v1** as a first-class concern. Default backend `native` (plain git + `gh pr create`). Graphite and git-spice adapters auto-detected at init. Foreman restacks dependents on merge using `--force-with-lease`. | §8.5 |
+| D18 | **TUI dashboard ships in v1** as `derrick observe`. ratatui + crossterm, six tabs, read-only, live-updates via filesystem watcher + 1s tick. Mutation features are explicitly out of scope for v1. | §5.7 |
 
 ### Remaining open questions
 
