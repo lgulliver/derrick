@@ -49,6 +49,11 @@ every crate in the workspace.
 - Every new public function gets at least one test before merge.
 - Every bug fix gets a regression test that fails before the fix
   and passes after.
+- **No skeleton-only commits.** Any executable Rust added in a
+  commit must come with the tests that keep the workspace at
+  ≥80% line coverage. Pure-documentation stubs (`//! crate-doc`
+  only) are fine; a `fn main() { println!(...) }` is not. See
+  CONTRIBUTING.md "Coverage" for the policy.
 - Test naming: `<module>::<scenario>_<expected>` (e.g.
   `foreman::ready_with_blocker_does_not_dispatch`). Read like
   sentences.

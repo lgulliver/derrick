@@ -88,6 +88,22 @@ contract is the same.
 - Coverage is a floor, not a ceiling. Critical paths (substrate,
   foreman, stack restack) should be closer to 100%.
 
+**No skeleton-only commits.** Any commit that adds executable
+Rust code (functions with bodies, not just module-level
+docstrings or `pub use` re-exports) must also add the tests
+that keep the workspace above 80%. Pure-documentation stubs
+(`//! crate-doc` and nothing else) are fine because llvm-cov
+records 0/0 lines for them. A `fn main() { println!(...) }`
+is **not** a documentation stub — it has executable lines and
+needs at least one integration test exercising the binary.
+
+If you genuinely need to land a non-trivial skeleton before
+its tests are ready (rare), open a draft PR and surface the
+gap to the orchestrator; we'll either pair-write the tests or
+mark the skeleton with `#[cfg(any())]` to make it unreachable
+until tests catch up. Bypassing the gate via `--no-verify` or
+similar is not acceptable.
+
 ## Decision log process
 
 Architectural decisions are recorded in DESIGN.md §12 as
