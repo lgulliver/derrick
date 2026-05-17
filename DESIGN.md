@@ -1044,18 +1044,23 @@ adapters in `crates/derrick-stack/src/backends/`.
 1. Before dispatching a ticket to a hand, the foreman computes
    its parent branch from the substrate (the most-recent
    `blocks` predecessor's branch, or `main` if root).
-2. The hand is told to create its branch *off the parent*, not
-   off `main`. For Copilot agents this is part of the dispatch
-   payload; for `claude` hands it's printed in the queue file.
+2. For `native` and `copilot` hands, derrick creates the branch
+   off the parent itself and tells the hand to push to it (D20).
+   For `human` hands, the hand creates its own branch and
+   derrick rebases it after if needed.
 3. When the hand opens a PR, derrick adds the PR URL to the
    ticket via the substrate.
 4. When a PR merges, derrick walks the dependent tickets and
    asks the backend to restack them (`git rebase --onto` for
    native; `gt restack` for graphite). Force-push uses
    `--force-with-lease`.
-5. If a restack fails (merge conflict), the ticket is moved to
-   `blocked` with a `restack-conflict` label and a human is
-   notified via the activity log.
+5. If a restack fails (merge conflict), derrick bails immediately
+   (D19): the ticket moves to `blocked` with a `restack-conflict`
+   label, and the activity log records the exact `git rebase
+   --onto <parent> <old-base> <branch>` recipe so the human can
+   resolve and resume. No auto three-way-merge attempts —
+   force-pushed half-resolved branches are worse than blocked
+   ones.
 
 #### `derrick stack` subcommand
 
@@ -1078,8 +1083,8 @@ tools:
       branch_pattern: "derrick/{{batch}}/{{ticket_id}}"
       auto_restack_on_merge: true
       force_push: with-lease     # with-lease | off
-      open_pr: true              # foreman opens PRs as hands push branches
-      draft: false               # open as draft PRs by default
+      auto_pr: false             # D22: default off. `--auto-pr` flag overrides per run.
+      draft: false               # open as draft PRs when auto_pr fires
 ```
 
 #### Brownfield detection
@@ -1089,6 +1094,19 @@ tools:
 the generated `derrick.yaml` so the user keeps their existing
 stack tooling. Same idea for git-spice. Otherwise it proposes
 `backend: native`.
+
+#### Squash-merge warning (D21)
+
+Stacked PRs break under squash-merge: the squash rewrites the
+parent SHA, so children no longer rebase cleanly. `derrick doctor`
+detects the repo's default merge strategy (via `gh api
+repos/{owner}/{name}` → `allow_squash_merge` /
+`allow_merge_commit` / `allow_rebase_merge`) and emits a warning
+if squash is the only or default option while stacking is enabled.
+We do **not** refuse to run — that would lock derrick out of too
+many repos — but we make the trade-off visible. The
+recommendation is to enable merge-commit or rebase-merge for
+derrick-managed PRs.
 
 ### 8.6 Extension point: adding more backends later
 
@@ -1375,9 +1393,13 @@ entry). `state.json` is gitignored too. The yaml is committed.
 - Templates for `.specify/`, `.claude/`, `derrick.yaml`,
   tasks-to-tickets bridge.
 - Marketplace JSON published at `derrick.dev/marketplace.json` for
-  one-line plugin install; GitHub release artefacts as the fallback
-  for manual install.
-- macOS + Linux install script. Binary published as GitHub release.
+  one-line plugin install; install script health-checks with 2s
+  timeout and falls through to GitHub release artefacts silently
+  (D24).
+- Install paths (D26): `curl | bash` primary, `cargo install derrick`
+  for Rust-native users, Homebrew tap for macOS. All three resolve
+  to the same GitHub release artefact.
+- macOS + Linux supported in v1; Windows in v1.1.
 
 **Later:**
 
@@ -1419,57 +1441,23 @@ links back to the section where it lives.
 | D16 | **v1 install surface (beyond CLI + plugin)**: shell completions (clap_complete: bash/zsh/fish), VS Code + JetBrains editor configs in templates (opt-in), `.codex/instructions.md` wrapper config written during init so codex sees the constitution, `derrick uninstall` to cleanly reverse init. | §11 |
 | D17 | **PR stacking ships in v1** as a first-class concern. Default backend `native` (plain git + `gh pr create`). Graphite and git-spice adapters auto-detected at init. Foreman restacks dependents on merge using `--force-with-lease`. | §8.5 |
 | D18 | **TUI dashboard ships in v1** as `derrick observe`. ratatui + crossterm, six tabs, read-only, live-updates via filesystem watcher + 1s tick. Mutation features are explicitly out of scope for v1. | §5.7 |
+| D19 | **Restack conflict policy**: bail immediately, surface the exact `git rebase --onto` recipe to the activity log, mark the ticket `blocked` with `restack-conflict`. No auto three-way-merge attempts (they produce subtly-wrong force-pushed history). | §8.5 |
+| D20 | **Branch ownership when stacking**: derrick creates the branch off the computed parent for `native` and `copilot` hands. Human hands create their own branches; derrick rebases them after if needed. | §8.5 |
+| D21 | **Squash-merge stance**: derrick *does not* refuse to run against squash-default repos, but `derrick doctor` warns and recommends switching repo merge strategy to merge-commit or rebase-merge for derrick-managed stacks. | §8.5 |
+| D22 | **Auto-PR on run completion**: ship `derrick run --auto-pr` (and `auto_pr: true` in derrick.yaml), default off. Opt-in respects existing review workflows. | §8.5 |
+| D23 | **Brownfield lessons gap**: when a constitution doesn't yet exist (D2/D3 flow), the lessons file stays empty rather than relaxing the quality gate. Users notice the gap and are nudged to author a constitution via speckit. | §9.A.4 |
+| D24 | **Marketplace install fallback**: install script health-checks `derrick.dev/marketplace.json` with a 2s timeout and falls through silently to GitHub release artefacts. User sees a successful install either way. | §11 |
+| D25 | **Foreman exit mode**: `derrick run` detaches the foreman to `.derrick/foreman.pid` and returns; a watch hint is printed (`derrick observe` or `derrick status --watch`). `--attach` for foreground for users who want it. | §8.2 |
+| D26 | **Install paths**: ship three. `curl | bash` (primary, one-line install), `cargo install derrick` (Rust-native), and a Homebrew tap (macOS native). All three resolve to the same release artefact. | §11 |
 
 ### Remaining open questions
 
-Genuinely undecided, listed for explicit attention before or
-during implementation:
+None blocking. All v1 design questions resolved (D1–D26).
 
-1. **Worktree merge UX.** D10 leaves each successful run on a
-   branch for the user to merge or PR. Do we *also* offer
-   `derrick run --auto-pr` (open a PR via `gh pr create` at the
-   end of a successful run) as a convenience, or is that out of
-   scope for v1? Leaning: ship it, default off.
-
-2. **Lessons writeback for brownfield.** D9's quality gate
-   requires references to ticket ids or constitution sections.
-   In a brownfield repo with no constitution authored yet
-   (D2/D3 flow), the gate will reject almost every lesson. Do
-   we relax the gate until a constitution exists, or just
-   accept that lessons start empty? Leaning: accept empty.
-
-3. **Marketplace dependency in install script.** D1's primary
-   path is the marketplace JSON. If `derrick.dev` is down at
-   install time we fall back to GitHub releases — but the
-   install script needs to detect that. Health-check the
-   marketplace URL with a 2s timeout, then fall through. Worth
-   confirming this is acceptable before we hard-wire it.
-
-4. **Restack on conflict policy** (§8.5). When a parent PR
-   lands and a dependent fails to rebase cleanly, derrick
-   marks the ticket `blocked` with a `restack-conflict` label.
-   Question: do we *also* attempt an automated three-way merge
-   first, falling back to manual only on a real conflict, or
-   bail immediately to the human? Auto-merge feels nice but
-   force-pushed half-resolved branches are worse than blocked
-   ones. Leaning: bail immediately, surface the recipe.
-
-5. **Hands and stacks: who creates the branch?** (§8.5)
-   Two options: (a) derrick creates the branch off the
-   computed parent and tells the hand to push to it, or (b)
-   the hand creates the branch and derrick rebases it after.
-   (a) is cleaner but couples hands tightly to derrick's
-   branch naming. (b) is loose but means more restack work.
-   Leaning: (a) for native and Copilot, (b) for human hands.
-
-6. **Squash vs. merge on stacked PRs.** Stacks work poorly
-   with squash-merge because the squash rewrites SHAs that
-   children depend on. Graphite has its own answer; native
-   backend doesn't, and many GitHub repos default to squash.
-   v1 should probably enforce "merge commit" or "rebase
-   merge" for derrick-managed stacks and warn at `derrick
-   doctor` if the repo's default merge strategy is squash.
-   Worth confirming.
+New questions raised during implementation will be tracked as
+GitHub issues with the `design-question` label, and locked-in
+answers folded back into this file as further `D` entries with
+a section back-reference.
 
 ---
 
