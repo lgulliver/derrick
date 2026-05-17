@@ -38,18 +38,36 @@ We want: **any user, any repo, single command, `/add-feature` UX.**
 
 ### Goals
 
-- **One-line install**: `curl -fsSL <url> | bash` puts the `derrick` binary
-  and Claude Code plugin on the user's machine and verifies the deps.
+Three architectural pillars (see §9):
+
+- **Memory** — derrick seeds and curates persistent memory so the
+  assistant doesn't relearn the rig every turn.
+- **Tokens** — every byte across a model boundary earns its place,
+  via tiering, scrubbing, caveman compression, prompt caching, and
+  lazy artifact loading.
+- **Parallelism** — independent work runs concurrently by default;
+  sequential work is a justified exception.
+
+Plus the product surface:
+
+- **One-line install**: `curl -fsSL <url> | bash` puts the `derrick`
+  binary and Claude Code plugin on the user's machine and verifies
+  the deps.
 - **One-line init**: `derrick init` in a repo writes the config, the
-  templates, the hooks, the constitution skeleton, and registers the rig
-  with gastown.
-- **One primary command**: `/add-feature <prompt>` runs the full dark
-  factory pipeline — spec → courtroom → plan → tasks → convoy → mayor.
-- **Reusable**: nothing in derrick assumes blacksmith. Project-specific
-  rules live in the repo's constitution + `derrick.yaml`, not in derrick.
-- **Transparent**: every underlying tool call is logged and exit codes
-  propagate. Nothing is magic. Power users can still call `gt`, `bd`,
-  `claude /speckit.specify` directly.
+  templates, the hooks, the constitution skeleton, and registers the
+  rig with gastown.
+- **One primary command**: `/add-feature <prompt>` runs the full
+  dark factory pipeline — spec → assay → plan → tasks → convoy →
+  mayor / Copilot agents.
+- **One front door for observability**: `derrick status` is the
+  answer to "what's going on?" — never `gt status` + `bd query` +
+  `gt mail` separately.
+- **Reusable**: nothing in derrick assumes blacksmith. Project-
+  specific rules live in the repo's constitution + `derrick.yaml`,
+  not in derrick.
+- **Transparent**: every underlying tool call is logged and exit
+  codes propagate. Nothing is magic. Power users can still call
+  `gt`, `bd`, `claude /speckit.specify` directly.
 
 ### Non-goals (v1)
 
@@ -192,10 +210,17 @@ guardrails:
   forbid_paths: []         # paths that may not be touched by a feature
   required_labels: []      # labels every bead must carry
 
+# Parallelism budgets (see §9.C)
+parallelism:
+  convoy_max: 8        # max polecats / copilot agents in flight at once
+  step_max:   4        # max parallel sub-tasks within one pipeline step
+  assay_max:  2        # max concurrent reviewers in multi-reviewer assay
+
 # Where derrick writes its own state inside the repo
 state:
   dir: .derrick
   log_runs: true
+  lock_ttl: 1h         # multi-feature lock TTL (§9.C.5)
 ```
 
 Resolution rules:
@@ -574,14 +599,60 @@ Gastown's data plane is Dolt. Derrick:
 
 ---
 
-## 9. Token efficiency by design
+## 9. The three pillars: memory, tokens, parallelism
 
-Derrick will be used many times per repo per week. Per-run token cost
-matters. Four levers, all on by default:
+Derrick is architected around three load-bearing properties. Every
+design decision is checked against them. If a feature can't be made
+memory-aware, token-efficient, and parallel-safe, we don't ship it.
 
-### 9.1 Model tiering
+> **Memory** — the assistant doesn't relearn the rig every turn.
+> **Tokens** — every byte that crosses a model boundary earned its place.
+> **Parallelism** — independent work runs concurrently, by default.
 
-The pipeline assigns models per step (already shown in §4):
+### 9.A — Memory
+
+Memory turns repeated facts into context derrick doesn't have to
+re-send. Three layers, all written by derrick and namespaced
+`derrick/<rig-name>/...` so multi-repo machines stay tidy.
+
+**9.A.1 Init-time seeding.** `derrick init` writes into the user's
+auto-memory dir (`~/.claude/projects/.../memory/derrick/<rig>/`):
+
+- *project memory*: rig name, bead prefix, mode, primary language(s),
+  constitution path. One file each, one-line entries in `MEMORY.md`.
+- *reference memory*: where specs/tasks/verdicts/logs live.
+- *feedback memory*: derrick's own guardrails ("never `gt dolt stop`",
+  "convoys never re-ordered after creation", "assay verdict is
+  binding unless `--no-assay`").
+
+**9.A.2 Per-run memory** (`.derrick/runs/<ts>/memory.md`). After
+every pipeline step derrick appends a one-line digest:
+*"plan: 11 tasks, opus, 41.8s; revised once after assay → accept."*
+The next step reads this instead of replaying transcripts.
+
+**9.A.3 Per-feature memory** (`.derrick/state.json` →
+`features.<slug>`). Persists across runs of the same feature: the
+spec dir, the convoy id, the last assay verdict, open polecat
+assignments. `--resume-from` reads this. When a feature ships and
+its convoy closes, derrick auto-prunes the entry.
+
+**9.A.4 Cross-feature lessons.** Once a convoy closes, derrick
+extracts non-obvious lessons (constitution amendments touched,
+assay rejections by reason, polecat orphan count) into
+`.derrick/lessons.md`. Future `plan` and `assay` steps get this
+appended as low-priority context. It's the only memory layer that
+grows over time, and it's pruned via `derrick memory prune
+--older-than 90d`.
+
+**9.A.5 Lifecycle.** `derrick memory list | show | prune | unmemoize`.
+Unmemoize removes everything under `derrick/<rig>/` for clean
+uninstall.
+
+### 9.B — Tokens
+
+Every byte across a model boundary earns its place. Seven knobs:
+
+**9.B.1 Model tiering** (per step, overridable in `derrick.yaml`):
 
 | Step | Model | Why |
 |---|---|---|
@@ -589,108 +660,111 @@ The pipeline assigns models per step (already shown in §4):
 | `plan`, `analyze` | opus | Genuinely hard reasoning |
 | `assay` | codex (gpt-5) | Adversarial, different family |
 | `bridge`, `mayor` | n/a | Subprocess |
-| `dispatch-copilot`, `runner: copilot` steps | Copilot model | Mechanical execution at Copilot rates, not Claude rates |
+| `dispatch-copilot`, `runner: copilot` | Copilot model | Mechanical at Copilot rates |
 
-Anyone can override in `derrick.yaml`. Default biases toward the
-cheapest model that still does the job.
+**9.B.2 Scrubber (derrick-native, §3.1).** Per-tool output filters
+strip CLI noise before the next step sees it. `derrick scrub <cmd>`
+for ad-hoc use; auto-applied to every subprocess. Target 60–90%
+reduction on subprocess noise. Rules per tool in
+`internal/scrub/rules/<tool>.go`. `--raw` opts out.
 
-### 9.2 Scrubber — derrick-native subprocess filter
+**9.B.3 Caveman (derrick-native, §3.1).** Pure-Go text compressor
+with three intensity levels (`lite | full | ultra`). Auto-applied
+to inter-step handoff: full log to disk, compressed summary into
+the next prompt. Identifiers, paths, error messages preserved
+verbatim. Byte-identical to the caveman skill at matched intensities.
 
-Inspired by the external RTK proxy, but **shipped inside the
-derrick binary** so there's no external dependency to install,
-version, or fight a name collision with (`rtk` is also "Rust Type
-Kit" elsewhere on npm). Same idea, our code, our rules.
+**9.B.4 Prompt caching.** Constitution + `derrick.yaml` + memory
+seeds are stable across every step in a run. They go into the
+cached portion of every Claude prompt so we pay the input cost once
+per session, not per step. (Anthropic API: `cache_control:
+ephemeral` on the system block.) Estimated save: 30–50% of input
+tokens on multi-step runs.
 
-- Every subprocess derrick invokes (`gt`, `bd`, `git`, `claude`,
-  `codex`, `gh`) is wrapped through `internal/scrub`. The user sees
-  what they'd see anyway; the *next pipeline step* sees a filtered
-  stream.
-- Filter rules are tool-specific and live in
-  `internal/scrub/rules/<tool>.go` — e.g. strip progress spinners
-  from `gh`, collapse `git status` short-mode noise, fold
-  `bd list` output to id+title only.
-- Exposed as a subcommand for ad-hoc use:
+**9.B.5 Lazy artifact loading.** A step only sees the artifacts it
+declares it needs (`inputs:` in the pipeline yaml). `analyze`
+doesn't get the full `contracts/` dir if it didn't ask for it.
+Default `inputs:` per step are minimal and grow only on demand.
 
-  ```
-  $ derrick scrub gt status --rig taxi-ingest
-  ```
+**9.B.6 Assay context discipline.** The codex brief is capped at 2k
+tokens of context excluding artifact bodies. If artifacts overflow,
+caveman pre-compresses and the verdict notes the compression.
 
-  Mirrors the RTK UX so muscle memory transfers. Output is also
-  fully accessible un-scrubbed via `--raw`.
-- `derrick gain` is the analytics command (clone of `rtk gain`).
-- Compatibility: if the user *also* has RTK installed and prefers
-  it, `tools.scrub.delegate_to: rtk` makes derrick shell out to RTK
-  instead of using its built-in. Default is built-in.
+**9.B.7 Telemetry.** `derrick run --tokens` prints per-step token
+estimate after the run. `derrick gain` shows aggregate savings:
+raw estimate, what scrubber/caveman/tiering/caching/memory each
+saved, actual usage. This is the feedback loop that keeps the
+other six knobs honest.
 
-Target savings: 60–90% on subprocess noise, matching RTK's
-published numbers. The rules file is the load-bearing artifact;
-we'll port the public RTK ruleset for the tools we use first,
-extend later.
+### 9.C — Parallelism
 
-### 9.3 Caveman — derrick-native text compressor
+The pipeline has a sequential spine (`specify → plan → assay →
+tasks`), but everything *around* and *after* it is parallel by
+default. Derrick treats serial work as a justified exception.
 
-Same logic. The caveman *skill* compresses text by ~75% by
-applying a shaping ruleset (drop articles, collapse boilerplate,
-shorten common phrases, preserve identifiers and code spans
-verbatim). We ship the same ruleset in Go inside
-`internal/caveman`, with intensity levels matching the skill
-(`lite`, `full`, `ultra`).
+**9.C.1 Convoy fan-out.** Independent beads in a convoy run
+concurrently. In `mode: crew` this is gastown's mayor doing the
+sling; in `mode: copilot` derrick does it directly, firing one
+Copilot agent per independent task and serialising only across
+explicit `blocks` dependencies. Default concurrency is
+`min(8, len(ready_beads))`; configurable in `derrick.yaml`:
 
-- Auto-applied between pipeline steps: full log to disk at
-  `.derrick/runs/<ts>/step-N.log`; caveman-compressed summary at
-  `step-N.summary.md`; next step's prompt context only sees the
-  summary.
-- Identifiers, paths, error messages, file/line refs are
-  **preserved verbatim** — caveman shape only flattens prose.
-- Exposed as a subcommand:
+```yaml
+parallelism:
+  convoy_max: 8        # max polecats / copilot agents in flight
+  step_max:   4        # max parallel sub-tasks within one step
+  assay_max:  2        # max concurrent reviewers in multi-reviewer assay
+```
 
-  ```
-  $ derrick caveman --intensity lite path/to/file.md
-  ```
+**9.C.2 Multi-reviewer assay.** `tools.assay.reviewers` accepts a
+list. If two are configured (e.g. `[codex, gemini]`), they run in
+parallel against the same brief. Derrick reconciles: unanimous
+accept → accept; any reject → reject; split → user-decides or
+re-plan, per `on_split:`. Cost is one extra reviewer call;
+benefit is meaningfully harder-to-game adversarial review.
 
-- Skill compatibility: if the user invokes `/caveman` manually in
-  their Claude session, our shaping is byte-identical to the
-  installed skill at the same intensity. Goal: drop-in. If we drift
-  it's a bug.
+**9.C.3 Concurrent observability reads.** `derrick status`
+aggregates from `gt status`, `bd query`, `gt dolt status`, and the
+local manifest — all fired in parallel. The whole dashboard
+returns in the slowest read, not the sum.
 
-Why ship our own instead of calling the skill via `claude`? Cost
-and latency. Compressing inter-step output by recursively invoking
-Claude is the worst possible trade. Pure-Go shaping is free and
-synchronous.
+**9.C.4 Parallel pipeline steps.** Steps with no data dependency
+on each other can be marked `parallel_group: <name>` in the yaml
+and derrick will fan them out. v1 ships this for `analyze` and any
+side-channel checks the user adds (lint, type-check, schema
+validation). v1 does **not** parallelise `specify → plan → assay
+→ tasks` — that chain stays sequential because each consumes the
+previous.
 
-### 9.4 Agent memory seeding
+**9.C.5 Multi-feature parallelism.** Two `/add-feature`
+invocations against the same repo, at the same time, must not
+clobber each other's `.specify/feature.json`. Each derrick run
+gets a private feature_dir lock (`.derrick/locks/<run-id>`) and
+passes `SPECIFY_FEATURE_DIRECTORY` to every sub-claude call,
+mirroring the flight.sh fix. The lock auto-expires on run
+completion or after `state.lock_ttl`.
 
-Claude's auto-memory system (`~/.claude/projects/.../memory/`) is the
-right place for facts that would otherwise eat context every turn.
-`derrick init` seeds:
+**9.C.6 What isn't parallel** (by design): the sequential spine
+above; assay rounds within a single reviewer (round N reads round
+N-1's rebuttal); `bridge → mayor` handoff (mayor depends on
+beads existing). Documented so users don't expect a free win there.
 
-- **project memory**: rig name, bead prefix, constitution path,
-  gastown mode, primary language(s). One file each, ≤150 chars in
-  `MEMORY.md` pointing at them.
-- **reference memory**: where `tasks.md` lives, where assay verdicts
-  land, where `gt status` is run.
-- **feedback memory**: derrick's own guardrails ("don't run `gt dolt
-  stop`", "use `bd q` not `bd create` when prefix is unknown").
+**9.C.7 Failure isolation.** When one parallel branch fails,
+others complete cleanly. Derrick reports per-branch exit codes in
+the run manifest. A reject from one reviewer doesn't kill the
+other reviewer's report — both end up in
+`<feature_dir>/assay/`.
 
-These are written to the *user's* memory directory, namespaced so
-they can be cleanly removed via `derrick init --unmemoize`. They
-shave the per-turn prompt size for the whole `/add-feature` flow.
+---
 
-### 9.5 Context discipline (assay specifically)
+The three pillars sit behind a single dashboard:
 
-Assay's brief is *deliberately* small: artifact files, not chat
-transcripts. The codex prompt template lives in
-`internal/assay/prompts/cross_examine.tmpl` and is budget-capped at
-2k tokens of context excluding the artifact bodies. If artifacts
-exceed budget, derrick chunk-summarises them with caveman first and
-notes that in the verdict.
-
-### 9.6 Observability
-
-`derrick run add-feature --tokens` prints a per-step token estimate
-after the run (input + output, by model). `derrick gain` (clone of
-RTK's analytics command shape) shows aggregate savings over time.
-This is the feedback loop that keeps the four levers honest.
+```
+$ derrick gain --pillars
+memory       seeded 14 entries  •  per-turn save ~3.2k tokens
+tokens       this week: 412k raw → 54k actual  (-87%)
+parallelism  avg 4.1 polecats in flight, peak 7  •  zero lock conflicts
+```
 
 ---
 
@@ -796,6 +870,27 @@ entry). `state.json` is gitignored too. The yaml is committed.
    v1.1, or ship a CLI-only v1 with documented limits? Leaning: ship
    CLI-only v1 with `--serialise` default = true so it's predictable,
    document the upgrade path.
+
+9. **Multi-reviewer assay split-verdict policy** (§9.C.2). If two
+   reviewers disagree (codex: accept, gemini: reject), the safe
+   default is fail-closed (=reject). But that gives veto power to
+   the more pessimistic model. Alternative: `on_split: human`
+   prompts the user. Leaning: `on_split: reject` default,
+   `on_split: human` opt-in for solo mode.
+
+10. **Cross-feature lessons quality control** (§9.A.4). The lesson
+    extractor is itself an LLM call after each convoy closes. If
+    its output is noisy, it pollutes future plans. Need a quality
+    gate — probably "lesson must reference at least one specific
+    bead id or constitution section, else discard." Worth piloting
+    before turning on by default.
+
+11. **Lock contention in multi-feature mode** (§9.C.5). The
+    `SPECIFY_FEATURE_DIRECTORY` env var solves serial conflicts
+    but the underlying speckit may still write shared state we
+    haven't audited. v1 should ship with a loud warning if two
+    `derrick run`s overlap, and only relax to silent parallelism
+    once we've verified speckit is fully feature-dir-scoped.
 
 ---
 
