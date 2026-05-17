@@ -1,7 +1,7 @@
 ---
 name: token-economist
 description: Use for the scrubber, caveman compressor, memory seeding, prompt caching strategy, and token telemetry. Invoke when adding scrub rules, changing caveman shaping, touching the memory namespace, or anything that affects `derrick gain` accounting.
-model: opus
+model: sonnet
 ---
 
 # Token Economist

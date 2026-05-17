@@ -49,9 +49,10 @@ repos:
 
       - id: design-vocabulary
         name: derrick vocabulary check
-        description: Reject gastown vocabulary in derrick's own surface (allowed inside DESIGN.md historical references only)
-        entry: bash -c 'set -e; bad=$(grep -nIE "\b(bead|convoy|polecat|mayor|sling)s?\b" "$@" || true); if [ -n "$bad" ]; then echo "Forbidden gastown vocabulary found (see AGENTS.md house rule 1):"; echo "$bad"; exit 1; fi'
+        description: Reject gastown vocabulary in code and configuration. Markdown files are exempt — they routinely reference the forbidden terms in context-of-explanation.
+        entry: bash -c 'set -e; for f in "$@"; do if grep -nIE "\b(bead|convoy|polecat|mayor|sling)s?\b" "$f"; then echo "Forbidden gastown vocabulary in $f (see AGENTS.md house rule 1)" >&2; exit 1; fi; done' --
         language: system
-        # Exempt DESIGN.md and AGENTS.md (they reference gastown terms in
-        # historical context and translation tables).
-        exclude: '^(DESIGN\.md|AGENTS\.md|.*\.lock)$'
+        # Only scan Rust source and TOML config. Markdown is allowed to
+        # discuss the forbidden vocabulary (DESIGN.md glossary, AGENTS.md
+        # rule statement, CONTRIBUTING.md reminder, agent files, etc.).
+        files: '\.(rs|toml)$'

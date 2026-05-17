@@ -1,0 +1,15 @@
+# typos configuration for derrick.
+# https://github.com/crate-ci/typos
+
+[default.extend-words]
+# Real Rust crate name; not a typo of "ratatouille".
+ratatui = "ratatui"
+# Project's own vocabulary (a derrick is an oil-rig tower).
+derrick = "derrick"
+
+[files]
+extend-exclude = [
+    "target/",
+    "Cargo.lock",
+    ".derrick/",
+]

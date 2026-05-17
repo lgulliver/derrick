@@ -39,11 +39,30 @@ through `rust-architect`.
 
 Derrick is built using its own pattern. Three roles, three hosts:
 
-| Role | Host | What it does |
+| Role | Host | Model | What it does |
+|---|---|---|---|
+| **Orchestrator** | Claude (Claude Code main session) | **Haiku** | Reads designs, picks the specialist, decomposes work into tickets, dispatches to implementers, verifies results, runs tests, updates `DESIGN.md`. **Does not write production code itself.** Haiku is sufficient because orchestration is pattern-following; heavy thinking lives in the specialists (for design/planning) and in the reviewer/implementer roles (for code). |
+| **Reviewer** | Codex (`codex` CLI) | gpt-5 (codex default) | Adversarial pass on plans and PRs before merge. Different-family scrutiny per the assay pattern. May also implement assigned tickets when explicitly handed one. |
+| **Implementer** | GitHub Copilot (`copilot` CLI) | gpt-5-codex (copilot default) | Writes code for individual tickets. Lives at the leaf of the dispatch tree. |
+
+The nine specialist subagents under `.claude/agents/` each pin
+their own model in frontmatter according to the *work they do*,
+not according to who invokes them. The orchestrator (Haiku)
+spawns a specialist when it needs that specialist's level of
+reasoning — Haiku for pattern routing, Opus or Sonnet for the
+actual specialist work:
+
+| Specialist | Model | Why |
 |---|---|---|
-| **Orchestrator** | Claude (Claude Code) | Reads designs, picks the specialist, decomposes work into tickets, dispatches to implementers, verifies results, runs tests, updates `DESIGN.md`. **Does not write production code itself.** |
-| **Reviewer** | Codex (`codex` CLI) | Adversarial pass on plans and PRs before merge. Different-family scrutiny per the assay pattern. May also implement assigned tickets when explicitly handed one. |
-| **Implementer** | GitHub Copilot (`copilot` CLI) | Writes code for individual tickets. Lives at the leaf of the dispatch tree. |
+| `rust-architect` | Opus | Cross-crate trait/seam decisions; rare, high-consequence. |
+| `substrate-engineer` | Opus | Owns the load-bearing crate (schema, foreman, worktrees). |
+| `flow-engineer` | Opus | State-heavy pipeline + brownfield adoption logic. |
+| `integrations-engineer` | Opus | Many provider edge cases, auth, assay reconciliation. |
+| `git-stacker` | Opus | Destructive ops (rebase, force-push) — want it right. |
+| `token-economist` | Sonnet | Mechanical text shaping with strong tests; sonnet sufficient. |
+| `tui-engineer` | Sonnet | Iterative UI work; sonnet's the right cost/quality point. |
+| `test-engineer` | Sonnet | Pattern-heavy fixture and assertion work. |
+| `design-keeper` | Sonnet | Document maintenance; precise edits, not invention. |
 
 Practical contract:
 
@@ -104,7 +123,7 @@ Pick the right specialist before starting work:
 | Host CLI adapters, BYOM providers, agent rule respect | `integrations-engineer` | `derrick-tools`, `derrick-models`, `derrick-copilot` |
 | Scrubber, caveman, memory, telemetry, prompt caching | `token-economist` | `derrick-scrub`, `derrick-caveman`, `derrick-memory` |
 | PR stacking, branches, restack, gh/graphite/git-spice | `git-stacker` | `derrick-stack` |
-| ratatui dashboard, file watcher, terminal UX | `tui-engineer` | `derrick-tui` |
+| ratatouille dashboard, file watcher, terminal UX | `tui-engineer` | `derrick-tui` |
 | Assay logic, codex prompting, multi-reviewer reconciliation | `integrations-engineer` (assay role) | `derrick-assay` |
 | Tests, fixtures, integration harness | `test-engineer` | Test code anywhere |
 | DESIGN.md, decision log, open questions | `design-keeper` | `DESIGN.md` only |

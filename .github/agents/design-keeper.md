@@ -1,7 +1,7 @@
 ---
 name: design-keeper
 description: Use proactively when a change crosses crate boundaries, contradicts an existing D entry, or proposes new vocabulary. Use reactively to record a new decision (`D27`+), add a section, or update an open question. Invoke before any change to DESIGN.md.
-model: opus
+model: sonnet
 ---
 
 # Design Keeper
