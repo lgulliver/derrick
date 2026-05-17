@@ -1808,6 +1808,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Tests that mutate the process-global `HOME` env var must run
+    // serially. Cargo runs tests in parallel by default; on CI runners
+    // with more cores than dev machines, racing tests overwrite each
+    // other's HOME and the layered-config merge becomes nondeterministic.
+    // Acquire HOME_LOCK at the top of any test that calls
+    // `env::set_var("HOME", _)` or `env::remove_var("HOME")`.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_file(path: &Path, contents: &str) {
         fs::write(path, contents).unwrap_or_else(|error| {
@@ -2235,6 +2244,9 @@ state:
 
     #[test]
     fn config_load_layered_without_files_returns_defaults() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let old_home = env::var_os("HOME");
         env::remove_var("HOME");
         let repo = tempfile::tempdir().unwrap_or_else(|error| {
@@ -2253,6 +2265,9 @@ state:
 
     #[test]
     fn config_layered_load_overrides_correctly() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = tempfile::tempdir().unwrap_or_else(|error| {
             panic!("failed to create temp home: {error}");
         });
