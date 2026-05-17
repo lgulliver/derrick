@@ -124,7 +124,10 @@ Plus the product surface:
 | Scrubber | Go | `internal/scrub` | Derrick-native subprocess output filter (RTK-equivalent) |
 | Caveman | Go | `internal/caveman` | Derrick-native text compressor for inter-step handoff |
 | Copilot adapter | Go | `internal/copilot` | Dispatches steps or beads to Copilot agents (CLI + Workspace API) |
-| Observe | Go | `internal/observe` | Aggregated read-only view over gastown (rig, convoy, beads, mail, trail) |
+| Substrate iface | Go | `internal/substrate` | One interface (beads, links, convoys, workers); two backends |
+| Native substrate | Go | `internal/substrate/native` | SQLite-backed default execution substrate + in-process mayor |
+| Gastown shim | Go | `internal/substrate/gastown` | Backend that proxies to `gt`/`bd` for users who already run gastown |
+| Observe | Go | `internal/observe` | Aggregated read-only view (talks to substrate iface, not backends) |
 | Config | Go | `internal/config` | Load + validate `derrick.yaml` |
 | Repo templates | files | `templates/` | What `derrick init` copies in |
 | Plugin | md+sh | `templates/.claude/` | `/add-feature` command + skill |
@@ -155,7 +158,9 @@ rig:
 tools:
   speckit:   { enabled: true,  version: ">=0.4.0" }
   assay:     { enabled: true,  reviewer: codex, model: "gpt-5", rounds: 1, strict: false }
-  gastown:   { enabled: true,  mode: crew }   # solo | crew | copilot  (see §8)
+  substrate:
+    backend: native           # native (default) | gastown | none
+    mode: crew                # solo | copilot | crew     (see §8)
   copilot:
     enabled: true
     cli: "gh copilot"           # gh copilot CLI; Workspace API later
@@ -473,129 +478,175 @@ later — the adapter lives in `internal/assay/reviewers/<name>.go`.
 
 ### Boundaries with the *other* underlying tools
 
-We do **not** fork speckit or gastown. Derrick's contract:
+We do **not** fork speckit. We *optionally* shell to gastown (§8.3).
+Derrick's contract:
 
 - **speckit**: invoked via `claude /speckit.*`. Derrick assumes speckit
   writes `.specify/feature.json` and a per-feature directory; that's the
   same assumption flight.sh already makes.
-- **gastown**: invoked via `gt` and `bd` CLIs only. No DB poking, no
-  direct dolt access. Derrick will *surface* `gt dolt status` warnings
-  but never run `gt dolt stop`. See §8 for the lifecycle.
+- **gastown (when selected as backend)**: invoked via `gt` and `bd`
+  CLIs only. No DB poking, no direct dolt access. See §8.3 / §8.6.
+- **Default backend is derrick's own** (§8.2), which has no external
+  tool dependency beyond SQLite.
 
 If any underlying tool changes its CLI shape, derrick updates its
-adapter in `internal/tools/<tool>.go`. That's the only blast radius.
+adapter in `internal/tools/<tool>.go` or `internal/substrate/<name>/`.
+That's the only blast radius.
 
 ---
 
-## 8. Gastown — rigs, beads, convoys, mayor
+## 8. Execution substrate — derrick-native by default, gastown optional
 
-Gastown is not a terminal step; it's the **execution substrate** for
-everything after `tasks`. Derrick is the front door; gastown is the
-factory floor. This section is the contract.
+The pipeline produces a `tasks.md`. *Something* then has to track
+those tasks as work units, sequence them, dispatch them to workers,
+and report state. That something is the **execution substrate**.
 
-### 8.1 The model (short version, derrick's view)
+### 8.0 The decision: own it
 
-- **Rig** — a workspace registered with gastown. One per repo. Has a
-  name and a bead prefix (`mp-123`). Created during `derrick init`.
-- **Bead** — a single unit of work (an issue). The `bridge` step
-  converts each `tasks.md` row into one bead via `bd create`, applying
-  routing labels (`runtime/copilot`, `phase-N`, etc).
-- **Convoy** — an ordered group of beads representing one feature.
-  Named after the speckit feature slug. Bead ordering is preserved via
-  `bd link --type=blocks` so polecats can't pull work out of sequence.
-- **Polecat** — a Copilot agent with a persistent identity but
-  ephemeral sessions. The Mayor `sling`s a bead to a polecat; the
-  polecat works it; the Refinery merges it.
-- **Mayor** — the Chief of Staff. Drives `bd ready`, runs assay or
-  re-assay per bead if configured, dispatches to polecats, escalates
-  to the human via `gt mail --human`.
-- **Refinery** — merge-queue processor. Out of derrick's scope but
-  derrick prints the right `gt status --rig <name>` command so the
-  user can watch it.
-- **Witness / Deacon** — observers and watchdogs. Same: out of scope,
-  but `derrick doctor` checks they exist when `mode: crew`.
+Originally derrick depended on gastown for this. Gastown is excellent
+but it's a large surface (50+ `gt` commands, a fragile dolt data
+plane, multi-agent federation features most users don't need) and
+depending on it gives derrick the same install friction users
+already have today. Following the same logic that led us to own
+assay, scrubber, and caveman, we ship a **derrick-native execution
+substrate** as the default.
 
-### 8.2 Modes
+- **Default**: derrick's own minimal substrate, SQLite-backed,
+  single-binary, no server, no dolt.
+- **Opt-in**: full gastown, for users who already run it (blacksmith
+  and similar) or who need its federation/mail/multi-rig features.
 
-`tools.gastown.mode` is the load-bearing knob. Three values:
+Selected via `tools.execution_substrate`:
 
-- **`solo`** (default for new repos) — pipeline ends at `tasks`. No
-  beads, no convoy, no mayor, no Copilot. The user opens `tasks.md`
-  and works it themselves. Derrick is still useful — speckit + assay
-  are doing real work.
-- **`copilot`** — pipeline dispatches the convoy directly to GitHub
-  Copilot agents (via `gh copilot` CLI or the Copilot Workspace
-  API), bypassing gastown's mayor/polecat infrastructure. Best for
-  teams that already live in GitHub-native Copilot but don't want to
-  run a gastown rig + dolt. Each task in `tasks.md` becomes one
-  Copilot agent dispatch; derrick polls completions and reports.
-- **`crew`** — full gastown flow. `bridge` runs, the convoy is
-  created, mayor is started. Polecats (which are themselves Copilot
-  agents under gastown's hood) pull from `bd ready`. Requires `gt`
-  and `bd` on PATH and the rig to be registered.
+```yaml
+tools:
+  execution_substrate: native   # native (default) | gastown | none
+```
 
-`derrick init --mode <m>` selects on init. Switching modes is a
-one-line edit to `derrick.yaml` plus a `derrick init --migrate`.
+`none` is solo-mode shorthand (pipeline ends at `tasks.md`).
 
-### 8.3 Copilot as a first-class runner
+### 8.1 The model (one shape, two backends)
 
-Copilot appears in two distinct places:
+We define **one** logical model and implement it twice (once
+natively, once as a thin shim over gastown). The rest of derrick —
+observability surface, runners, memory layers — talks to the model,
+not the backend.
 
-1. **As a pipeline-step runner.** Any step in `derrick.yaml` can set
-   `runner: copilot` to dispatch that step to a Copilot agent
-   instead of Claude/Codex. Useful for repeatable mechanical work
-   (boilerplate scaffolding, lint fix passes) where you'd rather
-   not spend Claude tokens. Example:
+- **Rig** — a workspace registered with the substrate. One per repo.
+  Has a name and a bead prefix.
+- **Bead** — a single unit of work with state
+  (`ready | in_flight | blocked | done | rejected`), labels, body,
+  links to other beads, owner.
+- **Link** — typed edge between beads. v1 supports `blocks`
+  (sequencing) and `related` (informational).
+- **Convoy** — an ordered named group of beads representing one
+  feature. Closes when all member beads close.
+- **Worker** — anything that can execute a bead. v1 worker types:
+  `claude` (interactive human-driven), `copilot` (agent dispatch),
+  `human` (just claimed by a person).
+- **Run loop (mayor)** — a process that walks ready beads, applies
+  routing rules, dispatches to a worker, polls completion, reports.
+  v1 runs in-process inside derrick; out-of-process daemon later.
 
-   ```yaml
-   - id: scaffold
-     runner: copilot
-     command: "scaffold module {{module_name}} per .specify/templates/module.md"
-   ```
+Things gastown has that the native substrate **does not** ship in
+v1: agent mail, multi-rig federation (`wl` wasteland commands),
+witness/deacon watchdogs, refinery merge queue, persistent agent
+identity beyond per-bead ownership, mountain-eater epic staging.
+Users who need these flip to `execution_substrate: gastown`.
 
-2. **As the convoy executor in `mode: copilot`.** The post-`tasks`
-   stage in this mode is `dispatch-copilot` (replaces `bridge` +
-   `mayor`):
+### 8.2 The native substrate
 
-   ```yaml
-   - id: dispatch-copilot
-     runner: copilot
-     command: "agent run --task-file {{tasks_md}} --serialise"
-     poll_interval: 30s
-     on_failure: pause   # pause | retry | abort
-   ```
+**Storage**: SQLite at `.derrick/derrick.db`. Schema is small —
+`beads`, `links`, `convoys`, `workers`, `events`. WAL mode, single
+writer (the in-process mayor), many readers (observability surface).
+File-based means no server, trivial backup, trivial gitignore.
 
-   Derrick groups tasks by dependency, fires one Copilot agent per
-   independent task in parallel, serialises blockers, and reports
-   PR/branch URLs as each agent finishes.
+**Mayor loop**: a goroutine in the derrick process that polls
+ready beads, dispatches, and watches for completion via worker
+hooks. When `derrick run add-feature` returns, the mayor either:
+- exits cleanly if all beads are `done`, or
+- detaches into `.derrick/mayor.pid` and continues in the
+  background. `derrick mayor stop` ends it; `derrick mayor logs`
+  tails it.
 
-The Copilot adapter (`internal/copilot/`) abstracts the dispatch
-backend: v1 ships `gh copilot` CLI; v1.1 adds the Copilot Workspace
-HTTP API when it's GA. Both produce the same internal `Dispatch`
-struct so the rest of derrick is backend-agnostic.
+**Workers**:
+- `copilot` worker shells to `gh copilot agent run --task <body>
+  --label "derrick/bead=<id>"` and watches the resulting PR for
+  the bead-id label to detect completion.
+- `human` worker just marks the bead `in_flight` and waits for
+  the user to flip it `done` via `derrick bead done <id>`.
+- `claude` worker writes a `.derrick/queue/<bead-id>.md` file
+  and prints a hint — the user picks it up in their Claude
+  Code session.
 
-### 8.4 What derrick adds to the gastown story
+**Concurrency**: §9.C `parallelism.convoy_max` caps how many
+workers run at once. The mayor honours `blocks` links strictly.
 
-- **Convoy naming** — derived from the speckit feature slug, so the
-  convoy and the spec dir share an obvious identity.
-- **Phase labelling** — `--phase <label>` is passed through to the
-  bridge so every bead carries it. Useful for "phase-7" rollups.
-- **Mayor handoff** — derrick stops at "Mayor session running. Watch
-  with `derrick status` (or `derrick status --watch`)." It does
-  **not** stay attached. The pipeline run is done; the observability
-  surface (§5.5) takes over.
-- **Resume** — `derrick run add-feature --resume-from bridge` is the
-  canonical recovery path when speckit succeeded but gastown wobbled.
+**Mutation API**: in-process Go, plus a small subset of CLI
+write commands derrick *does* expose (it can't be entirely
+read-only against its own substrate):
 
-### 8.5 Dolt awareness
+| Command | Purpose |
+|---|---|
+| `derrick bead new` | Create a bead (used internally by `bridge`) |
+| `derrick bead done <id>` | Mark complete |
+| `derrick bead block <id> --on <id>` | Add a `blocks` link |
+| `derrick bead reopen <id>` | Re-ready a done/rejected bead |
+| `derrick convoy close <name>` | Force-close a convoy |
 
-Gastown's data plane is Dolt. Derrick:
+Reads (status, beads, bead, convoy, etc.) are §5.5 already.
 
-- Surfaces `gt dolt status` in `derrick doctor` (warning if degraded).
+### 8.3 The gastown backend (opt-in)
+
+When `tools.execution_substrate: gastown`, derrick:
+
+- Skips creating `.derrick/derrick.db`.
+- The `bridge` step shells to `bd create` / `bd link` as the
+  existing tasks-to-beads.sh does today.
+- The `mayor` step shells to `gt prime --rig <name> --role mayor`.
+- The observability surface (§5.5) reads from gastown CLIs
+  instead of SQLite.
+- The mutation commands above proxy to `bd` / `gt`.
+
+The shim lives in `internal/substrate/gastown/`. The native
+implementation lives in `internal/substrate/native/`. Both
+satisfy the same Go interface (`internal/substrate/Substrate`).
+Adding a third backend later (e.g. GitHub Projects directly) is a
+new package, not a rewrite.
+
+### 8.4 Modes revisited
+
+`tools.gastown.mode` is now misnamed — it's really
+`tools.substrate.mode`. Three values, semantics unchanged:
+
+- **`solo`** — `execution_substrate: none`. Pipeline ends at
+  `tasks.md`. The user works from the markdown.
+- **`copilot`** — substrate present (native by default), but no
+  mayor: tasks are dispatched directly to Copilot agents and
+  derrick polls completions inline.
+- **`crew`** — substrate present, mayor running, workers fanning
+  out. This is the dark-factory mode.
+
+### 8.5 Copilot as a first-class runner
+
+(Unchanged from previous design — Copilot is still both a
+pipeline-step runner and the convoy executor in `mode: copilot`.
+The Copilot adapter `internal/copilot/` now sits *behind* the
+substrate interface in crew mode, called by the mayor.)
+
+### 8.6 Dolt awareness (gastown backend only)
+
+When using the gastown backend, derrick:
+
+- Surfaces `gt dolt status` in `derrick doctor` (warning if
+  degraded).
 - **Never** runs `gt dolt stop`, never `rm -rf ~/.dolt-data`.
 - On a step that fails with the classic Dolt symptoms (timeouts,
   connection refused), prints the exact diagnostic recipe from
   `gt`'s own runbook before exiting.
+
+Native backend has no dolt and no daemon — `derrick doctor` checks
+SQLite file accessibility and that's it.
 
 ---
 
@@ -703,11 +754,11 @@ tasks`), but everything *around* and *after* it is parallel by
 default. Derrick treats serial work as a justified exception.
 
 **9.C.1 Convoy fan-out.** Independent beads in a convoy run
-concurrently. In `mode: crew` this is gastown's mayor doing the
-sling; in `mode: copilot` derrick does it directly, firing one
-Copilot agent per independent task and serialising only across
-explicit `blocks` dependencies. Default concurrency is
-`min(8, len(ready_beads))`; configurable in `derrick.yaml`:
+concurrently. The substrate's mayor (native in-process loop, or
+gastown's `gt prime`) walks ready beads and dispatches them to
+workers, serialising only across explicit `blocks` dependencies.
+Default concurrency is `min(8, len(ready_beads))`; configurable
+in `derrick.yaml`:
 
 ```yaml
 parallelism:
@@ -891,6 +942,23 @@ entry). `state.json` is gitignored too. The yaml is committed.
     haven't audited. v1 should ship with a loud warning if two
     `derrick run`s overlap, and only relax to silent parallelism
     once we've verified speckit is fully feature-dir-scoped.
+
+12. **Native substrate scope creep** (§8.2). We've explicitly
+    excluded mail, federation, refinery, witness/deacon, persistent
+    agent identity, mountain-eater. Users moving from blacksmith
+    will notice the absences. Risk: feature-by-feature, the native
+    substrate grows back into gastown. Mitigation: every additional
+    substrate feature needs explicit sign-off; if we're building
+    three of them in a quarter, the answer is probably "switch the
+    user to `backend: gastown`," not "extend the native one."
+
+13. **Migration path between backends.** A user starts on native,
+    hits a scale wall, wants gastown. Or vice-versa. v1 ships a
+    `derrick migrate-backend --to gastown` (and `--to native`) that
+    exports beads/convoys/links from one and imports into the other.
+    Open question: do we attempt to preserve bead IDs across the
+    move, or accept ID rewrite with a `legacy_id` label?
+    Leaning: ID rewrite, document it loudly.
 
 ---
 
