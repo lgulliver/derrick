@@ -1,0 +1,8 @@
+/derrick
+/dist/
+/bin/
+*.test
+*.out
+.DS_Store
+.derrick/runs/
+.derrick/state.json
