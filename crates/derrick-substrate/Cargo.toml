@@ -15,5 +15,6 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+regex = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

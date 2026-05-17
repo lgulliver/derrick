@@ -139,6 +139,16 @@ version = "0.0.0"
 [[package]]
 name = "derrick-memory"
 version = "0.0.0"
+dependencies = [
+ "chrono",
+ "derrick-config",
+ "derrick-substrate",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "derrick-models"
@@ -166,6 +176,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "derrick-config",
+ "regex",
  "serde",
  "serde_json",
  "thiserror",

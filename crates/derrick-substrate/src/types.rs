@@ -12,6 +12,11 @@ const MAX_BATCH_NAME_LEN: usize = 64;
 const MAX_HAND_ID_LEN: usize = 64;
 const MAX_TICKET_TITLE_CHARS: usize = 200;
 
+/// Returns the canonical regular expression pattern for ticket identifiers.
+pub fn ticket_id_pattern() -> &'static str {
+    "^[a-z]{1,6}-\\d+$"
+}
+
 /// Error type returned by substrate contracts and implementations.
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -714,8 +719,40 @@ mod tests {
 
     #[test]
     fn ticket_id_rejects_invalid_form() {
-        for value in ["mp1", "MP-1", "mp-", "mp-x", ""] {
+        for value in ["mp1", "MP-1", "mp-", "mp-x", "", "mp-١"] {
             assert_invalid(TicketId::new(value));
+        }
+    }
+
+    #[test]
+    fn ticket_id_pattern_matches_ticket_id_validator() {
+        let regex = match regex::RegexBuilder::new(ticket_id_pattern())
+            .unicode(false)
+            .build()
+        {
+            Ok(regex) => regex,
+            Err(error) => unreachable!("ticket id pattern should compile: {error}"),
+        };
+
+        for value in [
+            "a-1",
+            "abcdef-123",
+            "abc-000",
+            "abcdefg-1",
+            "ABC-1",
+            "ab-",
+            "ab-x",
+            "ab-١",
+            " ab-1",
+            "ab-1 ",
+            "ab-1-extra",
+            "",
+        ] {
+            assert_eq!(
+                regex.is_match(value),
+                TicketId::new(value).is_ok(),
+                "{value:?} should have matching regex and validator results",
+            );
         }
     }
 
