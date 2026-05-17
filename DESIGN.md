@@ -100,10 +100,12 @@ We want: **any user, any repo, single command, `/add-feature` UX.**
 |---|---|---|---|
 | `derrick` CLI | Go | `cmd/derrick` | Install, init, run, doctor, config |
 | Orchestrator | Go | `internal/flow` | Phase state machine, tool runner, logging |
-| Tool adapters | Go | `internal/tools` | Thin wrappers around `claude`, `codex`, `gt`, `bd`, `specify`, `rtk` |
+| Tool adapters | Go | `internal/tools` | Thin wrappers around `claude`, `codex`, `gh copilot`, `gt`, `bd`, `specify` |
 | Assay | Go | `internal/assay` | Derrick-native adversarial plan review (Codex-driven, courtroom-pattern) |
 | Memory | Go | `internal/memory` | Seeds Claude memory files on init + per-step context budgets |
-| Token policy | Go | `internal/token` | RTK wrapping, caveman summaries, output digesting between steps |
+| Scrubber | Go | `internal/scrub` | Derrick-native subprocess output filter (RTK-equivalent) |
+| Caveman | Go | `internal/caveman` | Derrick-native text compressor for inter-step handoff |
+| Copilot adapter | Go | `internal/copilot` | Dispatches steps or beads to Copilot agents (CLI + Workspace API) |
 | Config | Go | `internal/config` | Load + validate `derrick.yaml` |
 | Repo templates | files | `templates/` | What `derrick init` copies in |
 | Plugin | md+sh | `templates/.claude/` | `/add-feature` command + skill |
@@ -134,8 +136,13 @@ rig:
 tools:
   speckit:   { enabled: true,  version: ">=0.4.0" }
   assay:     { enabled: true,  reviewer: codex, model: "gpt-5", rounds: 1, strict: false }
-  gastown:   { enabled: true,  mode: crew }   # solo | crew  (see §8)
-  rtk:       { enabled: true,  required: false }   # wrap subprocesses if present
+  gastown:   { enabled: true,  mode: crew }   # solo | crew | copilot  (see §8)
+  copilot:
+    enabled: true
+    cli: "gh copilot"           # gh copilot CLI; Workspace API later
+    model: "gpt-5-codex"        # whichever Copilot model the user has
+    agent_identity: derrick-polecat  # for crew mode handoff
+  # No external rtk/caveman dependency — derrick ships its own (see §9).
 
 # /add-feature pipeline. Steps run in order; any can be skipped via flag.
 pipeline:
@@ -419,21 +426,64 @@ factory floor. This section is the contract.
 
 ### 8.2 Modes
 
-`tools.gastown.mode` is the load-bearing knob:
+`tools.gastown.mode` is the load-bearing knob. Three values:
 
 - **`solo`** (default for new repos) — pipeline ends at `tasks`. No
-  beads, no convoy, no mayor. The user opens `tasks.md` and works it
-  themselves. Derrick is still useful — speckit + assay are doing
-  real work.
-- **`crew`** — full flow. `bridge` runs, the convoy is created, mayor
-  is started. Requires `gt` and `bd` on PATH and the rig to be
-  registered.
+  beads, no convoy, no mayor, no Copilot. The user opens `tasks.md`
+  and works it themselves. Derrick is still useful — speckit + assay
+  are doing real work.
+- **`copilot`** — pipeline dispatches the convoy directly to GitHub
+  Copilot agents (via `gh copilot` CLI or the Copilot Workspace
+  API), bypassing gastown's mayor/polecat infrastructure. Best for
+  teams that already live in GitHub-native Copilot but don't want to
+  run a gastown rig + dolt. Each task in `tasks.md` becomes one
+  Copilot agent dispatch; derrick polls completions and reports.
+- **`crew`** — full gastown flow. `bridge` runs, the convoy is
+  created, mayor is started. Polecats (which are themselves Copilot
+  agents under gastown's hood) pull from `bd ready`. Requires `gt`
+  and `bd` on PATH and the rig to be registered.
 
-`derrick init --mode crew` does the gastown registration. `derrick
-init --mode solo` skips it cleanly. Switching modes is a one-line
-edit to `derrick.yaml` plus a `derrick init --migrate`.
+`derrick init --mode <m>` selects on init. Switching modes is a
+one-line edit to `derrick.yaml` plus a `derrick init --migrate`.
 
-### 8.3 What derrick adds to the gastown story
+### 8.3 Copilot as a first-class runner
+
+Copilot appears in two distinct places:
+
+1. **As a pipeline-step runner.** Any step in `derrick.yaml` can set
+   `runner: copilot` to dispatch that step to a Copilot agent
+   instead of Claude/Codex. Useful for repeatable mechanical work
+   (boilerplate scaffolding, lint fix passes) where you'd rather
+   not spend Claude tokens. Example:
+
+   ```yaml
+   - id: scaffold
+     runner: copilot
+     command: "scaffold module {{module_name}} per .specify/templates/module.md"
+   ```
+
+2. **As the convoy executor in `mode: copilot`.** The post-`tasks`
+   stage in this mode is `dispatch-copilot` (replaces `bridge` +
+   `mayor`):
+
+   ```yaml
+   - id: dispatch-copilot
+     runner: copilot
+     command: "agent run --task-file {{tasks_md}} --serialise"
+     poll_interval: 30s
+     on_failure: pause   # pause | retry | abort
+   ```
+
+   Derrick groups tasks by dependency, fires one Copilot agent per
+   independent task in parallel, serialises blockers, and reports
+   PR/branch URLs as each agent finishes.
+
+The Copilot adapter (`internal/copilot/`) abstracts the dispatch
+backend: v1 ships `gh copilot` CLI; v1.1 adds the Copilot Workspace
+HTTP API when it's GA. Both produce the same internal `Dispatch`
+struct so the rest of derrick is backend-agnostic.
+
+### 8.4 What derrick adds to the gastown story
 
 - **Convoy naming** — derived from the speckit feature slug, so the
   convoy and the spec dir share an obvious identity.
@@ -445,7 +495,7 @@ edit to `derrick.yaml` plus a `derrick init --migrate`.
 - **Resume** — `derrick run add-feature --resume-from bridge` is the
   canonical recovery path when speckit succeeded but gastown wobbled.
 
-### 8.4 Dolt awareness
+### 8.5 Dolt awareness
 
 Gastown's data plane is Dolt. Derrick:
 
@@ -472,41 +522,74 @@ The pipeline assigns models per step (already shown in §4):
 | `plan`, `analyze` | opus | Genuinely hard reasoning |
 | `assay` | codex (gpt-5) | Adversarial, different family |
 | `bridge`, `mayor` | n/a | Subprocess |
+| `dispatch-copilot`, `runner: copilot` steps | Copilot model | Mechanical execution at Copilot rates, not Claude rates |
 
 Anyone can override in `derrick.yaml`. Default biases toward the
 cheapest model that still does the job.
 
-### 9.2 RTK wrapping (subprocess token saver)
+### 9.2 Scrubber — derrick-native subprocess filter
 
-If `rtk` is on PATH, derrick prefixes every CLI subprocess
-(`gt`, `bd`, `git`, `claude`, `codex`) with `rtk`. RTK is a transparent
-proxy that filters noisy CLI output before it ever reaches Claude's
-context. Documented in the user's `~/.claude/RTK.md` — derrick just
-opts in.
+Inspired by the external RTK proxy, but **shipped inside the
+derrick binary** so there's no external dependency to install,
+version, or fight a name collision with (`rtk` is also "Rust Type
+Kit" elsewhere on npm). Same idea, our code, our rules.
 
-- `tools.rtk.enabled: true` and `required: false` (default) — best
-  effort. If `which rtk` is empty, fall back to direct invocation.
-- `required: true` — `derrick doctor` fails if rtk is missing.
+- Every subprocess derrick invokes (`gt`, `bd`, `git`, `claude`,
+  `codex`, `gh`) is wrapped through `internal/scrub`. The user sees
+  what they'd see anyway; the *next pipeline step* sees a filtered
+  stream.
+- Filter rules are tool-specific and live in
+  `internal/scrub/rules/<tool>.go` — e.g. strip progress spinners
+  from `gh`, collapse `git status` short-mode noise, fold
+  `bd list` output to id+title only.
+- Exposed as a subcommand for ad-hoc use:
 
-Average savings (per RTK's published numbers): 60-90% on dev
-operations. We get this free.
+  ```
+  $ derrick scrub gt status --rig taxi-ingest
+  ```
 
-### 9.3 Caveman summaries between steps
+  Mirrors the RTK UX so muscle memory transfers. Output is also
+  fully accessible un-scrubbed via `--raw`.
+- `derrick gain` is the analytics command (clone of `rtk gain`).
+- Compatibility: if the user *also* has RTK installed and prefers
+  it, `tools.scrub.delegate_to: rtk` makes derrick shell out to RTK
+  instead of using its built-in. Default is built-in.
 
-Derrick captures full subprocess output to disk (`.derrick/runs/...`)
-but only surfaces a compressed summary to the next step. The
-summariser uses the `caveman` skill pattern (ultra-compressed,
-~75% token reduction) for inter-step handoff text:
+Target savings: 60–90% on subprocess noise, matching RTK's
+published numbers. The rules file is the load-bearing artifact;
+we'll port the public RTK ruleset for the tools we use first,
+extend later.
 
-- Step N writes its log to `.derrick/runs/<ts>/step-N.log` (full).
-- Derrick reads the last K lines, calls the caveman skill (or applies
-  the same shaping rules in-process), and writes
-  `.derrick/runs/<ts>/step-N.summary.md` (tight).
-- Step N+1's prompt context references the summary, not the log.
+### 9.3 Caveman — derrick-native text compressor
 
-When something fails the user sees the full log. When everything is
-fine, nobody reads it. Caveman intensity defaults to `lite` so
-verdict files remain human-grep-able.
+Same logic. The caveman *skill* compresses text by ~75% by
+applying a shaping ruleset (drop articles, collapse boilerplate,
+shorten common phrases, preserve identifiers and code spans
+verbatim). We ship the same ruleset in Go inside
+`internal/caveman`, with intensity levels matching the skill
+(`lite`, `full`, `ultra`).
+
+- Auto-applied between pipeline steps: full log to disk at
+  `.derrick/runs/<ts>/step-N.log`; caveman-compressed summary at
+  `step-N.summary.md`; next step's prompt context only sees the
+  summary.
+- Identifiers, paths, error messages, file/line refs are
+  **preserved verbatim** — caveman shape only flattens prose.
+- Exposed as a subcommand:
+
+  ```
+  $ derrick caveman --intensity lite path/to/file.md
+  ```
+
+- Skill compatibility: if the user invokes `/caveman` manually in
+  their Claude session, our shaping is byte-identical to the
+  installed skill at the same intensity. Goal: drop-in. If we drift
+  it's a bug.
+
+Why ship our own instead of calling the skill via `claude`? Cost
+and latency. Compressing inter-step output by recursively invoking
+Claude is the worst possible trade. Pure-Go shaping is free and
+synchronous.
 
 ### 9.4 Agent memory seeding
 
@@ -624,6 +707,23 @@ entry). `state.json` is gitignored too. The yaml is committed.
    derrick-managed repos on the same machine don't collide, and so
    `derrick init --unmemoize` can clean up without touching unrelated
    memories.
+
+7. **Scrubber / caveman compatibility with the originals.** We're
+   shipping our own implementations (§9.2, §9.3). Should we treat
+   byte-for-byte compatibility with RTK and the caveman skill as a
+   contract (so users can swap freely), or just call ours
+   "RTK-inspired" / "caveman-inspired" and diverge as needed?
+   Leaning: caveman byte-identical at matched intensities (it's a
+   pure shaping function); scrubber drift-tolerant (CLI output shapes
+   change upstream too often to chase).
+
+8. **Copilot Workspace API timing.** §8.3 says v1 = `gh copilot` CLI,
+   v1.1 = Workspace HTTP API. The API isn't fully GA at design time.
+   If it slips, the `mode: copilot` experience is degraded (CLI is
+   single-task, no good parallelism). Do we hold `mode: copilot` for
+   v1.1, or ship a CLI-only v1 with documented limits? Leaning: ship
+   CLI-only v1 with `--serialise` default = true so it's predictable,
+   document the upgrade path.
 
 ---
 
