@@ -114,29 +114,44 @@ Plus the product surface:
 
 ### 3.1 Components
 
-| Component | Lang | Lives in | Purpose |
-|---|---|---|---|
-| `derrick` CLI | Go | `cmd/derrick` | Install, init, run, doctor, config |
-| Orchestrator | Go | `internal/flow` | Phase state machine, tool runner, logging |
-| Tool adapters | Go | `internal/tools` | Thin wrappers around `claude`, `codex`, `gh copilot`, `gt`, `bd`, `specify` |
-| Assay | Go | `internal/assay` | Derrick-native adversarial plan review (Codex-driven, courtroom-pattern) |
-| Memory | Go | `internal/memory` | Seeds Claude memory files on init + per-step context budgets |
-| Scrubber | Go | `internal/scrub` | Derrick-native subprocess output filter (RTK-equivalent) |
-| Caveman | Go | `internal/caveman` | Derrick-native text compressor for inter-step handoff |
-| Copilot adapter | Go | `internal/copilot` | Dispatches steps or tickets to Copilot agents (CLI + Workspace API) |
-| Model abstraction | Go | `internal/models` | Provider interface; adapters for API providers, local runtimes, and CLI shells (see §6.5) |
-| Brownfield importer | Go | `internal/adopt` | Detects existing AGENTS.md, CLAUDE.md, agents/, skills/, docs; adopts rather than clobbers (see §5.6) |
-| Substrate iface | Go | `internal/substrate` | One interface (beads, links, convoys, workers); two backends |
-| Native substrate | Go | `internal/substrate/native` | SQLite-backed default execution substrate + in-process mayor |
-| Gastown shim | Go | `internal/substrate/gastown` | Backend that proxies to `gt`/`bd` for users who already run gastown |
-| Observe | Go | `internal/observe` | Aggregated read-only view (talks to substrate iface, not backends) |
-| Config | Go | `internal/config` | Load + validate `derrick.yaml` |
-| Repo templates | files | `templates/` | What `derrick init` copies in |
-| Plugin | md+sh | `templates/.claude/` | `/add-feature` command + skill |
-| Install script | bash | `scripts/install.sh` | Curlable bootstrap |
+Rust workspace. One binary (`derrick`), many crates so individual
+modules can be tested, profiled, and (later) ported in isolation.
 
-Why Go? Same toolchain as gastown/beads, single static binary for the
-install script, trivial to ship via Homebrew or GitHub release.
+| Component | Crate | Purpose |
+|---|---|---|
+| `derrick` CLI | `crates/derrick-cli` | clap-based binary; subcommands route to other crates |
+| Orchestrator | `crates/derrick-flow` | Pipeline state machine, step runner, structured logging (`tracing`) |
+| Tool adapters | `crates/derrick-tools` | Thin wrappers around `claude`, `codex`, `gh copilot`, `specify` (tokio::process) |
+| Assay | `crates/derrick-assay` | Adversarial plan review; calls the reviewer role(s) directly (see §7) |
+| Memory | `crates/derrick-memory` | Seeds host memory files on init + per-step context budgets |
+| Scrubber | `crates/derrick-scrub` | Subprocess output filter (RTK-equivalent), pure functions, zero-copy where possible |
+| Caveman | `crates/derrick-caveman` | Text compressor for inter-step handoff, pure functions |
+| Copilot | `crates/derrick-copilot` | Dispatches steps or tickets to Copilot agents (CLI + Workspace API) |
+| Models | `crates/derrick-models` | Provider trait; adapters for API providers, local runtimes, CLI shells (see §6.5) |
+| Adopt | `crates/derrick-adopt` | Brownfield detection of AGENTS.md, CLAUDE.md, agents/, skills/, docs (see §5.6) |
+| Substrate trait | `crates/derrick-substrate` | One async trait (`Substrate`); a native impl, future impls slot in behind it |
+| Native substrate | `crates/derrick-substrate-native` | SQLite-backed execution substrate + in-process foreman |
+| Observe | `crates/derrick-observe` | Aggregated read-only view (talks to substrate trait) |
+| Config | `crates/derrick-config` | Load + validate `derrick.yaml` (serde) |
+| Repo templates | `templates/` | What `derrick init` copies in |
+| Plugin | `templates/.claude/` | `/add-feature` command + skill |
+| Install script | `scripts/install.sh` | Curlable bootstrap |
+
+Why Rust?
+
+- **Lightweight at runtime.** `derrick scrub` wraps every subprocess; cold-start
+  cost matters. Rust gives us near-zero overhead.
+- **Pure-function hot paths.** Scrubber and caveman are string-manipulation
+  hot paths — Rust's iterators and zero-copy slices fit naturally.
+- **Async fan-out.** Multi-reviewer assay, parallel observability reads, and
+  the foreman loop are textbook tokio workloads.
+- **Single static binary.** `cargo build --release` → one file, easy to ship
+  via GitHub releases or Homebrew.
+- **SQLite via `rusqlite`** (bundled) or `sqlx` — both first-class.
+
+Trade-off accepted: build times are slower than Go's, and the gastown shim
+(if we ever add one) means shelling to a Go CLI, not vendoring its types.
+That cost is bounded.
 
 ---
 
@@ -187,7 +202,7 @@ tools:
     rounds: 1
     strict: false
   substrate:
-    backend: native             # native (default) | gastown | none
+    backend: native             # v1: native | none. Trait allows more backends later.
     mode: crew                  # solo | copilot | crew (see §8)
   copilot:
     enabled: true
@@ -318,8 +333,8 @@ See §5.6 for the full brownfield adoption contract; the short version:
      collide with the user's existing agents are skipped.
    - `CLAUDE.md` block appended only with `--append-agents-md` or
      the equivalent confirm.
-5. Register the site with the substrate (native default, or shell
-   to `gt rig add` for the gastown backend), unless `--no-substrate`.
+5. Register the site with the substrate (native SQLite), unless
+   `--no-substrate`.
 6. `derrick doctor` on the freshly initialised repo.
 
 `derrick init --greenfield` is the opt-in for an empty repo where
@@ -380,10 +395,8 @@ flat, predictable surface that aggregates gastown/bd/Copilot reads
 into one view. Everything here is **read-only** — these commands
 never mutate state.
 
-All commands talk to the substrate interface. Output uses
-derrick's vocabulary; if the gastown backend is selected, the
-shim translates inbound (`bead → ticket`, `convoy → batch`,
-`polecat → hand`, `mayor → foreman`, `rig → site`).
+All commands talk to the `Substrate` trait. Output uses derrick's
+vocabulary regardless of backend (v1 ships only the native one).
 
 | Command | What it shows | Substrate calls |
 |---|---|---|
@@ -399,8 +412,8 @@ shim translates inbound (`bead → ticket`, `convoy → batch`,
 | `derrick runs` | Last N derrick pipeline runs, exit status per step | local `.derrick/runs/` |
 | `derrick run <id>` | Replay the manifest of one specific run | local |
 
-(Gastown backend only: `derrick mail` exposes `gt mail`. Native
-backend doesn't ship mail in v1.)
+(v1 has no `derrick mail` — agent mail is out of scope. A future
+backend that wraps a system with mail can add it behind the trait.)
 
 Design rules for the observability surface:
 
@@ -669,80 +682,74 @@ Reconciliation policy in §9.C.2.
 
 ### Boundaries with the *other* underlying tools
 
-We do **not** fork speckit. We *optionally* shell to gastown (§8.3).
-Derrick's contract:
+We do **not** fork speckit. We own the execution substrate. Derrick's
+contract:
 
 - **speckit**: invoked via `claude /speckit.*`. Derrick assumes speckit
   writes `.specify/feature.json` and a per-feature directory; that's the
   same assumption flight.sh already makes.
-- **gastown (when selected as backend)**: invoked via `gt` and `bd`
-  CLIs only. No DB poking, no direct dolt access. See §8.3 / §8.6.
-- **Default backend is derrick's own** (§8.2), which has no external
-  tool dependency beyond SQLite.
+- **Substrate is ours** (§8) — SQLite-backed, no external service. The
+  trait allows additional backends later but v1 ships only the native one.
 
 If any underlying tool changes its CLI shape, derrick updates its
-adapter in `internal/tools/<tool>.go` or `internal/substrate/<name>/`.
-That's the only blast radius.
+adapter in `crates/derrick-tools/`. That's the only blast radius.
 
 ---
 
-## 8. Execution substrate — derrick-native by default, gastown optional
+## 8. Execution substrate
 
 The pipeline produces a `tasks.md`. *Something* then has to track
 those tasks as work units, sequence them, dispatch them to hands,
 and report state. That something is the **execution substrate**.
+Derrick ships its own. v1 has exactly one backend — native — behind
+a trait so additional backends can slot in later without touching
+the rest of the codebase.
 
 ### 8.-1 Glossary (derrick's vocabulary)
 
-We deliberately do **not** reuse gastown's nouns. When both systems
-are in play this makes them distinguishable; when only derrick is in
-play the words stand on their own.
+| Derrick | Role |
+|---|---|
+| **site** | Workspace registered with the substrate |
+| **ticket** | One unit of work |
+| **batch** | Ordered named group of tickets for one feature |
+| **hand** | An executor (claude / copilot / human) |
+| **foreman** | Orchestrator loop that walks ready tickets and dispatches |
+| **dispatch** | The verb for assigning a ticket to a hand |
+| **activity** | Recent event timeline |
+| **link / blocks** | Typed edges between tickets |
+| **prefix** | Short site code, e.g. `ti` → `ti-47` |
 
-| Derrick | Role | Gastown equivalent (when `backend: gastown`) |
-|---|---|---|
-| **site** | Workspace registered with the substrate | rig |
-| **ticket** | One unit of work | bead |
-| **batch** | Ordered named group of tickets for one feature | convoy |
-| **hand** | An executor (claude / copilot / human) | polecat |
-| **foreman** | Orchestrator loop that walks ready tickets and dispatches | mayor |
-| **dispatch** | The verb for assigning a ticket to a hand | sling |
-| **activity** | Recent event timeline | trail |
-| **link / blocks** | Typed edges between tickets | (same) |
-| **prefix** | Short site code, e.g. `ti` → `ti-47` | (same) |
-
-The gastown shim translates inbound (`bead → ticket`, etc.) so
-derrick's CLI output is consistent regardless of backend.
+Chosen deliberately distinct from gastown's vocabulary
+(rig/bead/convoy/polecat/mayor) so the two are unambiguous when
+both are present on the same machine.
 
 ### 8.0 The decision: own it
 
-Originally derrick depended on gastown for this. Gastown is excellent
-but it's a large surface (50+ `gt` commands, a fragile dolt data
-plane, multi-agent federation features most users don't need) and
-depending on it gives derrick the same install friction users
-already have today. Following the same logic that led us to own
-assay, scrubber, and caveman, we ship a **derrick-native execution
-substrate** as the default.
+The substrate is the most strategically important piece of derrick
+because everything after `tasks` runs on it. Originally we sketched
+a gastown shim as an alternative backend. Decision for v1: **drop
+the shim, focus on the native implementation, ship it well.** A
+gastown backend can be added later as a separate crate behind the
+same trait if the demand is there.
 
-- **Default**: derrick's own minimal substrate, SQLite-backed,
-  single-binary, no server, no dolt.
-- **Opt-in**: full gastown, for users who already run it (blacksmith
-  and similar) or who need its federation/mail/multi-rig features.
-
-Selected via `tools.execution_substrate`:
+Selected via:
 
 ```yaml
 tools:
-  execution_substrate: native   # native (default) | gastown | none
+  substrate:
+    backend: native             # v1 ships only this; trait allows future backends
+    mode: crew                  # solo | copilot | crew
 ```
 
 `none` is solo-mode shorthand (pipeline ends at `tasks.md`).
 
-### 8.1 The model (one shape, two backends)
+### 8.1 The model
 
-We define **one** logical model with **derrick's own vocabulary**
-and implement it twice (once natively, once as a thin shim over
-gastown). The rest of derrick — observability surface, runners,
-memory layers — talks to the model, not the backend.
+One logical model, one native implementation in v1. Everything
+in derrick — observability surface, runners, memory layers —
+talks to the `Substrate` trait, not to SQLite directly. Adding a
+second backend later means a new crate that implements the trait;
+no other code changes.
 
 - **Site** — a workspace registered with the substrate. One per
   repo. Has a name and a ticket prefix.
@@ -758,29 +765,25 @@ memory layers — talks to the model, not the backend.
   `human` (just claimed by a person).
 - **Foreman** — the orchestrator that walks ready tickets, applies
   routing rules, dispatches to a hand, polls completion, reports.
-  v1 runs in-process inside derrick; out-of-process daemon later.
+  v1 runs as a tokio task inside the derrick process; can later
+  detach to an out-of-process daemon.
 
-Deliberate vocabulary split from gastown: site/ticket/batch/hand/
-foreman/dispatch are derrick's terms, used in the CLI, the docs,
-and all user-facing output regardless of which backend is in play.
-When `backend: gastown` is selected, gastown's own terms
-(rig/bead/convoy/polecat/mayor) apply *behind* the shim — they
-never leak through.
-
-Things gastown has that the native substrate **does not** ship in
-v1: agent mail, multi-site federation, watchdog services, merge
-queue, persistent agent identity beyond per-ticket ownership,
-epic staging. Users who need these flip to `backend: gastown`.
+Things explicitly **out of scope for v1**: agent mail, multi-site
+federation, watchdog services, merge queue, persistent agent
+identity beyond per-ticket ownership, epic staging. These are
+features other systems (gastown, GitHub Projects, Linear) already
+ship — we'll add them only if our own substrate genuinely needs
+them, not by default.
 
 ### 8.2 The native substrate
 
-**Storage**: SQLite at `.derrick/derrick.db`. Schema is small —
-`tickets`, `links`, `batches`, `hands`, `events`. WAL mode, single
-writer (the in-process foreman), many readers (observability
-surface). File-based means no server, trivial backup, trivial
-gitignore.
+**Storage**: SQLite at `.derrick/derrick.db` via `rusqlite`
+(bundled, no external dependency). Schema is small — `tickets`,
+`links`, `batches`, `hands`, `events`. WAL mode, single writer
+(the foreman task), many readers (observability surface).
+File-based: no server, trivial backup, trivial gitignore.
 
-**Foreman loop**: a goroutine in the derrick process that polls
+**Foreman loop**: a tokio task in the derrick process. It polls
 ready tickets, dispatches, and watches for completion via hand
 hooks. When `derrick run add-feature` returns, the foreman either:
 - exits cleanly if all tickets are `done`, or
@@ -799,9 +802,11 @@ hooks. When `derrick run add-feature` returns, the foreman either:
   Code session.
 
 **Concurrency**: §9.C `parallelism.batch_max` caps how many hands
-run at once. The foreman honours `blocks` links strictly.
+run at once. The foreman honours `blocks` links strictly. Hand
+dispatch is `tokio::spawn`; completion is a `mpsc` channel back to
+the foreman.
 
-**Mutation API**: in-process Go, plus a small subset of CLI
+**Mutation API**: in-process Rust, plus a small subset of CLI
 write commands derrick *does* expose (it can't be entirely
 read-only against its own substrate):
 
@@ -815,60 +820,36 @@ read-only against its own substrate):
 
 Reads (status, tickets, ticket, batch, etc.) are §5.5 already.
 
-### 8.3 The gastown backend (opt-in)
+### 8.3 Modes
 
-When `tools.substrate.backend: gastown`, derrick:
+`tools.substrate.mode`:
 
-- Skips creating `.derrick/derrick.db`.
-- The `bridge` step shells to `bd create` / `bd link` (gastown
-  creates beads; derrick's CLI still calls them tickets to the user).
-- The `foreman` step shells to `gt prime --rig <name> --role mayor`
-  (gastown spins up its mayor; derrick still calls it the foreman).
-- The observability surface (§5.5) reads from gastown CLIs
-  instead of SQLite and translates terms inbound:
-  `bead → ticket`, `convoy → batch`, `polecat → hand`,
-  `mayor → foreman`, `rig → site`.
-- The mutation commands above proxy to `bd` / `gt`.
-
-The shim lives in `internal/substrate/gastown/`. The native
-implementation lives in `internal/substrate/native/`. Both
-satisfy the same Go interface (`internal/substrate/Substrate`).
-Adding a third backend later (e.g. GitHub Projects directly) is a
-new package, not a rewrite.
-
-### 8.4 Modes revisited
-
-`tools.gastown.mode` is now misnamed — it's really
-`tools.substrate.mode`. Three values, semantics unchanged:
-
-- **`solo`** — `execution_substrate: none`. Pipeline ends at
-  `tasks.md`. The user works from the markdown.
-- **`copilot`** — substrate present (native by default), but no
-  foreman loop: tickets are dispatched directly to Copilot agents
-  and derrick polls completions inline.
+- **`solo`** — `backend: none`. Pipeline ends at `tasks.md`.
+  The user works from the markdown.
+- **`copilot`** — substrate present, foreman not started:
+  tickets are dispatched directly to Copilot agents and derrick
+  polls completions inline.
 - **`crew`** — substrate present, foreman running, hands fanning
   out. This is the dark-factory mode.
 
-### 8.5 Copilot as a first-class runner
+### 8.4 Copilot as a first-class runner
 
-(Unchanged from previous design — Copilot is still both a
-pipeline-step runner and the batch executor in `mode: copilot`.
-The Copilot adapter `internal/copilot/` now sits *behind* the
-substrate interface in crew mode, called by the foreman.)
+Copilot remains both a pipeline-step runner (`runner: copilot`
+on any step) and the batch executor in `mode: copilot`. The
+Copilot adapter (`crates/derrick-copilot`) sits behind the
+substrate trait when the foreman is running.
 
-### 8.6 Dolt awareness (gastown backend only)
+### 8.5 Extension point: adding more backends later
 
-When using the gastown backend, derrick:
+The `Substrate` trait is the only contract. A future
+`crates/derrick-substrate-gastown` (or `-linear`, `-github-projects`,
+`-jira`) would implement the same trait — observability,
+runners, and the foreman keep working unchanged. We are not
+designing for this in v1; we are leaving the door open.
 
-- Surfaces `gt dolt status` in `derrick doctor` (warning if
-  degraded).
-- **Never** runs `gt dolt stop`, never `rm -rf ~/.dolt-data`.
-- On a step that fails with the classic Dolt symptoms (timeouts,
-  connection refused), prints the exact diagnostic recipe from
-  `gt`'s own runbook before exiting.
-
-Native backend has no dolt and no daemon — `derrick doctor` checks
-SQLite file accessibility and that's it.
+`derrick doctor` in v1 checks: SQLite file accessibility,
+foreman PID liveness if attached, ticket schema version. No
+external service, no daemon, no port.
 
 ---
 
@@ -1172,24 +1153,16 @@ entry). `state.json` is gitignored too. The yaml is committed.
     `derrick run`s overlap, and only relax to silent parallelism
     once we've verified speckit is fully feature-dir-scoped.
 
-12. **Native substrate scope creep** (§8.2). We've explicitly
-    excluded mail, federation, refinery, witness/deacon, persistent
-    agent identity, mountain-eater. Users moving from blacksmith
-    will notice the absences. Risk: feature-by-feature, the native
-    substrate grows back into gastown. Mitigation: every additional
-    substrate feature needs explicit sign-off; if we're building
-    three of them in a quarter, the answer is probably "switch the
-    user to `backend: gastown`," not "extend the native one."
+12. **Native substrate scope creep** (§8.1). We've excluded mail,
+    federation, watchdogs, merge queue, persistent agent identity
+    beyond per-ticket ownership, epic staging. Risk: feature-by-
+    feature these get reintroduced and the substrate grows into
+    something it shouldn't be. Mitigation: every addition needs
+    explicit sign-off; if we're adding three of these in a quarter,
+    the answer is "ship a different backend behind the trait," not
+    "extend the native one."
 
-13. **Migration path between backends.** A user starts on native,
-    hits a scale wall, wants gastown. Or vice-versa. v1 ships a
-    `derrick migrate-backend --to gastown` (and `--to native`) that
-    exports tickets/batches/links from one and imports into the
-    other. Open question: do we attempt to preserve ticket IDs
-    across the move, or accept ID rewrite with a `legacy_id`
-    label? Leaning: ID rewrite, document it loudly.
-
-14. **Brownfield constitution drafting.** `derrick init
+13. **Brownfield constitution drafting.** `derrick init
     --constitution-from-docs` runs an LLM pass over the repo's
     existing docs (READMEs, CONTRIBUTING, ADRs, AGENTS.md) to
     produce a constitution stub. Cheap and useful, but the
@@ -1198,14 +1171,14 @@ entry). `state.json` is gitignored too. The yaml is committed.
     Leaning: mark drafts with a banner and refuse to run `plan`
     against them until the user has removed the banner.
 
-15. **Role binding to host CLI.** §6.5 separates role / provider /
+14. **Role binding to host CLI.** §6.5 separates role / provider /
     host. But not every provider works with every host (e.g.
     `host: claude` + `provider: ollama` is nonsensical — Claude
     Code calls Anthropic, not Ollama). Need a validation matrix
     and a clear error when a user picks an invalid combination.
     Probably ship a `derrick models check` subcommand.
 
-16. **Sub-agent / skill visibility from derrick.** §6.5 says
+15. **Sub-agent / skill visibility from derrick.** §6.5 says
     derrick doesn't see what sub-agents or skills the host
     invokes. That's correct for context isolation but it makes
     `derrick gain` blind to those costs. Open question: should
@@ -1213,7 +1186,7 @@ entry). `state.json` is gitignored too. The yaml is committed.
     Probably not for v1 — it's a host change, not a derrick one.
     Document the limit.
 
-17. **Provider auth.** API keys for BYOM live where? Options:
+16. **Provider auth.** API keys for BYOM live where? Options:
     `~/.derrick/credentials.yaml`, environment variables only,
     or delegate to the host CLI's own auth (Claude Code already
     has `ANTHROPIC_API_KEY`; codex has its own). Leaning:

@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/derrick-cli",
+    "crates/derrick-flow",
+    "crates/derrick-tools",
+    "crates/derrick-assay",
+    "crates/derrick-memory",
+    "crates/derrick-scrub",
+    "crates/derrick-caveman",
+    "crates/derrick-copilot",
+    "crates/derrick-models",
+    "crates/derrick-adopt",
+    "crates/derrick-substrate",
+    "crates/derrick-substrate-native",
+    "crates/derrick-observe",
+    "crates/derrick-config",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/lgulliver/derrick"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+# Config / serialisation
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+# Storage
+rusqlite = { version = "0.31", features = ["bundled"] }
+# HTTP
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# Errors and logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Misc
+which = "7"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
