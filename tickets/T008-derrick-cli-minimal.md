@@ -19,12 +19,21 @@ internals. This ticket builds the **CLI structure only** —
 
 | Command | Behaviour |
 |---|---|
-| `derrick init [--mode solo\|copilot\|crew] [--site <name>] [--prefix <prefix>] [--force]` | Brownfield-safe init. Writes `derrick.yaml` from template, creates `.derrick/`, opens `NativeSubstrate` for the new site (runs migrations). Refuses if `derrick.yaml` already exists without `--force`. |
+| `derrick init --greenfield [--mode solo\|copilot\|crew] [--site <name>] [--prefix <prefix>] [--force]` | **Greenfield init only in T008.** Writes `derrick.yaml` from the workspace template, creates `.derrick/`, opens `NativeSubstrate` for the new site (runs migrations). Refuses if `derrick.yaml` already exists without `--force`. Matches DESIGN.md §5.2's `--greenfield` opt-in. |
+| `derrick init` (bare, no `--greenfield`) | **Refuses with a T011 pointer.** Per DESIGN.md §5.2, bare `derrick init` is brownfield-first: it runs an adoption pass, proposes the writes, and only bootstraps after the user confirms. That logic lives in `derrick-adopt` (T011, not yet built). T008 prints: *"Brownfield init (the default) is provided by `derrick-adopt` (T011), which is not yet implemented. For a fresh repo use `derrick init --greenfield`. Existing repos with AGENTS.md / CLAUDE.md / .specify/ / existing trackers should wait for T011 to land before being initialised."* and exits 1. This keeps the bare-`init` contract reserved for the brownfield-first semantics; T008 doesn't redefine it. |
 | `derrick status [--format human\|json] [--watch]` | Read-only dashboard. Reads from `NativeSubstrate`: site, active batch summary, tickets by state, foreman status, last assay verdict (from `.derrick/runs/`). `--watch` polls every 1s. |
-| `derrick doctor [--format human\|json]` | Health checks: binaries on PATH (`claude`, `codex`, `copilot`, `git`), `derrick.yaml` valid, `.derrick/` accessible, substrate openable, host hooks present (if `mode != solo`). Exit code = number of failures. |
-| `derrick run <pipeline> [--prompt "..."] [--resume-from <step>]` | Stub: prints `derrick run is implemented in T009; the pipeline pipeline is defined in derrick.yaml. For now, see tickets/T009-...md` and exits 1. The plumbing for argparsing and config loading is in place so T009 can drop the runner in. |
+| `derrick doctor [--format human\|json]` | Health checks driven by the user's `derrick.yaml`: only required binaries (derived from `tools.copilot.enabled`, `tools.assay.enabled`, and the providers referenced by configured roles) are checked. See "Doctor check derivation" below. Exit code = number of failures. |
+| `derrick run add-feature [--prompt "..."] [--resume-from <step>] [--no-clarify] [--no-checkpoint] [--no-assay]` | **Stub:** prints *"`derrick run add-feature` is implemented in T009. Until then, see tickets/T009-derrick-flow-minimal.md."* and exits 1. The flag surface is parsed (so T009 can drop in without breaking users' muscle memory) but no side effects occur. |
 | `derrick --version` | Prints `derrick X.Y.Z` from `env!("CARGO_PKG_VERSION")`. |
 | `derrick completions <shell>` | Emits a completion script for `bash | zsh | fish | elvish | powershell`. Uses `clap_complete`. |
+
+`derrick run` (without `add-feature`) and other `run` shapes
+mentioned in DESIGN.md (`derrick run <id>` replay,
+`derrick run <custom-pipeline>` future) are explicitly NOT
+exposed in T008. `add-feature` is the only `run` shape the
+clap surface knows about. This keeps the door open for T009+
+to extend `derrick run` with additional subcommands without
+breaking the positional shape.
 
 ### Out of scope for T008 (later tickets)
 
@@ -65,7 +74,11 @@ crates/derrick-cli/
     └── exit_code.rs         # typed exit codes (Success=0, Doctor=N>0, etc.)
 ```
 
-### `derrick init` details
+### `derrick init --greenfield` details
+
+(Bare `derrick init` exits 1 with the T011 pointer — see the
+table above. The flow below applies only when `--greenfield`
+is passed.)
 
 1. Resolve cwd to repo root (walk up to find `.git`; if none,
    error: "derrick init must be run inside a git repo").
@@ -77,11 +90,18 @@ crates/derrick-cli/
    - Ticket prefix (default: first 3 chars of site name,
      lowercased, alphabetic only; validate `^[a-z]{1,6}$`).
    - Mode (default: `solo`).
-4. Write `derrick.yaml` from the template
-   (`templates/derrick.yaml.in` in this crate). The template
-   includes the minimum required fields plus a pipeline that
-   matches the spec → clarify → plan → assay → analyze →
-   tasks default.
+4. Write `derrick.yaml` from the workspace template at
+   `templates/derrick.yaml.in` (workspace root, **not**
+   crate-local — matches DESIGN.md §3.1 component table:
+   templates live at the workspace root, owned at the
+   schema-shape level by `derrick-config` and embedded by
+   any crate that needs them via `include_str!`). The
+   template includes the minimum required fields plus a
+   pipeline that matches the spec → clarify → plan → assay
+   → analyze → tasks default. A small template-render helper
+   lives in `derrick-config` so future template consumers
+   (T011 adopt, downstream tooling) don't re-invent the
+   substitution logic.
 5. Create `.derrick/` directory + `.gitignore` entry for
    `.derrick/runs/`, `.derrick/state.json`, etc. (per repo
    `.gitignore` already covers these from the workspace
@@ -136,23 +156,50 @@ if not, add as a workspace dep here — `crossterm = "0.28"`).
 
 ### `derrick doctor` details
 
-Each check returns `Pass | Warn | Fail` with a message.
-Exit code = count of Fails.
+Checks return `Pass | Warn | Fail` with a message. Exit code
+= count of `Fail`s. The required check set is **derived from
+the user's `derrick.yaml`**, not hard-coded by mode (D15 —
+config-driven, not policy-driven):
 
-| Check | Pass | Warn | Fail |
-|---|---|---|---|
-| `which claude` | binary found | n/a | not on PATH |
-| `which codex` | found | n/a | not found |
-| `which copilot` | found | warn if absent and mode is `copilot`/`crew` | fail if mode `copilot` and absent |
-| `which git` | found | n/a | not found |
-| `derrick.yaml` exists and parses | valid | n/a | missing or invalid |
-| `Config::validate()` | passes | n/a | fails |
-| `.derrick/` accessible | yes | n/a | permission denied / missing |
-| Substrate opens | yes | n/a | site mismatch / corruption |
-| Hooks installed (D29) if `mode != solo` | present | not present (T011 hasn't run init-hooks) | n/a yet — warn only in T008 |
-| Repo merge strategy (D21) | merge-commit or rebase available | squash-only & stacking enabled | n/a — warn only |
+**Always run** (no derrick.yaml needed for these):
 
-`--format json` emits structured findings.
+- `which git` → required.
+- `derrick.yaml` exists and parses → required.
+- `Config::validate()` passes → required.
+
+**Run if `derrick.yaml` parses**, deriving from config:
+
+- For each model in `models:`, check the binary or env-var
+  required by that provider:
+  - `provider: shell` → `which <argv[0]>`.
+  - `provider: openai-cli` → `which codex`.
+  - `provider: copilot-cli` → `which copilot`.
+  - `provider: anthropic | openai | google | bedrock |
+    azure-openai | ollama | llamacpp` → check the
+    documented env var (e.g. `ANTHROPIC_API_KEY`). Use
+    `AuthStore::missing_required()` from T006.
+  - Host-delegated providers (`host_delegated_auth() ==
+    true` — claude/codex/copilot) check binary presence, NOT
+    env vars.
+- For each pipeline step's `host:`, `which <host>` →
+  required.
+- `.derrick/` accessible → required.
+- `NativeSubstrate::open()` succeeds with the configured
+  site → required (catches site-mismatch corruption).
+- D29 host hooks installed → **warn-only** in T008 (T011
+  installs them; T008 just reports presence).
+- D21 squash-merge stance: if `tools.git.stacking.backend !=
+  "none"`, query `gh api repos/{owner}/{name}` for
+  allow_squash_merge / merge_commit / rebase_merge defaults
+  and warn if squash is the only option.
+
+`--format json` emits a list of `{check, status, message,
+remediation}` objects so machines can read it.
+
+**Severity matrix is config-driven**: a binary like `codex`
+is `Fail` only when a configured model or pipeline step
+actually requires it; if no role binds to it, its absence is
+not a problem.
 
 ### Dependencies
 
@@ -184,13 +231,16 @@ No new top-level workspace deps.
 `assert_cmd`-based integration tests against the binary,
 using `tempfile::tempdir()` for an isolated repo:
 
-- `init_in_empty_repo_creates_files` — bare repo + `derrick
-  init --site test --prefix tst --mode solo` produces
-  `derrick.yaml` and `.derrick/derrick.db`.
-- `init_refuses_existing_yaml_without_force`.
-- `init_overwrites_with_force`.
-- `init_refuses_outside_git_repo`.
-- `init_validates_prefix`.
+- `bare_init_refuses_with_t011_pointer` — `derrick init`
+  without `--greenfield` exits 1 with a message naming T011.
+- `greenfield_init_in_empty_repo_creates_files` — bare repo
+  + `derrick init --greenfield --site test --prefix tst
+  --mode solo` produces `derrick.yaml` and
+  `.derrick/derrick.db`.
+- `greenfield_init_refuses_existing_yaml_without_force`.
+- `greenfield_init_overwrites_with_force`.
+- `init_refuses_outside_git_repo` (applies to both shapes).
+- `greenfield_init_validates_prefix`.
 - `status_shows_site_after_init`.
 - `status_json_round_trips` — parses output back into the
   same structure.
@@ -221,7 +271,11 @@ floor is the gate.
 - [ ] Built binary runs: `cargo run -p derrick-cli -- --version`
       emits a version string.
 - [ ] `cargo run -p derrick-cli -- init` inside a temp git
-      repo produces valid derrick.yaml + working substrate.
+      repo exits 1 and prints the T011 pointer (bare init is
+      reserved for the brownfield-first contract).
+- [ ] `cargo run -p derrick-cli -- init --greenfield --site
+      test --prefix tst --mode solo` inside a temp git repo
+      produces a valid `derrick.yaml` + working substrate.
 - [ ] No `unwrap`/`expect`/`panic` in non-test code.
 - [ ] No gastown vocabulary.
 
