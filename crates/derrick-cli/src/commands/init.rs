@@ -110,6 +110,11 @@ async fn greenfield_init(repo_root: &Path, args: InitArgs) -> Result<CliExitCode
         NativeSubstrate::open(native_paths(repo_root, &config), config.site().clone()).await?;
     substrate.close().await?;
 
+    if !args.no_hooks {
+        derrick_adopt::write_codex_instructions(repo_root).map_err(|e| message(e.to_string()))?;
+        println!("written      .codex/instructions.md");
+    }
+
     print_summary(&config);
     Ok(CliExitCode::Success)
 }

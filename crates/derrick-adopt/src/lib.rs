@@ -1221,6 +1221,85 @@ fn agent_block() -> &'static str {
     "<!-- derrick:start -->\n\n## Derrick\n\nThis repository is initialized for derrick. Read `derrick.yaml` and keep existing project instructions authoritative.\n\n<!-- derrick:end -->\n"
 }
 
+/// Writes the derrick context block into `<repo_root>/.codex/instructions.md`.
+///
+/// - Creates `.codex/` if it does not exist.
+/// - If the file is absent, writes the full template.
+/// - If the file exists and already contains the derrick block, replaces it
+///   in place (idempotent).
+/// - If the file exists but has no derrick block, appends the block.
+///
+/// Called by the greenfield init path; the brownfield adopt path drives the
+/// same write through [`AdoptionPlan`].
+pub fn write_codex_instructions(repo_root: &Path) -> Result<(), AdoptError> {
+    let dir = repo_root.join(".codex");
+    fs::create_dir_all(&dir).map_err(|source| AdoptError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let path = dir.join("instructions.md");
+    let existing = if path.exists() {
+        fs::read_to_string(&path).map_err(|source| AdoptError::Io {
+            path: path.clone(),
+            source,
+        })?
+    } else {
+        String::new()
+    };
+    let content = if existing.is_empty() {
+        CODEX_INSTRUCTIONS_TEMPLATE.to_owned()
+    } else {
+        replace_or_append_block(&existing, CODEX_INSTRUCTIONS_TEMPLATE)
+    };
+    fs::write(&path, content).map_err(|source| AdoptError::Io { path, source })?;
+    Ok(())
+}
+
+/// Removes the derrick block from `<repo_root>/.codex/instructions.md`.
+///
+/// If the file ends up empty (or whitespace-only) after stripping, the file
+/// is deleted. If the file does not exist, this is a no-op.
+pub fn remove_codex_instructions(repo_root: &Path) -> Result<(), AdoptError> {
+    let path = repo_root.join(".codex/instructions.md");
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&path).map_err(|source| AdoptError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let stripped = strip_derrick_block(&content);
+    if stripped.trim().is_empty() {
+        fs::remove_file(&path).map_err(|source| AdoptError::Io { path, source })?;
+    } else {
+        fs::write(&path, stripped).map_err(|source| AdoptError::Io { path, source })?;
+    }
+    Ok(())
+}
+
+/// Remove the `<!-- derrick:start --> … <!-- derrick:end -->` block from `text`.
+fn strip_derrick_block(text: &str) -> String {
+    let Some(start) = text.find(DERRICK_BLOCK_START) else {
+        return text.to_owned();
+    };
+    let Some(end_relative) = text[start..].find(DERRICK_BLOCK_END) else {
+        return text.to_owned();
+    };
+    let end = start + end_relative + DERRICK_BLOCK_END.len();
+    // Trim one leading newline before the block and the trailing newline after.
+    let before = text[..start].trim_end_matches('\n');
+    let after = text[end..].trim_start_matches('\n');
+    if before.is_empty() && after.is_empty() {
+        String::new()
+    } else if before.is_empty() {
+        after.to_owned()
+    } else if after.is_empty() {
+        format!("{before}\n")
+    } else {
+        format!("{before}\n\n{after}")
+    }
+}
+
 fn replace_or_append_block(existing: &str, block: &str) -> String {
     if let Some(start) = existing.find(DERRICK_BLOCK_START) {
         if let Some(end_relative) = existing[start..].find(DERRICK_BLOCK_END) {
@@ -1746,5 +1825,89 @@ mod tests {
         let state = fs::read_to_string(dir.path().join(".derrick/state.json"))
             .unwrap_or_else(|error| panic!("read state failed: {error}"));
         assert!(state.matches("timestamp").count() >= 2);
+    }
+
+    #[test]
+    fn strip_derrick_block_removes_block_and_preserves_surroundings() {
+        let text = "# Heading\n\nbefore text\n\n<!-- derrick:start -->\nderrick content\n<!-- derrick:end -->\n\nafter text\n";
+        let stripped = strip_derrick_block(text);
+        assert_eq!(stripped, "# Heading\n\nbefore text\n\nafter text\n");
+    }
+
+    #[test]
+    fn strip_derrick_block_returns_empty_when_only_block_present() {
+        let text = "<!-- derrick:start -->\nderrick content\n<!-- derrick:end -->\n";
+        let stripped = strip_derrick_block(text);
+        assert!(
+            stripped.trim().is_empty(),
+            "expected empty, got {stripped:?}"
+        );
+    }
+
+    #[test]
+    fn strip_derrick_block_no_op_when_block_absent() {
+        let text = "# Heading\n\nno block here\n";
+        assert_eq!(strip_derrick_block(text), text);
+    }
+
+    #[test]
+    fn write_codex_instructions_creates_file() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        write_codex_instructions(dir.path())
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        let path = dir.path().join(".codex/instructions.md");
+        assert!(path.is_file());
+        let content =
+            fs::read_to_string(&path).unwrap_or_else(|error| panic!("read failed: {error}"));
+        assert!(content.contains(DERRICK_BLOCK_START));
+        assert!(content.contains(DERRICK_BLOCK_END));
+    }
+
+    #[test]
+    fn write_codex_instructions_is_idempotent() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        write_codex_instructions(dir.path())
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        write_codex_instructions(dir.path())
+            .unwrap_or_else(|error| panic!("second write failed: {error}"));
+        let content = fs::read_to_string(dir.path().join(".codex/instructions.md"))
+            .unwrap_or_else(|error| panic!("read failed: {error}"));
+        assert_eq!(content.matches(DERRICK_BLOCK_START).count(), 1);
+    }
+
+    #[test]
+    fn remove_codex_instructions_deletes_when_only_block() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        write_codex_instructions(dir.path())
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        remove_codex_instructions(dir.path())
+            .unwrap_or_else(|error| panic!("remove failed: {error}"));
+        assert!(!dir.path().join(".codex/instructions.md").exists());
+    }
+
+    #[test]
+    fn remove_codex_instructions_preserves_other_content() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let codex_dir = dir.path().join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        let path = codex_dir.join("instructions.md");
+        fs::write(
+            &path,
+            "# Existing\n\nuser content\n\n<!-- derrick:start -->\nblock\n<!-- derrick:end -->\n",
+        )
+        .unwrap_or_else(|error| panic!("write failed: {error}"));
+        remove_codex_instructions(dir.path())
+            .unwrap_or_else(|error| panic!("remove failed: {error}"));
+        let content =
+            fs::read_to_string(&path).unwrap_or_else(|error| panic!("read failed: {error}"));
+        assert!(!content.contains(DERRICK_BLOCK_START));
+        assert!(content.contains("user content"));
+    }
+
+    #[test]
+    fn remove_codex_instructions_noop_when_missing() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        remove_codex_instructions(dir.path())
+            .unwrap_or_else(|error| panic!("remove failed: {error}"));
     }
 }

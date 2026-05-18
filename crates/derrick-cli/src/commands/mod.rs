@@ -11,6 +11,7 @@ pub(crate) mod run;
 pub(crate) mod stack;
 pub(crate) mod status;
 pub(crate) mod ticket;
+pub(crate) mod uninstall;
 
 #[derive(Debug, Parser)]
 #[command(name = "derrick", version, about = "Derrick orchestration CLI")]
@@ -30,6 +31,17 @@ pub(crate) enum Command {
     Foreman(ForemanArgs),
     Stack(StackArgs),
     Observe(ObserveArgs),
+    Uninstall(UninstallArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UninstallArgs {
+    /// Skip the confirmation prompt and proceed immediately.
+    #[arg(long)]
+    pub(crate) yes: bool,
+    /// Remove all files without asking, including the state database.
+    #[arg(long = "purge")]
+    pub(crate) purge: bool,
 }
 
 #[derive(Debug, Args)]
