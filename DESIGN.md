@@ -277,8 +277,12 @@ Resolution rules:
   (preferred model, courtroom rounds, etc).
 - Falls back to a baked-in default shipped with the binary.
 
-Templates use Go `text/template` with a small context (`prompt`, `rig`,
-`feature_dir`, `tasks_md`, `batch`, env). No general expression language.
+Templates use a simple `{{var}}` substitution (no general
+expression language) with a small fixed context: `prompt`,
+`site_name`, `site_prefix`, `feature_dir`, `tasks_md`,
+`batch`, `run_id`. (Older drafts referenced a `rig` variable;
+that's vestigial gastown vocabulary — site_name / site_prefix
+are the canonical names per D27.)
 
 ---
 
