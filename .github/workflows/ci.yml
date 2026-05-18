@@ -69,13 +69,9 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov@0.8.7
+        uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
-        run: |
-          cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
-          cargo llvm-cov report --fail-under-lines 80
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info --fail-under-lines 80
       - uses: actions/upload-artifact@v4
         if: always()
         with:
