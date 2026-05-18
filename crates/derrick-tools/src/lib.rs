@@ -43,6 +43,12 @@ pub struct HostRequest {
     pub env: HashMap<String, String>,
     /// Copilot-specific tool permission override.
     pub copilot_tools: CopilotToolPermission,
+    /// Optional model override in `provider/model` format (e.g. `anthropic/claude-sonnet-4-5`).
+    ///
+    /// Passed as `--model <value>` to hosts that support it (currently opencode).
+    /// Ignored by hosts that do not expose a `--model` flag (claude, codex, copilot).
+    /// `None` means the host uses its own default or configured model.
+    pub model: Option<String>,
     /// Run the host in headless mode — suppress interactive permission prompts.
     ///
     /// Pipeline steps always set this to `true`: derrick's pipeline runs without
@@ -63,6 +69,7 @@ impl HostRequest {
             timeout: Duration::from_secs(600),
             env: HashMap::new(),
             copilot_tools: CopilotToolPermission::Default,
+            model: None,
             headless: false,
         }
     }

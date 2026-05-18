@@ -12,13 +12,15 @@ const NAME: &str = "opencode";
 ///
 /// Invocation pattern:
 /// ```text
-/// opencode run "<prompt>" --dir <cwd> [--dangerously-skip-permissions]
+/// opencode run "<prompt>" --dir <cwd> [--model provider/model] [--dangerously-skip-permissions]
 /// ```
 ///
 /// The `--dir` flag sets the project directory without changing the process
 /// working directory, which keeps the host's path resolution aligned with the
 /// derrick worktree. `--dangerously-skip-permissions` suppresses interactive
-/// tool-permission prompts in headless pipeline runs.
+/// tool-permission prompts in headless pipeline runs. `--model` is forwarded
+/// from [`HostRequest::model`] when set, allowing pipeline steps to override
+/// the opencode default (e.g. `anthropic/claude-sonnet-4-5`).
 #[derive(Clone, Debug)]
 pub struct OpencodeHost {
     binary: PathBuf,
@@ -63,6 +65,10 @@ impl HostAdapter for OpencodeHost {
             OsString::from("--dir"),
             request.cwd.as_os_str().to_owned(),
         ];
+        if let Some(ref model) = request.model {
+            args.push(OsString::from("--model"));
+            args.push(OsString::from(model.as_str()));
+        }
         if request.headless {
             args.push(OsString::from("--dangerously-skip-permissions"));
         }

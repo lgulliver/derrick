@@ -76,6 +76,7 @@ fn request(cwd: &Path) -> HostRequest {
         timeout: Duration::from_secs(2),
         env: HashMap::new(),
         copilot_tools: CopilotToolPermission::Default,
+        model: None,
         headless: false,
     }
 }
