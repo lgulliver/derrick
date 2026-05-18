@@ -15,6 +15,7 @@ User left around 23:30 with the instruction:
 | T005 | `derrick-memory` two-domain store + D9 gate | 3 | 16m 47s | 90.00% | — |
 | T006 | `derrick-models` BYOM trait + shell provider | 2 | 7m 12s | 90.55% | — |
 | T007 | `derrick-substrate-native` SQLite-backed CRUD | 3 | 10m 48s | 93.08% | 92.29% |
+| T008 | `derrick-cli` minimal (init/status/doctor/run-stub) | 4 | 10m 59s | 80.56% | 90%+ |
 
 All shipped under conventional commits, all CI runs green
 (matrix: ubuntu-latest + macos-latest, plus rustfmt, clippy
@@ -79,12 +80,30 @@ Per AGENTS.md, the bar is `T001` + `T002` + `T007` + a minimal
 | `derrick-config` (T001) | ✅ Shipped pre-overnight |
 | `derrick-substrate` trait (T002) | ✅ |
 | `derrick-substrate-native` (T007) | ✅ |
-| `derrick-cli` minimal (T008) | ⏳ in flight as I write this |
-| `derrick-flow` minimal (T009) | ⏳ next to draft |
+| `derrick-cli` minimal (T008) | ✅ |
+| `derrick-flow` minimal (T009) | ⏳ NOT drafted yet |
 
-If T008 + T009 land cleanly we hit the dogfooding bar in the
-same overnight stretch. If not, we're one or two tickets
-short.
+**Three of four bar items shipped overnight.** T009 was left
+intentionally — it requires host invocation (shelling to
+`claude`/`codex`) which entangles with a yet-to-be-built
+`derrick-tools` host-adapter crate, and the spec needed
+fresh-morning thinking rather than a rushed overnight draft
+that would burn codex assay rounds on a botched first pass.
+
+End-to-end smoke test of the assembled platform-so-far is
+already working:
+
+```
+$ derrick init                                  # exits 1, T011 pointer (correct)
+$ derrick init --greenfield --site smoke ...    # writes yaml + opens substrate
+$ derrick status                                # reads substrate, prints state
+$ derrick run add-feature --prompt "..."        # exits 1, T009 pointer (correct)
+```
+
+The `derrick` binary works, it's wired through the substrate,
+config and memory layers are real, scrub + caveman are real
+and tested, and the only missing piece is "actually execute
+the pipeline" — which is T009.
 
 ## What's NOT shipped (deliberately deferred)
 
@@ -103,19 +122,39 @@ brownfield + Copilot dispatch + TUI + full BYOM.
 
 ## Recommended morning agenda
 
-1. Skim the commit log (`git log --oneline` shows ~12 commits).
-2. Check `gh run list` — all green.
-3. Read `DESIGN.md §12` decision table — no new D entries
+1. Skim the commit log (`git log --oneline` — ~18 commits
+   added overnight).
+2. Check `gh run list` — last 8 runs all green.
+3. Try the smoke test against the built binary
+   (`cargo build -p derrick-cli`; then `derrick --version`,
+   `derrick init` (refuses with T011 pointer),
+   `derrick init --greenfield --site <name>` in a temp dir).
+4. Read `DESIGN.md §12` decision table — no new D entries
    tonight, but you can see the existing 29.
-4. Decide: switch to dogfooding now (after T008+T009 land), or
-   ship one more block of tickets (T010/T011) before flipping?
-5. If switching: I write up the switch proposal (per AGENTS.md
-   §Orchestration model "the orchestrator should propose the
-   switch, get human confirmation") and we run the first
+5. Decide T009 scope before drafting:
+   - Option A: T009 derrick-flow + lightweight inline host
+     shells (just enough to call `claude`/`codex` from the
+     pipeline) — single ticket, gets to dogfooding fastest.
+   - Option B: T009 derrick-flow minimal (pipeline state
+     machine only, no real host calls — writes placeholder
+     artifacts), then T010 derrick-tools (host adapters),
+     then T011 wire T009→T010. Three tickets, cleaner
+     separation but slower.
+
+   My lean: A. The host shells are small (~50 LOC each for
+   claude/codex), and bundling them into T009 keeps the
+   dogfooding cycle short. We can always extract to
+   derrick-tools later when it grows.
+
+6. After T009 lands and works against the substrate end-to-
+   end (run `derrick run add-feature` and watch it produce
+   real `spec.md` / `plan.md` / `assay/verdict.md` /
+   `tasks.md`), the dogfooding bar is met. I write up the
+   switch proposal and we run the first
    `/add-feature` against derrick itself.
 
-## Tickets queued for codex review when you wake
+## Tickets queued for codex review
 
-- T008 derrick-cli minimal (currently in codex review)
-- T009 derrick-flow minimal (drafted by hand if T008 is
-  accepted before you wake; otherwise queued)
+None pending. T008 is the last item codex reviewed; it
+accepted on round 4. Drafting T009 is the explicit morning
+decision (per agenda item 5).
