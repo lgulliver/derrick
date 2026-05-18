@@ -1956,7 +1956,11 @@ fi
 
     #[tokio::test]
     async fn assay_unparsable_verdict_surfaces_step_failed() -> TestResult {
-        let reviewer = reviewer_script("#!/bin/sh\nprintf 'no verdict\\n'")?;
+        // Drain stdin first so the shell provider's stdin write doesn't
+        // hit SIGPIPE on Linux (macOS is more permissive about pipes
+        // closed before the writer finishes). The drained envelope is
+        // discarded; the test only cares about the response shape.
+        let reviewer = reviewer_script("#!/bin/sh\ncat > /dev/null\nprintf 'no verdict\\n'")?;
         let (_dir, runner) = runner(&yaml(
             add_feature_pipeline(),
             &reviewer.path().join("reviewer"),
