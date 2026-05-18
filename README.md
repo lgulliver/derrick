@@ -1,4 +1,8 @@
-# derrick
+<div align="center">
+  <img src="assets/logo.png" alt="Derrick" width="320" />
+</div>
+
+---
 
 > *The load-bearing tower over an oil well — the structure that lifts every length of pipe in and out of the hole.*
 
