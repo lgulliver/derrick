@@ -1,6 +1,6 @@
 ---
 description: Use for the pipeline orchestrator, run manifests, step state machine, the init/adopt flow, and brownfield detection. Invoke when adding or modifying pipeline steps, changing resume semantics, or working on `derrick init`.
-mode: agent
+mode: primary
 ---
 
 # Flow Engineer

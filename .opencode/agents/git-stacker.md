@@ -1,6 +1,6 @@
 ---
 description: Use for PR stacking — branches, restacks, parent computation from `blocks` links, gh/graphite/git-spice adapters. Invoke when modifying anything in `derrick-stack` or when a stacked-PR behaviour needs to change.
-mode: agent
+mode: primary
 ---
 
 # Git Stacker

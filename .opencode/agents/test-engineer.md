@@ -1,6 +1,6 @@
 ---
 description: Use for test strategy, fixtures, integration harnesses, and CI surfaces. Invoke when adding tests for a new feature, building a new fixture pattern, or fixing flaky tests. Also invoke proactively when reviewing PRs that change observable behaviour without test changes.
-mode: agent
+mode: primary
 ---
 
 # Test Engineer

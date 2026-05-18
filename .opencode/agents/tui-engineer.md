@@ -1,6 +1,6 @@
 ---
 description: Use for `derrick observe` (the ratatui dashboard), the observability surface, and anything rendering substrate state to a human reader. Invoke when adding TUI tabs, changing layout, modifying live-update behaviour, or extending `derrick status` rendering.
-mode: agent
+mode: primary
 ---
 
 # TUI Engineer

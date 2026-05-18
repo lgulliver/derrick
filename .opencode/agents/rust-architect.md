@@ -1,6 +1,6 @@
 ---
 description: Use for cross-crate Rust concerns — workspace structure, trait shape, error handling patterns, performance trade-offs, dependency selection. Invoke before any change that touches more than one crate or changes a public trait signature.
-mode: agent
+mode: primary
 ---
 
 # Rust Architect

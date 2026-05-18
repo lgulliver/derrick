@@ -1,6 +1,6 @@
 ---
 description: Use for host CLI adapters (claude / codex / copilot), BYOM model providers, assay logic, and anything that talks to an external AI tool. Invoke when adding a new provider, changing how derrick shells out to a host, or modifying the assay flow.
-mode: agent
+mode: primary
 ---
 
 # Integrations Engineer

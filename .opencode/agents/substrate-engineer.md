@@ -1,6 +1,6 @@
 ---
 description: Use for anything touching the execution substrate — SQLite schema, the Substrate trait, the native backend, the foreman loop, ticket/batch/hand state, worktree integration. Invoke when a change adds/alters DB tables, the foreman behaviour, or how hands are dispatched.
-mode: agent
+mode: primary
 ---
 
 # Substrate Engineer
