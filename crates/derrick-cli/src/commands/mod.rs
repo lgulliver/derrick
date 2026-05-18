@@ -260,6 +260,8 @@ pub(crate) enum TicketCommand {
     Reopen(TicketReopenArgs),
     /// Block a ticket on a predecessor and/or with a human note.
     Block(TicketBlockArgs),
+    /// Adversarial pre-PR code review.
+    CodeReview(TicketCodeReviewArgs),
 }
 
 #[derive(Debug, Args)]
@@ -297,6 +299,18 @@ pub(crate) struct TicketReopenArgs {
     pub(crate) id: String,
     #[arg(long)]
     pub(crate) note: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct TicketCodeReviewArgs {
+    /// Ticket identifier.
+    pub(crate) id: String,
+    /// Branch to review (the hand's work branch).
+    #[arg(long)]
+    pub(crate) branch: String,
+    /// Remediation round number (0-indexed; reported in output and filenames).
+    #[arg(long, default_value = "0")]
+    pub(crate) round: u32,
 }
 
 #[derive(Debug, Args)]

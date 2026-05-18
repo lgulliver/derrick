@@ -12,11 +12,11 @@ use derrick_substrate::{
 use derrick_substrate_native::NativeSubstrate;
 
 use crate::commands::{
-    TicketArgs, TicketBlockArgs, TicketCommand, TicketDoneArgs, TicketReopenArgs, TicketReviewArgs,
-    TicketShowArgs,
+    TicketArgs, TicketBlockArgs, TicketCodeReviewArgs, TicketCommand, TicketDoneArgs,
+    TicketReopenArgs, TicketReviewArgs, TicketShowArgs,
 };
 use crate::exit_code::CliExitCode;
-use crate::{current_repo_root, message, native_paths, read_config};
+use crate::{create_dir_all, current_repo_root, message, native_paths, read_config, write_file};
 
 pub(crate) async fn execute(args: TicketArgs) -> Result<CliExitCode, crate::CliError> {
     let repo_root = current_repo_root()?;
@@ -53,6 +53,9 @@ async fn dispatch(
         }
         TicketCommand::Reopen(reopen) => ticket_reopen(reopen, substrate).await,
         TicketCommand::Block(block) => ticket_block(block, substrate).await,
+        TicketCommand::CodeReview(args) => {
+            ticket_code_review(args, config, repo_root, substrate).await
+        }
     }
 }
 
@@ -259,6 +262,95 @@ async fn ticket_block(
         .await?;
     println!("ticket {} -> {}", ticket.id, ticket.state);
     Ok(CliExitCode::Success)
+}
+
+async fn ticket_code_review(
+    args: TicketCodeReviewArgs,
+    config: &Config,
+    repo_root: &Path,
+    substrate: &NativeSubstrate,
+) -> Result<CliExitCode, crate::CliError> {
+    let cr = config.tools().code_review();
+
+    if !cr.enabled() {
+        println!("code_review is disabled in derrick.yaml (tools.code_review.enabled: false)");
+        println!("To enable: set tools.code_review.enabled: true and configure a reviewer role.");
+        return Ok(CliExitCode::Success);
+    }
+
+    let ticket_id = parse_ticket_id(&args.id)?;
+    let ticket = substrate
+        .get_ticket(&ticket_id)
+        .await?
+        .ok_or_else(|| message(format!("ticket {} not found", ticket_id)))?;
+
+    let base = cr.base_branch();
+    let diff = git_diff_branch(repo_root, base, &args.branch)?;
+
+    if diff.trim().is_empty() {
+        println!(
+            "No diff between {base} and {}. Code review passed.",
+            args.branch
+        );
+        return Ok(CliExitCode::Success);
+    }
+
+    let outcome = derrick_flow::run_code_review(
+        &diff,
+        &ticket.title,
+        &ticket.body,
+        cr.role(),
+        config,
+        repo_root,
+    )
+    .await
+    .map_err(|e| message(e.to_string()))?;
+
+    let review_dir = repo_root
+        .join(".derrick")
+        .join("reviews")
+        .join(ticket_id.as_str());
+    create_dir_all(&review_dir)?;
+    let review_path = review_dir.join(format!("round-{}.md", args.round));
+    write_file(&review_path, &outcome.review_text)?;
+
+    match outcome.verdict.as_str() {
+        "pass" => {
+            println!(
+                "Code review passed (round {}). Review written to: {}",
+                args.round,
+                review_path.display()
+            );
+            Ok(CliExitCode::Success)
+        }
+        _ => {
+            eprintln!(
+                "Code review found issues (round {}):\n\n{}",
+                args.round, outcome.review_text
+            );
+            eprintln!(
+                "\nReview written to: {}\n\
+                 Fix the issues above, then run: derrick ticket code-review {} --branch {} --round {}",
+                review_path.display(),
+                args.id,
+                args.branch,
+                args.round + 1
+            );
+            Ok(CliExitCode::ReviewIssues)
+        }
+    }
+}
+
+fn git_diff_branch(repo_root: &Path, base: &str, branch: &str) -> Result<String, crate::CliError> {
+    let output = Command::new("git")
+        .args(["diff", &format!("origin/{base}...{branch}"), "--"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|source| crate::CliError::Io {
+            path: repo_root.to_path_buf(),
+            source,
+        })?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn parse_ticket_id(raw: &str) -> Result<TicketId, crate::CliError> {

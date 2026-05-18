@@ -1362,6 +1362,111 @@ fn validate_rounds_template(template: &str, feature_available: bool) -> Result<(
     }
 }
 
+/// Outcome of a single adversarial code review pass.
+#[derive(Debug)]
+pub struct CodeReviewOutcome {
+    /// `"pass"` or `"fail"`.
+    pub verdict: String,
+    /// Full review text produced by the reviewer model.
+    pub review_text: String,
+}
+
+/// Run one adversarial code review pass.
+///
+/// Called by `derrick ticket code-review`. Uses the configured reviewer role
+/// to assess the diff against the ticket requirements. Verdict is extracted
+/// from a `## Verdict` section; if none is found the whole response is
+/// returned as-is and treated as a failure.
+pub async fn run_code_review(
+    diff: &str,
+    ticket_title: &str,
+    ticket_body: &str,
+    role: &str,
+    config: &Config,
+    _repo_root: &Path,
+) -> Result<CodeReviewOutcome, RunError> {
+    let prompt = format!(
+        "You are an adversarial code reviewer. Review the following diff.\n\n\
+         ## Ticket\n\n**{ticket_title}**\n\n{ticket_body}\n\n\
+         ## Diff\n\n```diff\n{diff}\n```\n\n\
+         Review for: security vulnerabilities, logic errors, missing edge cases, \
+         inadequate test coverage, constitution violations, and style issues.\n\
+         Be direct and specific — cite line numbers where relevant.\n\
+         End your review with `## Verdict` followed by exactly one word on its own \
+         line: `pass` or `fail`."
+    );
+
+    let model = resolve_role(
+        role,
+        config.roles(),
+        config.models(),
+        &AuthStore::from_env(),
+    )
+    .await?;
+    let response = model
+        .complete(completion_request(prompt, None, None))
+        .await?;
+
+    let verdict = extract_verdict_from_review(&response.text);
+
+    Ok(CodeReviewOutcome {
+        verdict,
+        review_text: response.text,
+    })
+}
+
+fn extract_verdict_from_review(text: &str) -> String {
+    let mut after_verdict = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("## verdict") {
+            after_verdict = true;
+            continue;
+        }
+        if after_verdict && !trimmed.is_empty() {
+            let word = trimmed
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
+            if word == "pass" || word == "fail" {
+                return word;
+            }
+            return "fail".to_owned();
+        }
+    }
+    "fail".to_owned()
+}
+
+#[cfg(test)]
+mod code_review_tests {
+    use super::extract_verdict_from_review;
+
+    #[test]
+    fn pass_verdict_extracted() {
+        let text = "Looks good.\n\n## Verdict\npass\n";
+        assert_eq!(extract_verdict_from_review(text), "pass");
+    }
+
+    #[test]
+    fn fail_verdict_extracted() {
+        let text = "Bug on line 3.\n\n## Verdict\nfail\n";
+        assert_eq!(extract_verdict_from_review(text), "fail");
+    }
+
+    #[test]
+    fn missing_verdict_treated_as_fail() {
+        let text = "Some review text with no verdict heading.";
+        assert_eq!(extract_verdict_from_review(text), "fail");
+    }
+
+    #[test]
+    fn case_insensitive_heading() {
+        let text = "## verdict\nPASS";
+        assert_eq!(extract_verdict_from_review(text), "pass");
+    }
+}
+
 fn completion_request(
     prompt: String,
     cached_prefix: Option<String>,

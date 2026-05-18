@@ -119,7 +119,7 @@ VISIBILITY
   doctor       Toolchain and config health check
 
 TICKET MANAGEMENT
-  ticket       done / review / list / show / reject / reopen / block
+  ticket       done / review / code-review / list / show / reject / reopen / block
 
 STACKING
   stack        show / restack / submit — PR stack management
@@ -185,7 +185,7 @@ Configured per pipeline step in `derrick.yaml`. Bring your own model on any step
 
 ## Status
 
-**Active development.** Architecture and 37 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 39 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -193,6 +193,8 @@ What's landed and tested:
 - ✅ Full pipeline executor with multi-reviewer assay and `parallel_group` steps
 - ✅ Foreman dispatch loop (attached and detached daemon)
 - ✅ Ticket state machine (ready → in-flight → in-review → done / blocked / rejected)
+- ✅ `derrick ticket code-review` — adversarial pre-PR code review with auto-remediation loop
+- ✅ Per-run isolated git worktrees (`.derrick/worktrees/<run-id>/`) for parallel safety
 - ✅ `derrick scrub` with 80%+ reduction on git and cargo output
 - ✅ `derrick caveman` with 60%+ reduction at Full intensity on verbose prose
 - ✅ `derrick observe` — live ratatui dashboard
@@ -206,15 +208,15 @@ What's landed and tested:
 - ✅ `marketplace.json` — Claude Code plugin discovery
 - 🔜 Homebrew tap (v1.1)
 - 🔜 Per-session token telemetry in `derrick gain`
-- 🔜 True parallel fan-out for multi-reviewer assay (§9.C.5)
+- 🔜 True parallel fan-out for multi-reviewer assay
 
-412 tests passing across 17 crates.
+425 tests passing across 17 crates.
 
 ---
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 37 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 39 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 

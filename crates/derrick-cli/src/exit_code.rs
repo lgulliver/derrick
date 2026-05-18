@@ -7,6 +7,8 @@ pub(crate) enum CliExitCode {
     /// Refused for a user-facing policy reason (e.g. mode guard); the
     /// command printed an explanatory message to stderr.
     Refused,
+    /// Code review found issues; the calling agent should remediate and retry.
+    ReviewIssues,
     DoctorFailures(usize),
 }
 
@@ -16,6 +18,7 @@ impl From<CliExitCode> for ExitCode {
             CliExitCode::Success => Self::SUCCESS,
             CliExitCode::Failure => Self::from(1),
             CliExitCode::Refused => Self::from(2),
+            CliExitCode::ReviewIssues => Self::from(3),
             CliExitCode::DoctorFailures(count) => {
                 let capped = u8::try_from(count).unwrap_or(u8::MAX);
                 Self::from(capped)

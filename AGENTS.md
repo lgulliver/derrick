@@ -166,6 +166,36 @@ Pick the right specialist before starting work:
 Cross-crate changes route through `rust-architect` (technical) and
 `design-keeper` (intent recorded).
 
+## Hand completion protocol
+
+When you are a **hand** (Copilot, Codex, or Claude acting as implementer)
+and you have finished work on a ticket, follow this sequence before
+transitioning to InReview:
+
+```bash
+# 1. Run adversarial code review (repeats up to tools.code_review.rounds times)
+derrick ticket code-review <ticket-id> --branch <your-branch> --round 0
+
+# If exit code is 3 (issues found): read the review in .derrick/reviews/<id>/round-0.md,
+# fix the issues, commit, then retry:
+derrick ticket code-review <ticket-id> --branch <your-branch> --round 1
+# ... up to the configured rounds limit
+
+# 2. Only when code review exits 0 (pass): transition to InReview
+derrick ticket review <ticket-id> --branch <your-branch> --head-sha <sha> [--pr-url <url>]
+```
+
+If the code review fails after all configured rounds, stop and surface the
+final review report to the human. Do NOT open a PR on a failed review.
+
+Exit codes:
+- **0** — pass (proceed to `ticket review`)
+- **1** — infrastructure error (check config, git, substrate)
+- **3** — issues found (fix and retry with `--round N+1`)
+
+The review file is always written to `.derrick/reviews/<id>/round-N.md`
+so the human can audit the review history regardless of outcome.
+
 ## Stop conditions
 
 Stop and ask the human via `derrick mail --human`
@@ -177,6 +207,7 @@ Stop and ask the human via `derrick mail --human`
 - A test cannot be written for a change. (Untestable change → no
   change.)
 - The assay reviewer rejects the same plan twice.
+- The code review still fails after `tools.code_review.rounds` attempts.
 - The host's own AGENTS.md / CLAUDE.md / hooks would need
   derrick-side coordination to work. We don't coordinate; the
   host's rules stand.

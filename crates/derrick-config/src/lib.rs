@@ -212,6 +212,7 @@ impl Config {
         validate_state_dir(&self.state.dir)?;
         validate_roles(&self.roles, &self.models)?;
         validate_assay(&self.tools.assay, &self.roles)?;
+        validate_code_review(&self.tools.code_review, &self.roles)?;
         validate_pipeline(&self.pipeline, &self.roles)?;
         Ok(())
     }
@@ -444,6 +445,7 @@ pub struct Tools {
     claude: Claude,
     git: Git,
     foreman: Foreman,
+    code_review: CodeReview,
 }
 
 impl Tools {
@@ -481,6 +483,11 @@ impl Tools {
     pub fn foreman(&self) -> &Foreman {
         &self.foreman
     }
+
+    /// Returns code-review configuration.
+    pub fn code_review(&self) -> &CodeReview {
+        &self.code_review
+    }
 }
 
 impl Default for Tools {
@@ -499,6 +506,49 @@ impl Default for Tools {
             claude: Claude::default(),
             git: Git::default(),
             foreman: Foreman::default(),
+            code_review: CodeReview::default(),
+        }
+    }
+}
+
+/// Code-review configuration for pre-PR adversarial review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeReview {
+    enabled: bool,
+    role: String,
+    rounds: u32,
+    base_branch: String,
+}
+
+impl CodeReview {
+    /// Returns whether code review is enabled.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Returns the reviewer role.
+    pub fn role(&self) -> &str {
+        &self.role
+    }
+
+    /// Maximum remediation rounds the hand should attempt.
+    pub fn rounds(&self) -> u32 {
+        self.rounds
+    }
+
+    /// Base branch to diff against.
+    pub fn base_branch(&self) -> &str {
+        &self.base_branch
+    }
+}
+
+impl Default for CodeReview {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            role: "reviewer".to_owned(),
+            rounds: 2,
+            base_branch: "main".to_owned(),
         }
     }
 }
@@ -1205,6 +1255,16 @@ fn validate_pipeline(steps: &[PipelineStep], roles: &RoleBindings) -> Result<(),
     Ok(())
 }
 
+fn validate_code_review(cr: &CodeReview, roles: &RoleBindings) -> Result<(), ConfigError> {
+    if cr.enabled && !roles.contains_key(&cr.role) {
+        return validation(format!(
+            "tools.code_review.role: references unknown role {:?} in roles",
+            cr.role
+        ));
+    }
+    Ok(())
+}
+
 fn validate_assay(assay: &Assay, roles: &RoleBindings) -> Result<(), ConfigError> {
     if assay.enabled {
         if !roles.contains_key(&assay.role) {
@@ -1522,6 +1582,7 @@ struct ToolsLayer {
     claude: Option<ClaudeLayer>,
     git: Option<GitLayer>,
     foreman: Option<ToolsForemanLayer>,
+    code_review: Option<CodeReviewLayer>,
 }
 
 impl ToolsLayer {
@@ -1533,6 +1594,11 @@ impl ToolsLayer {
         merge_nested(&mut self.claude, other.claude, ClaudeLayer::merge);
         merge_nested(&mut self.git, other.git, GitLayer::merge);
         merge_nested(&mut self.foreman, other.foreman, ToolsForemanLayer::merge);
+        merge_nested(
+            &mut self.code_review,
+            other.code_review,
+            CodeReviewLayer::merge,
+        );
     }
 
     fn finalize(self) -> Result<Tools, ConfigError> {
@@ -1544,6 +1610,7 @@ impl ToolsLayer {
             claude: self.claude.unwrap_or_default().finalize(),
             git: self.git.unwrap_or_default().finalize()?,
             foreman: self.foreman.unwrap_or_default().finalize(),
+            code_review: self.code_review.unwrap_or_default().finalize(),
         })
     }
 }
@@ -1558,6 +1625,46 @@ impl From<Tools> for ToolsLayer {
             claude: Some(tools.claude.into()),
             git: Some(tools.git.into()),
             foreman: Some(tools.foreman.into()),
+            code_review: Some(tools.code_review.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeReviewLayer {
+    enabled: Option<bool>,
+    role: Option<String>,
+    rounds: Option<u32>,
+    base_branch: Option<String>,
+}
+
+impl CodeReviewLayer {
+    fn merge(&mut self, other: Self) {
+        merge_scalar(&mut self.enabled, other.enabled);
+        merge_scalar(&mut self.role, other.role);
+        merge_scalar(&mut self.rounds, other.rounds);
+        merge_scalar(&mut self.base_branch, other.base_branch);
+    }
+
+    fn finalize(self) -> CodeReview {
+        let d = CodeReview::default();
+        CodeReview {
+            enabled: self.enabled.unwrap_or(d.enabled),
+            role: self.role.unwrap_or(d.role),
+            rounds: self.rounds.unwrap_or(d.rounds),
+            base_branch: self.base_branch.unwrap_or(d.base_branch),
+        }
+    }
+}
+
+impl From<CodeReview> for CodeReviewLayer {
+    fn from(cr: CodeReview) -> Self {
+        Self {
+            enabled: Some(cr.enabled),
+            role: Some(cr.role),
+            rounds: Some(cr.rounds),
+            base_branch: Some(cr.base_branch),
         }
     }
 }
