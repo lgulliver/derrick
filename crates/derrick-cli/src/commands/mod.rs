@@ -86,11 +86,19 @@ pub(crate) struct AddFeatureArgs {
     pub(crate) prompt: Option<String>,
     #[arg(long)]
     pub(crate) resume_from: Option<String>,
+    #[arg(long = "run")]
+    pub(crate) run_id: Option<String>,
+    #[arg(long = "skip")]
+    pub(crate) skip: Vec<String>,
+    #[arg(long = "unskip")]
+    pub(crate) unskip: Vec<String>,
     #[arg(long)]
+    pub(crate) dry_run: bool,
+    #[arg(long, help = "Alias for `--skip clarify`")]
     pub(crate) no_clarify: bool,
-    #[arg(long)]
+    #[arg(long, help = "Alias for `--skip checkpoint`")]
     pub(crate) no_checkpoint: bool,
-    #[arg(long)]
+    #[arg(long, help = "Alias for `--skip assay`")]
     pub(crate) no_assay: bool,
 }
 

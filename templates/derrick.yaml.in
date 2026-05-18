@@ -64,6 +64,7 @@ pipeline:
     inputs: ["{{feature_dir}}/spec.md", "{{feature_dir}}/plan.md"]
     rounds: "{{tools.assay.rounds}}"
     on_reject: halt
+    skippable: true
   - id: analyze
     role: proposer
     host: claude

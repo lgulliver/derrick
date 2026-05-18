@@ -13,9 +13,11 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 crossterm = { workspace = true }
 derrick-config = { path = "../derrick-config" }
+derrick-flow = { path = "../derrick-flow" }
 derrick-models = { path = "../derrick-models" }
 derrick-substrate = { path = "../derrick-substrate" }
 derrick-substrate-native = { path = "../derrick-substrate-native" }
+derrick-tools = { path = "../derrick-tools" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

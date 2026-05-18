@@ -44,9 +44,54 @@ fn mock_path(dir: &Path, names: &[&str]) -> TestResult<PathBuf> {
             use std::os::unix::fs::PermissionsExt;
             permissions.set_mode(0o755);
         }
+
         fs::set_permissions(&path, permissions)?;
     }
     Ok(bin_dir)
+}
+
+fn mock_flow_path(dir: &Path) -> TestResult<PathBuf> {
+    let bin_dir = dir.join("flow-bin");
+    fs::create_dir(&bin_dir)?;
+    write_executable(
+        &bin_dir.join("claude"),
+        r#"#!/bin/sh
+prompt="$2"
+/bin/mkdir -p specs/001-test .specify
+case "$prompt" in
+  *speckit.specify*)
+    printf '{"feature_directory":"specs/001-test"}' > .specify/feature.json
+    printf 'spec' > specs/001-test/spec.md
+    ;;
+  *speckit.plan*)
+    printf 'plan' > specs/001-test/plan.md
+    ;;
+  *speckit.tasks*)
+    printf 'tasks' > specs/001-test/tasks.md
+    ;;
+esac
+printf 'ok'
+"#,
+    )?;
+    write_executable(
+        &bin_dir.join("codex"),
+        r#"#!/bin/sh
+printf '## Verdict\naccept\n'
+"#,
+    )?;
+    Ok(bin_dir)
+}
+
+fn write_executable(path: &Path, contents: &str) -> TestResult {
+    fs::write(path, contents)?;
+    let mut permissions = fs::metadata(path)?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+    }
+    fs::set_permissions(path, permissions)?;
+    Ok(())
 }
 
 fn utf8(bytes: &[u8]) -> TestResult<String> {
@@ -536,26 +581,43 @@ fn doctor_exit_code_equals_fail_count() -> TestResult {
 }
 
 #[test]
-fn run_stub_prints_t009_hint_and_exits_1() -> TestResult {
+fn run_add_feature_smoke_writes_real_artifacts() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+    fs::create_dir_all(dir.path().join(".specify/memory"))?;
+    fs::write(
+        dir.path().join(".specify/memory/constitution.md"),
+        "constitution",
+    )?;
+    let path = mock_flow_path(dir.path())?;
+
     let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
         .args([
             "run",
             "add-feature",
             "--prompt",
             "hello",
-            "--resume-from",
-            "plan",
-            "--no-clarify",
             "--no-checkpoint",
-            "--no-assay",
+            "--run",
+            "smoke",
         ])
         .assert()
-        .code(1)
+        .success()
         .get_output()
-        .stderr
+        .stdout
         .clone();
 
-    assert_contains(&output, "T009")?;
+    assert_contains(&output, "smoke")?;
+    assert!(dir.path().join("specs/001-test/spec.md").exists());
+    assert!(dir.path().join("specs/001-test/plan.md").exists());
+    assert!(dir.path().join("specs/001-test/tasks.md").exists());
+    assert!(dir.path().join("specs/001-test/assay/verdict.md").exists());
+    assert!(dir
+        .path()
+        .join(".derrick/runs/smoke/manifest.json")
+        .exists());
     Ok(())
 }
 

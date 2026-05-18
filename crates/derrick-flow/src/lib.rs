@@ -1,1 +1,2186 @@
-//! derrick-flow — see DESIGN.md for the spec this crate is to satisfy.
+//! Pipeline orchestrator. See DESIGN.md §5.3 and §10.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use derrick_config::{Config, Host, PipelineStep, Runner as StepRunner};
+use derrick_models::{resolve_role, AuthStore, CompletionRequest, ModelError};
+use derrick_substrate::{Substrate, SubstrateError};
+use derrick_tools::{CopilotToolPermission, HostError, HostRegistry, HostRequest};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use tokio::process::Command;
+
+const ADD_FEATURE_PIPELINE: &str = "add-feature";
+const FEATURE_JSON: &str = ".specify/feature.json";
+const ASSAY_SYSTEM: &str = "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` followed by exactly one of: accept, revise, reject.";
+
+/// Executes derrick pipelines against a repository.
+pub struct Runner {
+    config: Config,
+    substrate: Arc<dyn Substrate>,
+    hosts: HostRegistry,
+    repo_root: PathBuf,
+}
+
+impl Runner {
+    /// Builds a runner from already-loaded configuration and process adapters.
+    pub fn new(
+        config: Config,
+        substrate: Arc<dyn Substrate>,
+        hosts: HostRegistry,
+        repo_root: PathBuf,
+    ) -> Self {
+        Self {
+            config,
+            substrate,
+            hosts,
+            repo_root,
+        }
+    }
+
+    /// Execute the named pipeline.
+    pub async fn run_pipeline(
+        &self,
+        pipeline_id: &str,
+        input: PipelineInput,
+    ) -> Result<RunOutcome, RunError> {
+        self.run_pipeline_from(pipeline_id, input, None).await
+    }
+
+    /// Resume a previous run from the named step.
+    pub async fn resume(
+        &self,
+        run_id: Option<&str>,
+        from_step: &str,
+    ) -> Result<RunOutcome, RunError> {
+        self.validate_pipeline_id(ADD_FEATURE_PIPELINE)?;
+        self.validate_config()?;
+
+        let run_id = match run_id {
+            Some(run_id) => run_id.to_owned(),
+            None => self.latest_run_id()?,
+        };
+        let manifest_path = self.manifest_path(&run_id);
+        let manifest = read_manifest(&manifest_path)?;
+        let current_hash = self.config_hash()?;
+        if manifest.config_hash != current_hash {
+            return Err(RunError::Config(format!(
+                "config has changed since this run started (manifest hash {}, current {}); start a fresh run instead",
+                manifest.config_hash, current_hash
+            )));
+        }
+        let from_index = self.step_index(from_step)?;
+        let mut input = PipelineInput {
+            prompt: Some(manifest.prompt),
+            skip: manifest.flags.skip.into_iter().collect(),
+            unskip: manifest.flags.unskip.into_iter().collect(),
+            dry_run: manifest.flags.dry_run,
+            run_id: Some(run_id),
+        };
+        if input.prompt.as_deref().is_some_and(str::is_empty) {
+            input.prompt = None;
+        }
+        let prior = manifest.steps.into_iter().take(from_index).collect();
+        self.run_pipeline_from(ADD_FEATURE_PIPELINE, input, Some(prior))
+            .await
+    }
+
+    async fn run_pipeline_from(
+        &self,
+        pipeline_id: &str,
+        input: PipelineInput,
+        prior_steps: Option<Vec<ManifestStep>>,
+    ) -> Result<RunOutcome, RunError> {
+        self.validate_pipeline_id(pipeline_id)?;
+        let prompt = input
+            .prompt
+            .clone()
+            .ok_or_else(|| RunError::MissingPrompt(pipeline_id.to_owned()))?;
+        self.validate_config()?;
+        self.validate_skip_flags(&input)?;
+        let _site = self.substrate.site().await?;
+
+        let run_id = input.run_id.clone().unwrap_or_else(default_run_id);
+        let run_dir = self.run_dir(&run_id);
+        let config_hash = self.config_hash()?;
+        let started_at = Utc::now();
+        let mut state = ExecutionState::new(prompt, run_id.clone(), run_dir.clone());
+        let mut manifest = RunManifest::new(
+            run_id.clone(),
+            pipeline_id.to_owned(),
+            state.prompt.clone(),
+            FlagsManifest::from_input(&input),
+            config_hash,
+            started_at,
+        );
+
+        if let Some(prior_steps) = prior_steps {
+            state.feature_dir = prior_feature_dir(&prior_steps);
+            manifest.feature_dir = state.feature_dir.clone();
+            manifest.steps = prior_steps;
+        }
+
+        create_dir_all(&run_dir)?;
+        write_manifest(&self.manifest_path(&run_id), &manifest)?;
+
+        let start_index = manifest.steps.len();
+        let mut outcome_status = RunStatus::Success;
+        for step in &self.config.pipeline()[start_index..] {
+            if self.should_skip(step, &input) {
+                let record = self.skipped_record(step);
+                manifest.steps.push(ManifestStep::from_record(&record));
+                write_manifest(&self.manifest_path(&run_id), &manifest)?;
+                continue;
+            }
+
+            let record = self.execute_step(step, &mut state).await?;
+            manifest.feature_dir = state.feature_dir.clone();
+            manifest.steps.push(ManifestStep::from_record(&record));
+            write_manifest(&self.manifest_path(&run_id), &manifest)?;
+
+            match record.status {
+                StepStatus::Success | StepStatus::Skipped => {}
+                StepStatus::Halted => {
+                    outcome_status = RunStatus::Halted;
+                    break;
+                }
+                StepStatus::Failed => {
+                    outcome_status = RunStatus::Failed;
+                    break;
+                }
+            }
+
+            if input.dry_run && step.id() == "tasks" {
+                outcome_status = RunStatus::Halted;
+                break;
+            }
+        }
+
+        manifest.status = outcome_status;
+        manifest.finished_at = Some(Utc::now());
+        manifest.feature_dir = state.feature_dir.clone();
+        write_manifest(&self.manifest_path(&run_id), &manifest)?;
+
+        Ok(RunOutcome {
+            run_id,
+            status: outcome_status,
+            feature_dir: state.feature_dir.map(|path| self.repo_root.join(path)),
+            steps: manifest.steps.into_iter().map(StepRecord::from).collect(),
+        })
+    }
+
+    async fn execute_step(
+        &self,
+        step: &PipelineStep,
+        state: &mut ExecutionState,
+    ) -> Result<StepRecord, RunError> {
+        let started_at = Utc::now();
+        let log_path = state.run_dir.join(format!("step-{}.log", step.id()));
+        let result = match (step.role(), step.runner()) {
+            (Some(_), None) => self.execute_role_step(step, state, &log_path).await,
+            (None, Some(StepRunner::Derrick)) => {
+                self.execute_derrick_step(step, state, &log_path).await
+            }
+            (None, Some(StepRunner::Human)) => self.execute_human_step(step, state, &log_path),
+            (None, Some(StepRunner::Bash)) => self.execute_bash_step(step, state, &log_path).await,
+            _ => Err(RunError::Config(format!(
+                "pipeline.{}: either supported role or runner is required",
+                step.id()
+            ))),
+        };
+        let finished_at = Utc::now();
+
+        match result {
+            Ok(StepExecution { status, artifacts }) => Ok(StepRecord {
+                id: step.id().to_owned(),
+                status,
+                started_at,
+                finished_at,
+                log_path,
+                artifacts,
+            }),
+            Err(error) => {
+                let _ignored = append_log(&log_path, &format!("{error}\n"));
+                let record = StepRecord {
+                    id: step.id().to_owned(),
+                    status: StepStatus::Failed,
+                    started_at,
+                    finished_at,
+                    log_path,
+                    artifacts: Vec::new(),
+                };
+                let manifest_path = self.manifest_path(&state.run_id);
+                if let Ok(mut manifest) = read_manifest(&manifest_path) {
+                    manifest.status = RunStatus::Failed;
+                    manifest.finished_at = Some(finished_at);
+                    manifest.steps.push(ManifestStep::from_record(&record));
+                    let _ignored = write_manifest(&manifest_path, &manifest);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn execute_role_step(
+        &self,
+        step: &PipelineStep,
+        state: &mut ExecutionState,
+        log_path: &Path,
+    ) -> Result<StepExecution, RunError> {
+        if let Some(host) = step.host() {
+            let command = required_step_text(step.command(), step.id(), "command")?;
+            let prompt = render_template(command, &self.template_context(state)?)?;
+            let host_name = host_name(host);
+            let host = self
+                .hosts
+                .get(host_name)
+                .ok_or_else(|| RunError::Config(format!("host {host_name:?} is not registered")))?;
+            let mut request = HostRequest::new(prompt, &self.repo_root);
+            if host_name == "copilot" {
+                request.copilot_tools = CopilotToolPermission::AllowAll;
+            }
+            let response = host
+                .run(request)
+                .await
+                .map_err(|source| RunError::StepFailed {
+                    id: step.id().to_owned(),
+                    message: source.to_string(),
+                })?;
+            write_log(log_path, &response.stdout, &response.stderr)?;
+            if step.id() == "specify" {
+                state.feature_dir = Some(read_feature_dir(&self.repo_root)?);
+            }
+            Ok(StepExecution::success(
+                self.detect_artifacts(step.id(), state),
+            ))
+        } else {
+            let role = required_step_text(step.role(), step.id(), "role")?;
+            let prompt = step
+                .command()
+                .map_or_else(|| state.prompt.clone(), ToOwned::to_owned);
+            let rendered = render_template(&prompt, &self.template_context(state)?)?;
+            let model = resolve_role(
+                role,
+                self.config.roles(),
+                self.config.models(),
+                &AuthStore::from_env(),
+            )
+            .await?;
+            let response = model
+                .complete(completion_request(rendered, None, None))
+                .await?;
+            write_log(log_path, &response.text, "")?;
+            Ok(StepExecution::success(
+                self.detect_artifacts(step.id(), state),
+            ))
+        }
+    }
+
+    async fn execute_derrick_step(
+        &self,
+        step: &PipelineStep,
+        state: &mut ExecutionState,
+        log_path: &Path,
+    ) -> Result<StepExecution, RunError> {
+        match step.id() {
+            "assay" => self.execute_assay(step, state, log_path).await,
+            "bridge" => {
+                write_log(log_path, "bridge skipped in solo mode\n", "")?;
+                Ok(StepExecution::skipped())
+            }
+            "foreman" => {
+                write_log(log_path, "foreman skipped in solo mode\n", "")?;
+                Ok(StepExecution::skipped())
+            }
+            other => Err(RunError::Config(format!(
+                "runner derrick is not supported for step {other:?} in T010"
+            ))),
+        }
+    }
+
+    fn execute_human_step(
+        &self,
+        step: &PipelineStep,
+        state: &ExecutionState,
+        log_path: &Path,
+    ) -> Result<StepExecution, RunError> {
+        let prompt = required_step_text(step.prompt(), step.id(), "prompt")?;
+        let prompt = render_template(prompt, &self.template_context(state)?)?;
+        write_log(log_path, &prompt, "")?;
+        let mut stdout = std::io::stdout();
+        stdout
+            .write_all(prompt.as_bytes())
+            .and_then(|()| stdout.write_all(b"\n"))
+            .and_then(|()| stdout.flush())
+            .map_err(|source| RunError::Io {
+                path: PathBuf::from("<stdout>"),
+                source,
+            })?;
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_to_string(&mut answer)
+            .map_err(|source| RunError::Io {
+                path: PathBuf::from("<stdin>"),
+                source,
+            })?;
+        if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes") {
+            Ok(StepExecution::success(Vec::new()))
+        } else {
+            Ok(StepExecution::halted(Vec::new(), "checkpoint declined"))
+        }
+    }
+
+    async fn execute_bash_step(
+        &self,
+        step: &PipelineStep,
+        state: &ExecutionState,
+        log_path: &Path,
+    ) -> Result<StepExecution, RunError> {
+        let command = required_step_text(step.command(), step.id(), "command")?;
+        let command = render_template(command, &self.template_context(state)?)?;
+        let output = Command::new("bash")
+            .arg("-lc")
+            .arg(command)
+            .current_dir(&self.repo_root)
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(|source| RunError::Io {
+                path: self.repo_root.clone(),
+                source,
+            })?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        write_log(log_path, &stdout, &stderr)?;
+        if output.status.success() {
+            Ok(StepExecution::success(Vec::new()))
+        } else {
+            Err(RunError::StepFailed {
+                id: step.id().to_owned(),
+                message: format!("bash exited with {}", output.status),
+            })
+        }
+    }
+
+    async fn execute_assay(
+        &self,
+        step: &PipelineStep,
+        state: &mut ExecutionState,
+        log_path: &Path,
+    ) -> Result<StepExecution, RunError> {
+        let feature_dir = state
+            .feature_dir
+            .clone()
+            .ok_or_else(|| RunError::Config("assay requires feature_dir".to_owned()))?;
+        let rounds = self.assay_rounds(step, state)?;
+        let reviewer_role = self
+            .config
+            .tools()
+            .assay()
+            .reviewers()
+            .first()
+            .map_or_else(|| self.config.tools().assay().role(), String::as_str);
+        let spec = read_to_string(&self.repo_root.join(&feature_dir).join("spec.md"))?;
+        let constitution = read_to_string(
+            &self
+                .repo_root
+                .join(self.config.guardrails().constitution_path()),
+        )?;
+
+        for round in 1..=rounds {
+            let plan = read_to_string(&self.repo_root.join(&feature_dir).join("plan.md"))?;
+            let model = resolve_role(
+                reviewer_role,
+                self.config.roles(),
+                self.config.models(),
+                &AuthStore::from_env(),
+            )
+            .await?;
+            let model_name = model.name().to_owned();
+            let response = model
+                .complete(completion_request(
+                    format!("Task: {}\n\nPlan:\n{plan}", state.prompt),
+                    Some(format!("Constitution:\n{constitution}\n\nSpec:\n{spec}")),
+                    Some(ASSAY_SYSTEM.to_owned()),
+                ))
+                .await?;
+            append_log(log_path, &response.text)?;
+            let verdict = parse_verdict(&response.text).ok_or_else(|| RunError::StepFailed {
+                id: step.id().to_owned(),
+                message: "could not parse verdict from reviewer response".to_owned(),
+            })?;
+            let verdict_path = self
+                .repo_root
+                .join(&feature_dir)
+                .join("assay")
+                .join("verdict.md");
+            create_dir_all(parent(&verdict_path)?)?;
+            let verdict_body = format!(
+                "model: {model_name}\nround: {round}\nverdict: {verdict}\n\n{}",
+                response.text
+            );
+            write_file(&verdict_path, &verdict_body)?;
+            match verdict {
+                "accept" => {
+                    return Ok(StepExecution::success(vec![relative_to_root(
+                        &self.repo_root,
+                        verdict_path,
+                    )?]));
+                }
+                "reject" => {
+                    return Ok(StepExecution::halted(
+                        vec![relative_to_root(&self.repo_root, verdict_path)?],
+                        "assay rejected",
+                    ));
+                }
+                "revise" if round < rounds => {
+                    let objections = suggested_revisions(&response.text).ok_or_else(|| {
+                        RunError::StepFailed {
+                            id: step.id().to_owned(),
+                            message: "could not parse suggested revisions from reviewer response"
+                                .to_owned(),
+                        }
+                    })?;
+                    self.replan_from_objections(state, objections).await?;
+                }
+                "revise" => {
+                    return Ok(StepExecution::halted(
+                        vec![relative_to_root(&self.repo_root, verdict_path)?],
+                        "assay requested revisions past configured rounds",
+                    ));
+                }
+                _ => unreachable_verdict(step.id())?,
+            }
+        }
+
+        Ok(StepExecution::halted(Vec::new(), "assay halted"))
+    }
+
+    async fn replan_from_objections(
+        &self,
+        state: &ExecutionState,
+        objections: &str,
+    ) -> Result<(), RunError> {
+        let plan_step = self
+            .config
+            .pipeline()
+            .iter()
+            .find(|step| step.id() == "plan")
+            .ok_or_else(|| RunError::Config("assay revise requires a plan step".to_owned()))?;
+        let host = plan_step
+            .host()
+            .ok_or_else(|| RunError::Config("assay revise requires plan step host".to_owned()))?;
+        let host_name = host_name(host);
+        let host = self
+            .hosts
+            .get(host_name)
+            .ok_or_else(|| RunError::Config(format!("host {host_name:?} is not registered")))?;
+        let prompt = format!(
+            "The reviewer raised the following objections. Produce a delta to plan.md that addresses each. Do not rewrite the plan from scratch.\n\n{objections}"
+        );
+        let response = host
+            .run(HostRequest::new(prompt, &self.repo_root))
+            .await
+            .map_err(|source| RunError::StepFailed {
+                id: "plan".to_owned(),
+                message: source.to_string(),
+            })?;
+        if !response.stdout.trim().is_empty() {
+            let feature_dir = state
+                .feature_dir
+                .as_ref()
+                .ok_or_else(|| RunError::Config("replan requires feature_dir".to_owned()))?;
+            let plan_path = self.repo_root.join(feature_dir).join("plan.md");
+            append_log(&plan_path, &response.stdout)?;
+        }
+        Ok(())
+    }
+
+    fn detect_artifacts(&self, step_id: &str, state: &ExecutionState) -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        match step_id {
+            "specify" => {
+                candidates.push(PathBuf::from(FEATURE_JSON));
+                if let Some(feature_dir) = &state.feature_dir {
+                    candidates.push(feature_dir.join("spec.md"));
+                }
+            }
+            "plan" => {
+                if let Some(feature_dir) = &state.feature_dir {
+                    candidates.push(feature_dir.join("plan.md"));
+                }
+            }
+            "tasks" => {
+                if let Some(feature_dir) = &state.feature_dir {
+                    candidates.push(feature_dir.join("tasks.md"));
+                }
+            }
+            "assay" => {
+                if let Some(feature_dir) = &state.feature_dir {
+                    candidates.push(feature_dir.join("assay/verdict.md"));
+                }
+            }
+            _ => {}
+        }
+        candidates
+            .into_iter()
+            .filter(|path| self.repo_root.join(path).exists())
+            .collect()
+    }
+
+    fn validate_pipeline_id(&self, pipeline_id: &str) -> Result<(), RunError> {
+        if pipeline_id == ADD_FEATURE_PIPELINE {
+            Ok(())
+        } else {
+            Err(RunError::UnknownPipeline(pipeline_id.to_owned()))
+        }
+    }
+
+    fn validate_config(&self) -> Result<(), RunError> {
+        let mut seen = BTreeSet::new();
+        let mut feature_available = false;
+        for step in self.config.pipeline() {
+            if !seen.insert(step.id().to_owned()) {
+                return Err(RunError::Config(format!(
+                    "pipeline.{}: duplicate step id",
+                    step.id()
+                )));
+            }
+            if let Some(group) = step.parallel_group() {
+                return Err(RunError::Config(format!(
+                    "pipeline.{}: parallel_group is not supported in T010; sequential execution only. Remove the field or wait for T015 (§9.C.4). Found {group:?}",
+                    step.id()
+                )));
+            }
+            if step.on_failure().is_some() {
+                return Err(RunError::Config(format!(
+                    "pipeline.{}: on_failure is not supported in T010; copilot dispatch failure policy is deferred to T013",
+                    step.id()
+                )));
+            }
+            if step.poll_interval().is_some() {
+                return Err(RunError::Config(format!(
+                    "pipeline.{}: poll_interval is not supported in T010; polling is deferred to T013",
+                    step.id()
+                )));
+            }
+            if let Some(runner) = step.runner() {
+                match runner {
+                    StepRunner::Claude | StepRunner::Codex | StepRunner::Copilot => {
+                        return Err(RunError::Config(format!(
+                            "runner: {} is not supported; use `host: {}` with a role binding instead (see DESIGN.md §4 and D30)",
+                            runner_name(runner),
+                            runner_name(runner)
+                        )));
+                    }
+                    StepRunner::Derrick | StepRunner::Human | StepRunner::Bash => {}
+                }
+            }
+            self.validate_template_field(step, step.command(), "command", feature_available)?;
+            self.validate_template_field(step, step.prompt(), "prompt", feature_available)?;
+            self.validate_template_field(step, step.batch(), "batch", feature_available)?;
+            for input in step.inputs() {
+                validate_template(input, feature_available).map_err(|error| {
+                    RunError::Config(format!("pipeline.{}.inputs: {error}", step.id()))
+                })?;
+            }
+            if let Some(rounds) = step.rounds() {
+                validate_rounds_template(rounds, feature_available)?;
+            }
+            if step.id() == "specify" {
+                feature_available = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_template_field(
+        &self,
+        step: &PipelineStep,
+        value: Option<&str>,
+        field: &str,
+        feature_available: bool,
+    ) -> Result<(), RunError> {
+        if let Some(value) = value {
+            validate_template(value, feature_available).map_err(|error| {
+                RunError::Config(format!("pipeline.{}.{}: {error}", step.id(), field))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn validate_skip_flags(&self, input: &PipelineInput) -> Result<(), RunError> {
+        for id in input.skip.iter().chain(input.unskip.iter()) {
+            let step = self
+                .config
+                .pipeline()
+                .iter()
+                .find(|step| step.id() == id)
+                .ok_or_else(|| RunError::Config(format!("unknown step `{id}`")))?;
+            if !step.skippable() {
+                return Err(RunError::Config(format!("step `{id}` is not skippable")));
+            }
+        }
+        Ok(())
+    }
+
+    fn should_skip(&self, step: &PipelineStep, input: &PipelineInput) -> bool {
+        (step.default_skip() && !input.unskip.contains(step.id())) || input.skip.contains(step.id())
+    }
+
+    fn skipped_record(&self, step: &PipelineStep) -> StepRecord {
+        let now = Utc::now();
+        StepRecord {
+            id: step.id().to_owned(),
+            status: StepStatus::Skipped,
+            started_at: now,
+            finished_at: now,
+            log_path: PathBuf::new(),
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn assay_rounds(&self, step: &PipelineStep, state: &ExecutionState) -> Result<usize, RunError> {
+        let raw = step
+            .rounds()
+            .unwrap_or_else(|| self.config.tools().assay().rounds());
+        let rendered = if raw == "{{tools.assay.rounds}}" {
+            self.config.tools().assay().rounds().to_owned()
+        } else {
+            render_template(raw, &self.template_context(state)?)?
+        };
+        rendered.parse::<usize>().map_err(|error| {
+            RunError::Config(format!(
+                "pipeline.{}.rounds: expected positive integer: {error}",
+                step.id()
+            ))
+        })
+    }
+
+    fn template_context(&self, state: &ExecutionState) -> Result<TemplateContext, RunError> {
+        Ok(TemplateContext {
+            prompt: state.prompt.clone(),
+            site_name: self.config.site().name().to_owned(),
+            site_prefix: self.config.site().prefix().to_owned(),
+            feature_dir: state.feature_dir.clone(),
+            run_id: state.run_id.clone(),
+        })
+    }
+
+    fn step_index(&self, step_id: &str) -> Result<usize, RunError> {
+        self.config
+            .pipeline()
+            .iter()
+            .position(|step| step.id() == step_id)
+            .ok_or_else(|| RunError::Config(format!("unknown step `{step_id}`")))
+    }
+
+    fn latest_run_id(&self) -> Result<String, RunError> {
+        let runs_dir = self.repo_root.join(self.config.state().dir()).join("runs");
+        let mut entries = read_dir_names(&runs_dir)?;
+        entries.sort();
+        entries
+            .pop()
+            .ok_or_else(|| RunError::Config("no previous runs found".to_owned()))
+    }
+
+    fn config_hash(&self) -> Result<String, RunError> {
+        config_hash(&self.repo_root.join("derrick.yaml"))
+    }
+
+    fn run_dir(&self, run_id: &str) -> PathBuf {
+        self.repo_root
+            .join(self.config.state().dir())
+            .join("runs")
+            .join(run_id)
+    }
+
+    fn manifest_path(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("manifest.json")
+    }
+}
+
+/// Input values and flags for a pipeline run.
+#[derive(Clone, Debug, Default)]
+pub struct PipelineInput {
+    /// The `/add-feature` prompt.
+    pub prompt: Option<String>,
+    /// Step IDs explicitly skipped for this run.
+    pub skip: BTreeSet<String>,
+    /// Step IDs explicitly re-enabled despite `default_skip: true`.
+    pub unskip: BTreeSet<String>,
+    /// Halt after the `tasks` step.
+    pub dry_run: bool,
+    /// Override run id.
+    pub run_id: Option<String>,
+}
+
+/// Result returned after a pipeline run.
+#[derive(Clone, Debug)]
+pub struct RunOutcome {
+    /// Run identifier.
+    pub run_id: String,
+    /// Final run status.
+    pub status: RunStatus,
+    /// Feature directory after `specify` completes.
+    pub feature_dir: Option<PathBuf>,
+    /// Per-step records.
+    pub steps: Vec<StepRecord>,
+}
+
+/// Final run status.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    /// All required steps completed.
+    Success,
+    /// A step failed.
+    Failed,
+    /// The run intentionally halted.
+    Halted,
+}
+
+/// One step's execution record.
+#[derive(Clone, Debug)]
+pub struct StepRecord {
+    /// Step identifier.
+    pub id: String,
+    /// Final step status.
+    pub status: StepStatus,
+    /// Start timestamp.
+    pub started_at: DateTime<Utc>,
+    /// Finish timestamp.
+    pub finished_at: DateTime<Utc>,
+    /// Step log path.
+    pub log_path: PathBuf,
+    /// Artifacts observed after this step.
+    pub artifacts: Vec<PathBuf>,
+}
+
+impl From<ManifestStep> for StepRecord {
+    fn from(step: ManifestStep) -> Self {
+        Self {
+            id: step.id,
+            status: step.status,
+            started_at: step.started_at,
+            finished_at: step.finished_at,
+            log_path: step.log_path,
+            artifacts: step.artifacts,
+        }
+    }
+}
+
+/// Per-step status.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    /// Step was skipped.
+    Skipped,
+    /// Step completed successfully.
+    Success,
+    /// Step failed.
+    Failed,
+    /// Step intentionally halted the run.
+    Halted,
+}
+
+/// Errors returned by the runner.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum RunError {
+    /// Pipeline id is unknown.
+    #[error("unknown pipeline: {0}")]
+    UnknownPipeline(String),
+    /// Required prompt is absent.
+    #[error("missing prompt for pipeline {0}")]
+    MissingPrompt(String),
+    /// A step failed.
+    #[error("step {id} failed: {message}")]
+    StepFailed {
+        /// Step identifier.
+        id: String,
+        /// Failure message.
+        message: String,
+    },
+    /// Substrate operation failed.
+    #[error("substrate error: {0}")]
+    Substrate(#[from] SubstrateError),
+    /// Host adapter failed.
+    #[error("host error: {0}")]
+    Host(#[from] HostError),
+    /// Model provider failed.
+    #[error("model error: {0}")]
+    Model(#[from] ModelError),
+    /// Filesystem operation failed.
+    #[error("io error at {path}: {source}")]
+    Io {
+        /// Path involved in the operation.
+        path: PathBuf,
+        /// Underlying source.
+        source: std::io::Error,
+    },
+    /// JSON operation failed.
+    #[error("json error at {path}: {source}")]
+    Json {
+        /// Path involved in the operation.
+        path: PathBuf,
+        /// Underlying source.
+        source: serde_json::Error,
+    },
+    /// Configuration is unsupported.
+    #[error("config error: {0}")]
+    Config(String),
+}
+
+#[derive(Clone)]
+struct ExecutionState {
+    prompt: String,
+    run_id: String,
+    run_dir: PathBuf,
+    feature_dir: Option<PathBuf>,
+}
+
+impl ExecutionState {
+    fn new(prompt: String, run_id: String, run_dir: PathBuf) -> Self {
+        Self {
+            prompt,
+            run_id,
+            run_dir,
+            feature_dir: None,
+        }
+    }
+}
+
+struct StepExecution {
+    status: StepStatus,
+    artifacts: Vec<PathBuf>,
+}
+
+impl StepExecution {
+    fn success(artifacts: Vec<PathBuf>) -> Self {
+        Self {
+            status: StepStatus::Success,
+            artifacts,
+        }
+    }
+
+    fn skipped() -> Self {
+        Self {
+            status: StepStatus::Skipped,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn halted(artifacts: Vec<PathBuf>, _message: impl Into<String>) -> Self {
+        Self {
+            status: StepStatus::Halted,
+            artifacts,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct RunManifest {
+    run_id: String,
+    pipeline_id: String,
+    prompt: String,
+    flags: FlagsManifest,
+    config_hash: String,
+    started_at: DateTime<Utc>,
+    finished_at: Option<DateTime<Utc>>,
+    status: RunStatus,
+    feature_dir: Option<PathBuf>,
+    steps: Vec<ManifestStep>,
+}
+
+impl RunManifest {
+    fn new(
+        run_id: String,
+        pipeline_id: String,
+        prompt: String,
+        flags: FlagsManifest,
+        config_hash: String,
+        started_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            run_id,
+            pipeline_id,
+            prompt,
+            flags,
+            config_hash,
+            started_at,
+            finished_at: None,
+            status: RunStatus::Success,
+            feature_dir: None,
+            steps: Vec::new(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct FlagsManifest {
+    skip: Vec<String>,
+    unskip: Vec<String>,
+    dry_run: bool,
+}
+
+impl FlagsManifest {
+    fn from_input(input: &PipelineInput) -> Self {
+        Self {
+            skip: input.skip.iter().cloned().collect(),
+            unskip: input.unskip.iter().cloned().collect(),
+            dry_run: input.dry_run,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct ManifestStep {
+    id: String,
+    status: StepStatus,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    log_path: PathBuf,
+    artifacts: Vec<PathBuf>,
+}
+
+impl ManifestStep {
+    fn from_record(record: &StepRecord) -> Self {
+        Self {
+            id: record.id.clone(),
+            status: record.status,
+            started_at: record.started_at,
+            finished_at: record.finished_at,
+            log_path: record.log_path.clone(),
+            artifacts: record.artifacts.clone(),
+        }
+    }
+}
+
+struct TemplateContext {
+    prompt: String,
+    site_name: String,
+    site_prefix: String,
+    feature_dir: Option<PathBuf>,
+    run_id: String,
+}
+
+fn render_template(template: &str, context: &TemplateContext) -> Result<String, RunError> {
+    let mut rendered = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let (prefix, after_prefix) = rest.split_at(start);
+        rendered.push_str(prefix);
+        let end = after_prefix
+            .find("}}")
+            .ok_or_else(|| RunError::Config("unterminated template var".to_owned()))?;
+        let name = after_prefix[2..end].trim();
+        rendered.push_str(&template_value(name, context)?);
+        rest = &after_prefix[end + 2..];
+    }
+    rendered.push_str(rest);
+    Ok(rendered)
+}
+
+fn template_value(name: &str, context: &TemplateContext) -> Result<String, RunError> {
+    match name {
+        "prompt" => Ok(context.prompt.clone()),
+        "site_name" => Ok(context.site_name.clone()),
+        "site_prefix" => Ok(context.site_prefix.clone()),
+        "run_id" => Ok(context.run_id.clone()),
+        "feature_dir" => context
+            .feature_dir
+            .as_ref()
+            .map(|path| path_string(path))
+            .ok_or_else(|| {
+                RunError::Config(
+                    "template var {{feature_dir}} is not available before specify completes"
+                        .to_owned(),
+                )
+            }),
+        "tasks_md" => context
+            .feature_dir
+            .as_ref()
+            .map(|path| path_string(&path.join("tasks.md")))
+            .ok_or_else(|| {
+                RunError::Config(
+                    "template var {{tasks_md}} is not available before specify completes"
+                        .to_owned(),
+                )
+            }),
+        "batch" => context
+            .feature_dir
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                RunError::Config(
+                    "template var {{batch}} is not available before specify completes".to_owned(),
+                )
+            }),
+        "rig" => Err(RunError::Config(
+            "unknown template var: {{rig}}; use {{site_name}}".to_owned(),
+        )),
+        other => Err(RunError::Config(format!(
+            "unknown template var: {{{{{other}}}}}"
+        ))),
+    }
+}
+
+fn validate_template(template: &str, feature_available: bool) -> Result<(), String> {
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let after_prefix = &rest[start..];
+        let end = after_prefix
+            .find("}}")
+            .ok_or_else(|| "unterminated template var".to_owned())?;
+        let name = after_prefix[2..end].trim();
+        match name {
+            "prompt" | "site_name" | "site_prefix" | "run_id" => {}
+            "feature_dir" | "tasks_md" | "batch" if feature_available => {}
+            "feature_dir" | "tasks_md" | "batch" => {
+                return Err(format!(
+                    "template var {{{{{name}}}}} is not available before specify completes"
+                ));
+            }
+            "rig" => return Err("unknown template var: {{rig}}; use {{site_name}}".to_owned()),
+            other => return Err(format!("unknown template var: {{{{{other}}}}}")),
+        }
+        rest = &after_prefix[end + 2..];
+    }
+    Ok(())
+}
+
+fn validate_rounds_template(template: &str, feature_available: bool) -> Result<(), RunError> {
+    if template == "{{tools.assay.rounds}}" {
+        Ok(())
+    } else {
+        validate_template(template, feature_available).map_err(RunError::Config)
+    }
+}
+
+fn completion_request(
+    prompt: String,
+    cached_prefix: Option<String>,
+    system: Option<String>,
+) -> CompletionRequest {
+    CompletionRequest {
+        cached_prefix,
+        prompt,
+        system,
+        max_tokens: Some(4096),
+        temperature: Some(0.2),
+        timeout: Duration::from_secs(600),
+    }
+}
+
+fn parse_verdict(text: &str) -> Option<&'static str> {
+    let mut in_verdict = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("## Verdict") {
+            in_verdict = true;
+            continue;
+        }
+        if in_verdict {
+            match trimmed.to_ascii_lowercase().as_str() {
+                "accept" => return Some("accept"),
+                "revise" => return Some("revise"),
+                "reject" => return Some("reject"),
+                "" => {}
+                _ if trimmed.starts_with("## ") => return None,
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn suggested_revisions(text: &str) -> Option<&str> {
+    let start_marker = "## Suggested revisions";
+    let start = text.find(start_marker)? + start_marker.len();
+    let rest = &text[start..];
+    let end = rest.find("\n## ").unwrap_or(rest.len());
+    Some(rest[..end].trim())
+}
+
+fn read_feature_dir(repo_root: &Path) -> Result<PathBuf, RunError> {
+    let path = repo_root.join(FEATURE_JSON);
+    let value: serde_json::Value =
+        serde_json::from_str(&read_to_string(&path)?).map_err(|source| RunError::Json {
+            path: path.clone(),
+            source,
+        })?;
+    let feature_dir = value
+        .get("feature_directory")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            RunError::Config(".specify/feature.json missing feature_directory".to_owned())
+        })?;
+    Ok(PathBuf::from(feature_dir))
+}
+
+fn config_hash(path: &Path) -> Result<String, RunError> {
+    let bytes = std::fs::read(path).map_err(|source| RunError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let yaml: serde_yaml::Value = serde_yaml::from_slice(&bytes).map_err(|source| {
+        RunError::Config(format!(
+            "failed to canonicalise {}: {source}",
+            path.display()
+        ))
+    })?;
+    let canonical = serde_json::to_vec(&canonical_json(yaml)).map_err(|source| RunError::Json {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let digest = Sha256::digest(canonical);
+    Ok(format!("sha256:{}", hex_lower(&digest)))
+}
+
+fn canonical_json(value: serde_yaml::Value) -> serde_json::Value {
+    match value {
+        serde_yaml::Value::Null => serde_json::Value::Null,
+        serde_yaml::Value::Bool(value) => serde_json::Value::Bool(value),
+        serde_yaml::Value::Number(number) => number
+            .as_i64()
+            .map(serde_json::Number::from)
+            .or_else(|| number.as_u64().map(serde_json::Number::from))
+            .or_else(|| number.as_f64().and_then(serde_json::Number::from_f64))
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        serde_yaml::Value::String(value) => serde_json::Value::String(value),
+        serde_yaml::Value::Sequence(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
+        }
+        serde_yaml::Value::Mapping(mapping) => {
+            let mut object = serde_json::Map::new();
+            let mut entries = BTreeMap::new();
+            for (key, value) in mapping {
+                entries.insert(yaml_key(key), canonical_json(value));
+            }
+            for (key, value) in entries {
+                object.insert(key, value);
+            }
+            serde_json::Value::Object(object)
+        }
+        serde_yaml::Value::Tagged(tagged) => canonical_json(tagged.value),
+    }
+}
+
+fn yaml_key(value: serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::String(value) => value,
+        other => serde_json::to_string(&canonical_json(other)).unwrap_or_default(),
+    }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ignored = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn read_manifest(path: &Path) -> Result<RunManifest, RunError> {
+    let contents = read_to_string(path)?;
+    serde_json::from_str(&contents).map_err(|source| RunError::Json {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_manifest(path: &Path, manifest: &RunManifest) -> Result<(), RunError> {
+    write_file(
+        path,
+        &serde_json::to_string_pretty(manifest).map_err(|source| RunError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?,
+    )
+}
+
+fn read_to_string(path: &Path) -> Result<String, RunError> {
+    std::fs::read_to_string(path).map_err(|source| RunError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_file(path: &Path, contents: &str) -> Result<(), RunError> {
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+    std::fs::write(path, contents).map_err(|source| RunError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_log(path: &Path, stdout: &str, stderr: &str) -> Result<(), RunError> {
+    let mut contents = String::new();
+    contents.push_str(stdout);
+    contents.push_str(stderr);
+    write_file(path, &contents)
+}
+
+fn append_log(path: &Path, text: &str) -> Result<(), RunError> {
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|source| RunError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(text.as_bytes())
+        .map_err(|source| RunError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn create_dir_all(path: &Path) -> Result<(), RunError> {
+    std::fs::create_dir_all(path).map_err(|source| RunError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn read_dir_names(path: &Path) -> Result<Vec<String>, RunError> {
+    let entries = std::fs::read_dir(path).map_err(|source| RunError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| RunError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if entry
+            .file_type()
+            .map_err(|source| RunError::Io {
+                path: entry.path(),
+                source,
+            })?
+            .is_dir()
+        {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn parent(path: &Path) -> Result<&Path, RunError> {
+    path.parent()
+        .ok_or_else(|| RunError::Config(format!("path has no parent: {}", path.display())))
+}
+
+fn relative_to_root(repo_root: &Path, path: PathBuf) -> Result<PathBuf, RunError> {
+    path.strip_prefix(repo_root)
+        .map(Path::to_path_buf)
+        .map_err(|error| RunError::Config(error.to_string()))
+}
+
+fn prior_feature_dir(steps: &[ManifestStep]) -> Option<PathBuf> {
+    steps
+        .iter()
+        .flat_map(|step| step.artifacts.iter())
+        .find_map(|artifact| {
+            if artifact.ends_with("spec.md") {
+                artifact.parent().map(Path::to_path_buf)
+            } else {
+                None
+            }
+        })
+}
+
+fn default_run_id() -> String {
+    Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn required_step_text<'a>(
+    value: Option<&'a str>,
+    step_id: &str,
+    field: &str,
+) -> Result<&'a str, RunError> {
+    value.ok_or_else(|| {
+        RunError::Config(format!(
+            "pipeline.{step_id}.{field}: missing required field"
+        ))
+    })
+}
+
+fn host_name(host: Host) -> &'static str {
+    match host {
+        Host::Claude => "claude",
+        Host::Codex => "codex",
+        Host::Copilot => "copilot",
+    }
+}
+
+fn runner_name(runner: StepRunner) -> &'static str {
+    match runner {
+        StepRunner::Derrick => "derrick",
+        StepRunner::Human => "human",
+        StepRunner::Bash => "bash",
+        StepRunner::Claude => "claude",
+        StepRunner::Codex => "codex",
+        StepRunner::Copilot => "copilot",
+    }
+}
+
+fn unreachable_verdict<T>(step_id: &str) -> Result<T, RunError> {
+    Err(RunError::StepFailed {
+        id: step_id.to_owned(),
+        message: "unsupported verdict".to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use derrick_substrate_native::{NativeConfig, NativeSubstrate};
+    use derrick_tools::{HostAdapter, HostResponse};
+    use std::error::Error;
+    use tempfile::{tempdir, TempDir};
+
+    type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+    struct StaticHost {
+        name: &'static str,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl HostAdapter for StaticHost {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
+            if self.fail {
+                return Err(HostError::NonZeroExit {
+                    host: self.name.to_owned(),
+                    exit_code: 7,
+                    stderr: "failed".to_owned(),
+                });
+            }
+            let feature = request.cwd.join("specs/001-test");
+            std::fs::create_dir_all(feature.join("assay")).map_err(|source| HostError::Io {
+                host: self.name.to_owned(),
+                source,
+            })?;
+            std::fs::create_dir_all(request.cwd.join(".specify")).map_err(|source| {
+                HostError::Io {
+                    host: self.name.to_owned(),
+                    source,
+                }
+            })?;
+            if request.prompt.contains("speckit.specify") {
+                std::fs::write(
+                    request.cwd.join(FEATURE_JSON),
+                    r#"{"feature_directory":"specs/001-test"}"#,
+                )
+                .map_err(|source| HostError::Io {
+                    host: self.name.to_owned(),
+                    source,
+                })?;
+                std::fs::write(feature.join("spec.md"), "spec").map_err(|source| {
+                    HostError::Io {
+                        host: self.name.to_owned(),
+                        source,
+                    }
+                })?;
+            } else if request.prompt.contains("speckit.plan") {
+                std::fs::write(feature.join("plan.md"), "plan").map_err(|source| {
+                    HostError::Io {
+                        host: self.name.to_owned(),
+                        source,
+                    }
+                })?;
+            } else if request.prompt.contains("speckit.tasks") {
+                std::fs::write(feature.join("tasks.md"), "tasks").map_err(|source| {
+                    HostError::Io {
+                        host: self.name.to_owned(),
+                        source,
+                    }
+                })?;
+            } else if request.prompt.contains("reviewer raised") {
+                std::fs::write(feature.join("plan.md"), "\ndelta").map_err(|source| {
+                    HostError::Io {
+                        host: self.name.to_owned(),
+                        source,
+                    }
+                })?;
+            }
+            Ok(HostResponse {
+                stdout: "ok\n".to_owned(),
+                stderr: String::new(),
+                exit_code: 0,
+                elapsed: Duration::from_millis(1),
+            })
+        }
+    }
+
+    async fn runner(yaml: &str) -> TestResult<(TempDir, Runner)> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("derrick.yaml"), yaml)?;
+        std::fs::create_dir_all(dir.path().join(".specify/memory"))?;
+        std::fs::create_dir_all(dir.path().join(".derrick"))?;
+        std::fs::write(
+            dir.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )?;
+        let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
+        let substrate = NativeSubstrate::open(
+            NativeConfig {
+                db_path: dir.path().join(".derrick/derrick.db"),
+                worktree_root: dir.path().join(".derrick/worktrees"),
+            },
+            config.site().clone(),
+        )
+        .await?;
+        let mut hosts = HostRegistry::empty();
+        hosts.register(
+            "claude",
+            Box::new(StaticHost {
+                name: "claude",
+                fail: false,
+            }),
+        );
+        hosts.register(
+            "copilot",
+            Box::new(StaticHost {
+                name: "copilot",
+                fail: false,
+            }),
+        );
+        let repo_root = dir.path().to_path_buf();
+        Ok((
+            dir,
+            Runner::new(config, Arc::new(substrate), hosts, repo_root),
+        ))
+    }
+
+    fn yaml(pipeline: &str, reviewer_cli: &Path) -> String {
+        format!(
+            r#"
+version: 1
+site:
+  name: test
+  prefix: tst
+models:
+  shell-reviewer:
+    provider: shell
+    cli: "{}"
+    model: shell-reviewer
+roles:
+  drafter: shell-reviewer
+  proposer: shell-reviewer
+  reviewer: shell-reviewer
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: 1
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+pipeline:
+{pipeline}
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#,
+            reviewer_cli.display()
+        )
+    }
+
+    fn add_feature_pipeline() -> &'static str {
+        r#"  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+  - id: clarify
+    role: drafter
+    host: claude
+    command: "/speckit.clarify"
+    skippable: true
+  - id: plan
+    role: proposer
+    host: claude
+    command: "/speckit.plan"
+  - id: assay
+    runner: derrick
+    inputs: ["{{feature_dir}}/spec.md", "{{feature_dir}}/plan.md"]
+    rounds: "{{tools.assay.rounds}}"
+    skippable: true
+  - id: tasks
+    role: drafter
+    host: claude
+    command: "/speckit.tasks"
+"#
+    }
+
+    fn reviewer_script(body: &str) -> TestResult<TempDir> {
+        let dir = tempdir()?;
+        let path = dir.path().join("reviewer");
+        std::fs::write(&path, body)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms)?;
+        }
+        Ok(dir)
+    }
+
+    fn revise_then_accept_script() -> TestResult<TempDir> {
+        let dir = tempdir()?;
+        let path = dir.path().join("reviewer");
+        let state = dir.path().join("round");
+        std::fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+state="{}"
+if [ -f "$state" ]; then
+  printf '## Verdict\naccept\n'
+else
+  printf seen > "$state"
+  printf '## Suggested revisions\nonly objection\n## Verdict\nrevise\n'
+fi
+"#,
+                state.display()
+            ),
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms)?;
+        }
+        Ok(dir)
+    }
+
+    #[tokio::test]
+    async fn add_feature_happy_path_writes_all_artifacts() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("run-1".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Success);
+        assert!(dir.path().join("specs/001-test/spec.md").exists());
+        assert!(dir.path().join("specs/001-test/plan.md").exists());
+        assert!(dir.path().join("specs/001-test/tasks.md").exists());
+        assert!(dir.path().join("specs/001-test/assay/verdict.md").exists());
+        assert!(dir
+            .path()
+            .join(".derrick/runs/run-1/manifest.json")
+            .exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn no_assay_marks_assay_skipped() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nexit 9")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let mut skip = BTreeSet::new();
+        skip.insert("assay".to_owned());
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    skip,
+                    run_id: Some("run-2".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        let assay = outcome
+            .steps
+            .iter()
+            .find(|step| step.id == "assay")
+            .ok_or("assay step should exist")?;
+        assert_eq!(assay.status, StepStatus::Skipped);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_skip_true_omits_step_by_default_and_unskip_runs() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let pipe = r#"  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+  - id: optional
+    runner: bash
+    command: "printf ran > optional.txt"
+    skippable: true
+    default_skip: true
+"#;
+        let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        let first = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("default-skip".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(first.steps[1].status, StepStatus::Skipped);
+        assert!(!dir.path().join("optional.txt").exists());
+
+        let second = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    unskip: BTreeSet::from(["optional".to_owned()]),
+                    run_id: Some("unskip".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(second.steps[1].status, StepStatus::Success);
+        assert!(dir.path().join("optional.txt").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dry_run_halts_after_tasks_step() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    dry_run: true,
+                    run_id: Some("run-3".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Halted);
+        assert_eq!(
+            outcome.steps.last().map(|step| step.id.as_str()),
+            Some("tasks")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_pipeline_id_errors() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+
+        let error = runner
+            .run_pipeline("missing", PipelineInput::default())
+            .await
+            .err()
+            .ok_or("unknown pipeline should error")?;
+
+        assert!(matches!(error, RunError::UnknownPipeline(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_prompt_for_add_feature_errors() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+
+        let error = runner
+            .run_pipeline(ADD_FEATURE_PIPELINE, PipelineInput::default())
+            .await
+            .err()
+            .ok_or("missing prompt should error")?;
+
+        assert!(matches!(error, RunError::MissingPrompt(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rig_template_var_rejected() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let bad = r#"  - id: specify
+    role: drafter
+    host: claude
+    command: "{{rig}}"
+"#;
+        let (_dir, runner) = runner(&yaml(bad, &reviewer.path().join("reviewer"))).await?;
+        let error = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await
+            .err()
+            .ok_or("rig should error")?;
+
+        assert!(error.to_string().contains("{{rig}}"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runner_claude_codex_copilot_rejected_at_config_time() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let bad = r#"  - id: bad
+    runner: claude
+"#;
+        let (_dir, runner) = runner(&yaml(bad, &reviewer.path().join("reviewer"))).await?;
+        let error = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await
+            .err()
+            .ok_or("runner should error")?;
+
+        assert!(error.to_string().contains("host: claude"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parallel_group_in_yaml_rejected_at_config_time() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let bad = r#"  - id: bad
+    role: drafter
+    host: claude
+    command: ok
+    parallel_group: group
+"#;
+        let (_dir, runner) = runner(&yaml(bad, &reviewer.path().join("reviewer"))).await?;
+        let error = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await
+            .err()
+            .ok_or("parallel group should error")?;
+
+        assert!(error
+            .to_string()
+            .contains("parallel_group is not supported"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn skip_id_on_nonskippable_step_errors() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let mut skip = BTreeSet::new();
+        skip.insert("specify".to_owned());
+        let error = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    skip,
+                    ..PipelineInput::default()
+                },
+            )
+            .await
+            .err()
+            .ok_or("skip should error")?;
+
+        assert!(error.to_string().contains("not skippable"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn assay_reject_halts_pipeline() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\nreject\\n'")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("run-4".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Halted);
+        assert_eq!(
+            outcome.steps.last().map(|step| step.id.as_str()),
+            Some("assay")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn assay_revise_then_accept_succeeds_after_replan() -> TestResult {
+        let reviewer = revise_then_accept_script()?;
+        let rounds =
+            add_feature_pipeline().replace("rounds: \"{{tools.assay.rounds}}\"", "rounds: 2");
+        let (dir, runner) = runner(&yaml(&rounds, &reviewer.path().join("reviewer"))).await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("revise-accept".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Success);
+        let plan = std::fs::read_to_string(dir.path().join("specs/001-test/plan.md"))?;
+        assert!(plan.contains("delta"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn assay_revise_past_rounds_halts_pipeline() -> TestResult {
+        let reviewer = reviewer_script(
+            "#!/bin/sh\nprintf '## Suggested revisions\\nonly objection\\n## Verdict\\nrevise\\n'",
+        )?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("revise-halt".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Halted);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn assay_unparsable_verdict_surfaces_step_failed() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf 'no verdict\\n'")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let error = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await
+            .err()
+            .ok_or("bad verdict should error")?;
+
+        assert!(error.to_string().contains("could not parse verdict"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bash_runner_executes_and_captures_output() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let pipe = r#"  - id: shell
+    runner: bash
+    command: "printf '{{prompt}}'"
+"#;
+        let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("hello".to_owned()),
+                    run_id: Some("run-bash".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Success);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".derrick/runs/run-bash/step-shell.log"))?,
+            "hello"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bash_runner_nonzero_exit_fails_step() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let pipe = r#"  - id: shell
+    runner: bash
+    command: "exit 7"
+"#;
+        let (_dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        let error = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("hello".to_owned()),
+                    run_id: Some("bash-fail".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await
+            .err()
+            .ok_or("bash failure should error")?;
+
+        assert!(error.to_string().contains("bash exited"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bridge_and_foreman_are_no_ops_in_solo_mode() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let pipe = r#"  - id: bridge
+    runner: derrick
+  - id: foreman
+    runner: derrick
+"#;
+        let (_dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("hello".to_owned()),
+                    run_id: Some("noop".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.steps[0].status, StepStatus::Skipped);
+        assert_eq!(outcome.steps[1].status, StepStatus::Skipped);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn role_without_host_uses_model_completion() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\ncat >/dev/null\nprintf 'model response'")?;
+        let pipe = r#"  - id: model
+    role: reviewer
+    command: "hello {{site_name}}"
+"#;
+        let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("hello".to_owned()),
+                    run_id: Some("model".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Success);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".derrick/runs/model/step-model.log"))?,
+            "model response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resume_from_step_skips_earlier_steps() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    skip: BTreeSet::from(["assay".to_owned()]),
+                    run_id: Some("resume-ok".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        let outcome = runner.resume(Some("resume-ok"), "tasks").await?;
+
+        assert_eq!(
+            outcome.steps.last().map(|step| step.id.as_str()),
+            Some("tasks")
+        );
+        assert_eq!(outcome.status, RunStatus::Success);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn on_failure_poll_interval_and_input_template_errors_are_rejected() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        for field in [
+            "on_failure: retry",
+            "poll_interval: 1s",
+            "inputs: [\"{{unknown}}\"]",
+        ] {
+            let pipe = format!(
+                r#"  - id: bad
+    role: drafter
+    host: claude
+    command: ok
+    {field}
+"#
+            );
+            let (_dir, runner) = runner(&yaml(&pipe, &reviewer.path().join("reviewer"))).await?;
+            let error = runner
+                .run_pipeline(
+                    ADD_FEATURE_PIPELINE,
+                    PipelineInput {
+                        prompt: Some("test".to_owned()),
+                        ..PipelineInput::default()
+                    },
+                )
+                .await
+                .err()
+                .ok_or("invalid field should error")?;
+            assert!(matches!(error, RunError::Config(_)));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_when_config_hash_mismatches() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    skip: BTreeSet::from(["assay".to_owned()]),
+                    run_id: Some("resume-run".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        let path = dir.path().join("derrick.yaml");
+        let contents = std::fs::read_to_string(&path)?;
+        std::fs::write(path, contents.replacen("name: test", "name: drift", 1))?;
+
+        let error = runner
+            .resume(Some("resume-run"), "tasks")
+            .await
+            .err()
+            .ok_or("resume should refuse drift")?;
+
+        assert!(error.to_string().contains("config has changed"));
+        Ok(())
+    }
+
+    #[test]
+    fn suggested_revisions_extracts_only_block() -> TestResult {
+        let text = "## Risks\nfull prompt\n## Suggested revisions\nonly this\n## Verdict\nrevise\n";
+        assert_eq!(suggested_revisions(text), Some("only this"));
+        Ok(())
+    }
+}
