@@ -208,10 +208,10 @@ What's landed and tested:
 - ✅ GitHub release workflow — builds on `v*` tag push, attaches binaries + checksums
 - ✅ `marketplace.json` — Claude Code plugin discovery
 - 🔜 Homebrew tap (v1.1)
-- 🔜 Per-session token telemetry in `derrick gain`
+- ✅ Per-session token telemetry in `derrick gain` — `derrick gain --run <id>` for per-step breakdown
 - 🔜 True parallel fan-out for multi-reviewer assay
 
-432 tests passing across 17 crates.
+431 tests passing across 17 crates.
 
 ---
 
