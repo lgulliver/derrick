@@ -1,5 +1,6 @@
 //! Derrick memory layers. See DESIGN.md §9.A.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -60,6 +61,10 @@ pub struct Lesson {
     pub batch: Option<String>,
     /// Gate-checked lesson body.
     pub body: String,
+    /// Ticket IDs and section anchors extracted from `body` by the quality gate.
+    /// Populated by [`MemoryStore::append_lesson`]; absent in legacy entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// A memory entry discovered on disk.
@@ -278,11 +283,28 @@ impl MemoryStore {
     }
 
     /// Append a lesson after applying the D9 quality gate.
+    ///
+    /// Tags (ticket IDs and section anchors) are extracted from the body and
+    /// stored alongside it so [`load_lesson_index`] can build an exact-match
+    /// index without re-parsing every entry on each load.
+    ///
+    /// [`load_lesson_index`]: MemoryStore::load_lesson_index
     pub fn append_lesson(&self, lesson: &Lesson) -> Result<(), MemoryError> {
         validate_lesson(lesson)?;
-        let line = serde_json::to_string(lesson)
+        let tags = extract_tags(&lesson.body)?;
+        let with_tags = Lesson { tags, ..lesson.clone() };
+        let line = serde_json::to_string(&with_tags)
             .map_err(|source| invalid_error("lesson", source.to_string()))?;
         append_line(&self.paths.repo_state.join(LESSONS_FILE), &line)
+    }
+
+    /// Load all lessons and build an in-memory [`LessonIndex`] for retrieval.
+    ///
+    /// The index is built once and held for the lifetime of a pipeline run.
+    /// Legacy lessons whose `tags` field is absent are back-filled by
+    /// re-extracting from their bodies.
+    pub fn load_lesson_index(&self) -> Result<LessonIndex, MemoryError> {
+        Ok(LessonIndex::build(self.lessons(None)?))
     }
 
     /// List lessons newer than `since`, or all lessons when `since` is `None`.
@@ -448,6 +470,33 @@ fn section_anchor_regex() -> Result<Regex, MemoryError> {
         .case_insensitive(true)
         .build()
         .map_err(|source| invalid_error("section_anchor_pattern", source.to_string()))
+}
+
+/// Extract all ticket IDs and section anchors from `text`.
+///
+/// Returns a sorted, deduplicated list. Used both at write time (to populate
+/// [`Lesson::tags`]) and at query time (to turn a task description into lookup
+/// keys for [`LessonIndex::relevant`]).
+fn extract_tags(text: &str) -> Result<Vec<String>, MemoryError> {
+    let ticket_re = ticket_id_lesson_regex()?;
+    let section_re = section_anchor_regex()?;
+    let mut tags: Vec<String> = ticket_re
+        .find_iter(text)
+        .chain(section_re.find_iter(text))
+        .map(|m| m.as_str().to_owned())
+        .collect();
+    tags.sort();
+    tags.dedup();
+    Ok(tags)
+}
+
+/// Extract ticket IDs and section anchors from a query string for use with
+/// [`LessonIndex::relevant`].
+///
+/// Infallible — returns an empty vec if the internal regex fails to compile
+/// (which should never happen in practice).
+pub fn extract_query_tags(text: &str) -> Vec<String> {
+    extract_tags(text).unwrap_or_default()
 }
 
 fn create_dir_all(path: &Path) -> Result<(), MemoryError> {
@@ -630,6 +679,103 @@ fn invalid_error(field: impl Into<String>, message: impl Into<String>) -> Memory
     }
 }
 
+// ---------------------------------------------------------------------------
+// LessonIndex
+// ---------------------------------------------------------------------------
+
+/// In-memory index of lessons, built once per pipeline run from the JSONL file.
+///
+/// Provides two retrieval modes:
+///
+/// - [`relevant`] — exact tag lookup ranked by match count, then recency.
+///   Falls back to [`recent`] when the query yields no tag matches.
+/// - [`recent`] — the N most recently appended lessons.
+///
+/// [`relevant`]: LessonIndex::relevant
+/// [`recent`]: LessonIndex::recent
+pub struct LessonIndex {
+    lessons: Vec<Lesson>,
+    /// tag (ticket id or section anchor) → indices into `lessons`
+    by_tag: HashMap<String, Vec<usize>>,
+}
+
+impl LessonIndex {
+    /// Build an index from a loaded lesson list.
+    ///
+    /// Legacy lessons with empty `tags` have their tags back-filled by
+    /// re-extracting from their bodies, so the index works without requiring a
+    /// migration step.
+    pub fn build(lessons: Vec<Lesson>) -> Self {
+        let mut by_tag: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, lesson) in lessons.iter().enumerate() {
+            let tags = if lesson.tags.is_empty() {
+                extract_tags(&lesson.body).unwrap_or_default()
+            } else {
+                lesson.tags.clone()
+            };
+            for tag in tags {
+                by_tag.entry(tag).or_default().push(i);
+            }
+        }
+        Self { lessons, by_tag }
+    }
+
+    /// Return up to `limit` lessons most relevant to `query_tags`.
+    ///
+    /// Each lesson is scored by how many of the query tags it contains.
+    /// Ties are broken by recency (later-appended lessons rank higher).
+    /// Falls back to [`recent`] when no lessons share any query tag.
+    ///
+    /// Obtain `query_tags` by calling [`extract_query_tags`] on the current
+    /// task description.
+    ///
+    /// [`recent`]: LessonIndex::recent
+    pub fn relevant(&self, query_tags: &[&str], limit: usize) -> Vec<&Lesson> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        if query_tags.is_empty() {
+            return self.recent(limit);
+        }
+        let mut scores: HashMap<usize, usize> = HashMap::new();
+        for &tag in query_tags {
+            if let Some(indices) = self.by_tag.get(tag) {
+                for &idx in indices {
+                    *scores.entry(idx).or_default() += 1;
+                }
+            }
+        }
+        if scores.is_empty() {
+            return self.recent(limit);
+        }
+        // score desc, then index desc (recency tiebreak — lessons are appended in order)
+        let mut ranked: Vec<(usize, usize)> = scores.into_iter().collect();
+        ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|(idx, _)| &self.lessons[idx])
+            .collect()
+    }
+
+    /// Return up to `limit` most recently appended lessons.
+    pub fn recent(&self, limit: usize) -> Vec<&Lesson> {
+        self.lessons.iter().rev().take(limit).collect()
+    }
+
+    /// Number of lessons in the index.
+    pub fn len(&self) -> usize {
+        self.lessons.len()
+    }
+
+    /// Returns `true` if the index contains no lessons.
+    pub fn is_empty(&self) -> bool {
+        self.lessons.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 fn maybe_inject_pre_rename_panic() {
     PRE_RENAME_PANIC.with(|enabled| {
@@ -761,6 +907,7 @@ state:
             at,
             batch: Some("batch-1".to_owned()),
             body: body.to_owned(),
+            tags: extract_tags(body).unwrap_or_default(),
         }
     }
 
@@ -1316,6 +1463,172 @@ state:
             append_line(Path::new(""), "{}"),
             Err(MemoryError::Invalid { .. })
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tag extraction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn append_lesson_writes_extracted_tags() {
+        let (_dir, store) = store_with_host();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 18), "drk-7 clarified #9.A"))
+            .unwrap_or_else(|e| panic!("lesson should append: {e}"));
+
+        let lessons = store.lessons(None).unwrap();
+        assert_eq!(lessons[0].tags, vec!["#9.A", "drk-7"]);
+    }
+
+    #[test]
+    fn tags_are_sorted_and_deduplicated() {
+        let (_dir, store) = store_with_host();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 18), "drk-7 and drk-7 again and #9.A"))
+            .unwrap_or_else(|e| panic!("lesson should append: {e}"));
+
+        let lessons = store.lessons(None).unwrap();
+        assert_eq!(lessons[0].tags, vec!["#9.A", "drk-7"]);
+    }
+
+    #[test]
+    fn extract_query_tags_extracts_ticket_ids_and_anchors() {
+        let tags = extract_query_tags("implement drk-42 per spec in #9.C.5");
+        assert_eq!(tags, vec!["#9.C.5", "drk-42"]);
+    }
+
+    #[test]
+    fn extract_query_tags_returns_empty_for_plain_text() {
+        let tags = extract_query_tags("implement the feature");
+        assert!(tags.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // LessonIndex
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn index_relevant_returns_exact_tag_matches() {
+        let (_dir, store) = store_with_host();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 1), "drk-1 the first fix"))
+            .unwrap();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 2), "drk-2 the second fix"))
+            .unwrap();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 3), "drk-1 revisited after #9.A"))
+            .unwrap();
+
+        let index = store.load_lesson_index().unwrap();
+        let hits = index.relevant(&["drk-1"], 10);
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|l| l.tags.contains(&"drk-1".to_owned())));
+    }
+
+    #[test]
+    fn index_relevant_ranks_multi_match_first() {
+        let (_dir, store) = store_with_host();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 1), "drk-1 touches #9.B.2"))
+            .unwrap();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 2), "drk-1 only"))
+            .unwrap();
+
+        let index = store.load_lesson_index().unwrap();
+        let hits = index.relevant(&["drk-1", "#9.B.2"], 10);
+        // first hit must match both tags (score 2)
+        assert_eq!(hits[0].tags, vec!["#9.B.2", "drk-1"]);
+    }
+
+    #[test]
+    fn index_relevant_falls_back_to_recent_on_no_match() {
+        let (_dir, store) = store_with_host();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 1), "drk-1 something"))
+            .unwrap();
+
+        let index = store.load_lesson_index().unwrap();
+        let hits = index.relevant(&["drk-99"], 5);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].tags.contains(&"drk-1".to_owned()));
+    }
+
+    #[test]
+    fn index_relevant_falls_back_to_recent_on_empty_query() {
+        let (_dir, store) = store_with_host();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 1), "drk-1 something"))
+            .unwrap();
+
+        let index = store.load_lesson_index().unwrap();
+        let hits = index.relevant(&[], 5);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn index_recent_returns_newest_first() {
+        let (_dir, store) = store_with_host();
+        let old = utc(2026, 3, 1);
+        let new = utc(2026, 5, 1);
+        store
+            .append_lesson(&lesson(old, "drk-1 old"))
+            .unwrap();
+        store
+            .append_lesson(&lesson(new, "drk-2 new"))
+            .unwrap();
+
+        let index = store.load_lesson_index().unwrap();
+        let hits = index.recent(1);
+        assert_eq!(hits[0].at, new);
+    }
+
+    #[test]
+    fn index_migrates_legacy_lessons_without_tags() {
+        let dir = tempdir().unwrap();
+        let lessons_path = dir.path().join(".derrick").join(LESSONS_FILE);
+        fs::create_dir_all(lessons_path.parent().unwrap()).unwrap();
+        // write a legacy lesson with no tags field
+        fs::write(
+            &lessons_path,
+            r#"{"at":"2026-05-01T00:00:00Z","batch":"b1","body":"drk-5 fixed the thing"}"#
+                .to_owned()
+                + "\n",
+        )
+        .unwrap();
+
+        let store = MemoryStore::open(
+            MemoryPaths {
+                host_memory_root: None,
+                repo_state: dir.path().join(".derrick"),
+            },
+            &default_site(),
+        )
+        .unwrap();
+
+        let index = store.load_lesson_index().unwrap();
+        let hits = index.relevant(&["drk-5"], 5);
+        assert_eq!(hits.len(), 1, "legacy lesson should be found by tag");
+    }
+
+    #[test]
+    fn index_limit_zero_returns_empty() {
+        let (_dir, store) = store_with_host();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 1), "drk-1 something"))
+            .unwrap();
+        let index = store.load_lesson_index().unwrap();
+        assert!(index.relevant(&["drk-1"], 0).is_empty());
+        assert!(index.recent(0).is_empty());
+    }
+
+    #[test]
+    fn empty_index_is_empty() {
+        let (_dir, store) = store_with_host();
+        let index = store.load_lesson_index().unwrap();
+        assert!(index.is_empty());
+        assert_eq!(index.len(), 0);
     }
 
     #[cfg(unix)]

@@ -6,7 +6,9 @@ use std::thread;
 
 use chrono::{DateTime, TimeZone, Utc};
 use derrick_config::{Config, Site};
-use derrick_memory::{Lesson, MemoryError, MemoryLayer, MemoryPaths, MemoryStore, Seeds};
+use derrick_memory::{
+    extract_query_tags, Lesson, MemoryError, MemoryLayer, MemoryPaths, MemoryStore, Seeds,
+};
 use derrick_substrate::ticket_id_pattern;
 use serde_json::{json, Value};
 use tempfile::{tempdir, TempDir};
@@ -115,6 +117,7 @@ fn lesson(at: DateTime<Utc>, body: &str) -> Lesson {
         at,
         batch: Some("batch-1".to_owned()),
         body: body.to_owned(),
+        tags: extract_query_tags(body),
     }
 }
 
