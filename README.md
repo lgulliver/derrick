@@ -68,13 +68,13 @@ Independent work runs concurrently. Each `/add-feature` run gets an isolated git
 
 ## Getting started
 
-> **Note:** `scripts/install.sh` and the Homebrew tap are in progress (D26). For now, build from source:
-
 ```bash
-git clone https://github.com/lgulliver/derrick
-cd derrick
-cargo install --path crates/derrick-cli
+curl -fsSL https://raw.githubusercontent.com/lgulliver/derrick/main/scripts/install.sh | bash
 ```
+
+Supports macOS (Apple Silicon + Intel) and Linux (x86\_64). Homebrew tap and Windows support coming in v1.1.
+
+> **Rust-native?** `cargo install --git https://github.com/lgulliver/derrick derrick-cli` also works.
 
 Then adopt a repo:
 
@@ -201,7 +201,10 @@ What's landed and tested:
 - ✅ `derrick doctor` — live squash-merge policy check via GitHub API
 - ✅ PR stacking: `stack show / restack / submit`
 - ✅ Shell completions (bash / zsh / fish / elvish / powershell)
-- 🔜 `scripts/install.sh` + Homebrew tap (D26)
+- ✅ `scripts/install.sh` — curl-able, platform-detecting (linux-x86\_64, macos-arm64, macos-x86\_64)
+- ✅ GitHub release workflow — builds on `v*` tag push, attaches binaries + checksums
+- ✅ `marketplace.json` — Claude Code plugin discovery
+- 🔜 Homebrew tap (v1.1)
 - 🔜 Per-session token telemetry in `derrick gain`
 - 🔜 True parallel fan-out for multi-reviewer assay (§9.C.5)
 

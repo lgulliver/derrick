@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build (${{ matrix.artifact }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: derrick-linux-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: derrick-macos-arm64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact: derrick-macos-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} -p derrick-cli
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          cp target/${{ matrix.target }}/release/derrick ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - name: Generate checksum
+        shell: bash
+        run: shasum -a 256 ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
+
+  release:
+    name: create release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            derrick-linux-x86_64
+            derrick-linux-x86_64.sha256
+            derrick-macos-arm64
+            derrick-macos-arm64.sha256
+            derrick-macos-x86_64
+            derrick-macos-x86_64.sha256
