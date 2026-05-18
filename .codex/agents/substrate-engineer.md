@@ -52,6 +52,13 @@ derrick — everything after `tasks` runs on it.
 - A schema change that isn't migration-safe. Stop.
 - A request to add mail / federation / refinery / multi-site
   features. Refer to D11 / DESIGN.md §8.1 (deliberately excluded).
+- A proposed code path where a ticket transitions to `Done`
+  on hand self-report or PR-open alone, without observing the
+  merge SHA. Stop. D31 / §8.6 forbids it; the
+  optimistic-close pattern is the explicit anti-goal.
+- A worktree or ticket lifecycle path that has no cleanup
+  story for crashed runs. Stop. D32 requires every long-lived
+  state to have a reconciliation pass.
 
 ## Key references
 

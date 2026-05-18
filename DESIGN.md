@@ -925,7 +925,8 @@ no other code changes.
 - **Site** — a workspace registered with the substrate. One per
   repo. Has a name and a ticket prefix.
 - **Ticket** — a single unit of work with state
-  (`ready | in_flight | blocked | done | rejected`), labels, body,
+  (`ready | in_flight | in_review | blocked | done | rejected`),
+  labels, body, optional `merge_sha` (set only when verified-Done per §8.6),
   links to other tickets, owner.
 - **Link** — typed edge between tickets. v1 supports `blocks`
   (sequencing) and `related` (informational).
@@ -1143,6 +1144,117 @@ designing for this in v1; we are leaving the door open.
 `derrick doctor` in v1 checks: SQLite file accessibility,
 foreman PID liveness if attached, ticket schema version. No
 external service, no daemon, no port.
+
+### 8.6 State machine integrity (D31 / D32 / D33)
+
+This subsection bakes in real-world lessons from running
+gastown at scale (refinery optimistic-close incident,
+gt-pvx WISP leak, mayor-trusts-bead-state pattern). The
+dark-factory case requires **append-only, observable,
+verifiable** state transitions; gastown's interactive-first
+shape doesn't guarantee any of those autonomously.
+
+#### Ticket lifecycle
+
+```
+                ┌──────────────────────────────────┐
+                │ Ready  (created, not yet picked) │
+                └─────────────────┬────────────────┘
+                                  │ foreman dispatches → hand
+                                  ▼
+                ┌──────────────────────────────────┐
+                │ InFlight  (hand working)         │
+                └──────────────┬───────────────┬───┘
+                               │               │ hand opens PR
+                hand reports   │               ▼
+                blocked        │   ┌──────────────────────────────┐
+                               │   │ InReview  (PR open, awaiting │
+                               ▼   │  merge — NOT a terminal state│
+                ┌──────────────────┤  per D31)                    │
+                │ Blocked          └────────┬─────────────────────┘
+                └──────┬───────────┘        │ foreman observes merge
+                       │                    │ SHA on target branch
+                       │ unblocked          │ (or PR-merged event)
+                       │                    ▼
+                       │            ┌──────────────────┐
+                       │            │ Done             │
+                       │            │ (merge_sha set)  │
+                       │            └──────────────────┘
+                       │
+                       │ closed unmerged or rejected
+                       ▼
+                ┌──────────────────────────────────┐
+                │ Rejected                         │
+                └──────────────────────────────────┘
+```
+
+`InReview` is the state that closes the optimistic-close
+hole. A hand finishing work and opening a PR transitions the
+ticket to `InReview`, *not* `Done`. Only the foreman's
+verifier path — observing the merge SHA on the target branch
+— moves it forward. If the PR is closed unmerged, the verifier
+moves it to `Rejected`. If the PR has been pending past
+`tools.git.stacking.in_review_ttl` (default 24h), the foreman
+re-queries `gh` and either rolls forward or flags
+`escalation: stuck-in-review`.
+
+#### Append-only events
+
+Every state transition writes an `events` row. Reverting a
+state moves *forward* to a different state — `Done` → `Reopened`
+(when a merge gets reverted), never erases the `Done` event.
+The activity log is the durable record; the current state on
+the ticket row is a projection of the latest event.
+
+#### Verifier loop
+
+The foreman's loop iteration (T012):
+
+1. `bd ready`-equivalent: tickets with state `Ready` and all
+   `blocks` dependencies satisfied.
+2. **Verifier pass**: for each ticket in `InReview`, query the
+   target branch's git log for the recorded `pr_head_sha`'s
+   merge commit. If found → transition to `Done` with
+   `merge_sha` set. If `gh pr view` says closed-unmerged →
+   transition to `Rejected`. If neither resolves and the ticket
+   has been `InReview` longer than the TTL → emit an
+   escalation event but don't change state automatically.
+3. Reconcile `Blocked` tickets: re-check whether their `blocks`
+   predecessors are now `Done`; un-block if so.
+4. Dispatch ready tickets to hands.
+5. Sleep `tools.foreman.poll_interval` (default 10s).
+
+Step 2 is the load-bearing piece. **Without it, derrick
+inherits gastown's bug.**
+
+#### Cleanup loop (D32)
+
+On every `derrick run` startup, before dispatching any work:
+
+1. Walk worktree rows whose `finalize_worktree` event is
+   missing and whose `created_at` is older than 24h. Prune
+   the worktree directory and remove the row. Emit a
+   `WorktreeAbandoned` event.
+2. Walk tickets in `InReview` older than the TTL. Trigger
+   the verifier pass immediately (don't wait for the next
+   loop tick).
+3. Walk `claimed_at`-stale tickets in `InFlight` whose hands
+   haven't heartbeat'd in `tools.foreman.hand_ttl` (default
+   30 minutes). Re-queue as `Ready`, emit a
+   `HandAbandoned` event.
+
+The cleanup loop runs sequentially with the main loop — never
+concurrently, never as background — so cleanups can't race
+the foreman's dispatch.
+
+#### Why this is in §8 and not in §9 parallelism
+
+Parallelism (§9.C) is about *throughput*. State integrity
+(§8.6) is about *correctness*. They interact (cleanup runs
+before dispatch; the verifier blocks new dispatch for the
+ticket being verified) but they're different concerns.
+The integrity rules trump throughput — if reconciliation
+takes 200ms before a dispatch, dispatch waits.
 
 ---
 
@@ -1501,6 +1613,9 @@ links back to the section where it lives.
 | D25 | **Foreman exit mode**: `derrick run` detaches the foreman to `.derrick/foreman.pid` and returns; a watch hint is printed (`derrick observe` or `derrick status --watch`). `--attach` for foreground for users who want it. | §8.2 |
 | D26 | **Install paths**: ship three. `curl | bash` (primary, one-line install), `cargo install derrick` (Rust-native), and a Homebrew tap (macOS native). All three resolve to the same release artefact. | §11 |
 | D27 | **Drop `site.role` and `pipeline[].role` for `runner: derrick` steps**: `site.role` was vestigial gastown vocabulary; the derrick substrate has one orchestrator (the foreman), no multi-role agent system. Pipeline steps with `runner: derrick` carry their own runner-specific fields (`executor_role`, `batch`, `inputs`) and do not also need a `role:` binding. Steps that need a model role still use `role:` (mutually exclusive with `runner:` in that case). | §4 |
+| D31 | **State machine integrity for tickets and batches: append-only, observable, verifiable.** Lessons banked from gastown's Refinery optimistic-close incident at scale. Three rules: (a) **`Done` requires observable evidence** — the foreman never transitions a ticket to `Done` based on a hand's self-report or PR-open event; it observes the merge SHA on the target branch (`git log origin/<base>`) or equivalent end-state for the workflow. A new `InReview` ticket state covers "hand finished, PR open, awaiting merge". (b) **State changes are append-only at the event log** — every state transition writes an immutable `events` row. Reverting a state moves *forward* to a different state (e.g. `Done → Reopened`), never erases history. (c) **The foreman trusts git, not just substrate state** — when polling ready tickets and reconciling batch closure, it cross-references against the actual repository (git log, gh PR status) rather than blindly trusting its own row values. Adds `InReview` to `TicketState`, a `merge_sha: Option<String>` field on the ticket, and a verifier loop step. | §8.1 / §8.2 / future T012 foreman |
+| D32 | **Worktree and ticket cleanup is continuous and self-healing.** Lessons banked from gastown's gt-pvx WISP-branch leak. Periodic cleanup runs (a) on every `derrick run` startup before doing anything else and (b) optionally as a launchd/systemd plist for long-lived setups. It walks worktree rows whose runs have crashed (no `finalize_worktree` event after a configurable TTL, default 24h), and either prunes them or marks them `Abandoned`. Same pattern for tickets stuck in `InReview` past a TTL: the foreman re-checks the PR and either transitions to `Done` (if observably merged), `Blocked` (if the PR was closed unmerged), or surfaces an escalation event. **There is no "trust eventually consistent state" path** — every long-lived state has an explicit reconciliation pass that can fail loud. | §8.2 / §9.C.5 / future T012 |
+| D33 | **The foreman never has authoritative state independent of the substrate and git.** Where gastown's Mayor reads `gt convoy status` and trusts it, derrick's foreman treats its own poll as a hint and the substrate + git as the truth. Concretely: on every loop iteration the foreman (a) reads `bd ready`-equivalent tickets from the substrate, (b) for any in `InReview`, queries `git log` and `gh pr view` for the PR's actual state, (c) reconciles before dispatching new work. The dispatch is idempotent against state drift — if a ticket the substrate says is `Ready` is actually merged on main, the foreman corrects to `Done` and continues. | future T012 |
 | D30 | **`derrick-tools` owns host CLI subprocess invocations; `derrick-models` owns the `Model` trait and providers.** Hosts (claude / codex / copilot) are invoked when a pipeline step sets `host:`. They receive an opaque prompt-as-argv (typically a slash command), they load their own context per the host rules, and derrick captures stdout. Providers are invoked when derrick needs a model completion via a structured `CompletionRequest` (assay reviewers, future direct-API calls). The same underlying binary (e.g. `codex`) may be reached via either path: as a host running a derrick-supplied prompt verbatim (`derrick-tools`), or as a backend for a model role that needs a structured completion (`derrick-models`'s `openai-cli` provider, etc.). The split is **invocation-shape-driven**, not binary-driven. | §3.1 / §6.5 / new T009 |
 | D29 | **Scrub and caveman fire at every model boundary, not just derrick's pipeline seams.** Three boundary classes: (a) derrick-internal — inline in `derrick-flow` and `derrick-substrate-native`; (b) host tool calls — `derrick init` writes `PreToolUse`+`PostToolUse` hooks in `.claude/settings.json` and the equivalent in `.codex/` that pipe tool I/O through `derrick scrub` (CLI shapes) and `derrick caveman --intensity lite` (prose); (c) Copilot dispatch — inline in `derrick-copilot` until Copilot's hook surface lands. Both directions matter: input (before embedding tool output into the next prompt) saves the most because of prompt caching; output (when an agent quotes tool output back) catches the second-order leakage. | §9.B.2 / §9.B.3 |
 | D28 | **Supersedes D1 and D24 — GitHub-only distribution.** The `derrick.dev` domain was unavailable, so all derrick artefacts (install script, marketplace JSON, release binaries) live under `github.com/lgulliver/derrick`. The Claude Code marketplace JSON is fetched from `https://raw.githubusercontent.com/lgulliver/derrick/main/marketplace.json`. There is no longer a separate marketplace host to health-check, so D24's fallback logic collapses to a single GitHub-releases path; transient GitHub unavailability surfaces as a normal network error to the user with the documented recovery (`gh release download` or manual binary install). | §11 |

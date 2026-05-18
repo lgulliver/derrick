@@ -134,6 +134,16 @@ brief.
    substantive rules live in DESIGN.md so every host (Claude,
    Codex, Copilot) reads the same content. AGENTS.md (this file)
    is the operational contract.
+8. **State machine integrity is non-negotiable** (D31/D32/D33,
+   DESIGN.md §8.6). Ticket state transitions to `Done` are
+   never authoritative on hand self-report alone — the foreman
+   observes the merge. State changes are append-only at the
+   event log. The foreman cross-references against git, not
+   just substrate state. Worktree and ticket cleanup is
+   continuous (prune-on-startup + periodic), never trusts
+   "eventually consistent" state. We banked these as design
+   decisions specifically to avoid the autonomous-mode bugs we
+   observed in a comparable system at scale.
 
 ## Specialist routing
 
