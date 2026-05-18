@@ -296,6 +296,21 @@ dependencies = [
 [[package]]
 name = "derrick-adopt"
 version = "0.0.0"
+dependencies = [
+ "chrono",
+ "derrick-config",
+ "derrick-models",
+ "derrick-substrate",
+ "derrick-substrate-native",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "uuid",
+ "which",
+]
 
 [[package]]
 name = "derrick-assay"
@@ -320,6 +335,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "crossterm",
+ "derrick-adopt",
  "derrick-config",
  "derrick-flow",
  "derrick-models",

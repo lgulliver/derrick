@@ -36,6 +36,18 @@ pub(crate) struct InitArgs {
     pub(crate) prefix: Option<String>,
     #[arg(long)]
     pub(crate) force: bool,
+    #[arg(long)]
+    pub(crate) yes: bool,
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+    #[arg(long)]
+    pub(crate) no_hooks: bool,
+    #[arg(long)]
+    pub(crate) append_agents_md: bool,
+    #[arg(long, conflicts_with = "constitution_from_docs")]
+    pub(crate) constitution_stub: bool,
+    #[arg(long, conflicts_with = "constitution_stub")]
+    pub(crate) constitution_from_docs: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

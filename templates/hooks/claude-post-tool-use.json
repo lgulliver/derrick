@@ -1,0 +1,10 @@
+{
+  "matcher": "{{matcher}}",
+  "hooks": [
+    {
+      "type": "command",
+      "command": "derrick caveman --intensity lite",
+      "description": "derrick:caveman"
+    }
+  ]
+}

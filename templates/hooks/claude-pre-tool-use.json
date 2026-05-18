@@ -1,0 +1,10 @@
+{
+  "matcher": "{{matcher}}",
+  "hooks": [
+    {
+      "type": "command",
+      "command": "derrick scrub --tool {{tool}}",
+      "description": "derrick:scrub"
+    }
+  ]
+}

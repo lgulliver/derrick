@@ -171,21 +171,28 @@ state:
 }
 
 #[test]
-fn bare_init_refuses_with_t011_pointer() -> TestResult {
+fn bare_init_adopts_brownfield_repo() -> TestResult {
     let dir = repo()?;
+    fs::write(dir.path().join("AGENTS.md"), "# Agents\n")?;
+    fs::write(dir.path().join("CLAUDE.md"), "# Claude\n")?;
 
     let output = derrick()?
         .current_dir(dir.path())
-        .arg("init")
+        .args(["init", "--site", "test", "--prefix", "tst"])
         .assert()
-        .failure()
+        .success()
         .get_output()
-        .stderr
+        .stdout
         .clone();
 
-    assert_contains(&output, "T011")?;
-    assert_contains(&output, "derrick init --greenfield")?;
-    assert!(!dir.path().join("derrick.yaml").exists());
+    assert_contains(&output, "adoption plan")?;
+    assert_contains(&output, "AGENTS.md as guardrails.agents_md")?;
+    assert_contains(&output, "CLAUDE.md as guardrails.claude_md")?;
+    assert!(dir.path().join("derrick.yaml").exists());
+    assert!(dir.path().join(".derrick/derrick.db").exists());
+    let config = fs::read_to_string(dir.path().join("derrick.yaml"))?;
+    assert!(config.contains("# guardrails.agents_md: AGENTS.md"));
+    assert!(config.contains("# guardrails.claude_md: CLAUDE.md"));
     Ok(())
 }
 

@@ -7,3 +7,18 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+chrono = { workspace = true }
+derrick-config = { path = "../derrick-config" }
+derrick-models = { path = "../derrick-models" }
+derrick-substrate = { path = "../derrick-substrate" }
+derrick-substrate-native = { path = "../derrick-substrate-native" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+which = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

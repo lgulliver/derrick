@@ -68,6 +68,8 @@ enum CliError {
     #[error("{0}")]
     Substrate(#[from] derrick_substrate::SubstrateError),
     #[error("{0}")]
+    Adopt(#[from] derrick_adopt::AdoptError),
+    #[error("{0}")]
     Json(#[from] serde_json::Error),
 }
 
