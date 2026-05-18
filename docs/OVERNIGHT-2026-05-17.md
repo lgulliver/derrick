@@ -18,6 +18,7 @@ User left around 23:30 with the instruction:
 | T008 | `derrick-cli` minimal (init/status/doctor/run-stub) | 4 | 10m 59s | 80.56% | 90%+ |
 | T009 | `derrick-tools` host CLI adapters | 2 | 12m 50s | 92.86% | — |
 | T010 | `derrick-flow` pipeline orchestrator (final dogfooding-bar item) | 4 | 12m 57s | 82.26% | — |
+| T011 | `derrick-adopt` brownfield init + D29 Claude Code hooks | **8** | 13m 11s | 86.47% | — |
 
 All shipped under conventional commits, all CI runs green
 (matrix: ubuntu-latest + macos-latest, plus rustfmt, clippy
@@ -85,11 +86,19 @@ Per AGENTS.md, the bar is `T001` + `T002` + `T007` + a minimal
 | `derrick-cli` minimal (T008) | ✅ |
 | `derrick-flow` minimal (T009) | ⏳ NOT drafted yet |
 
-**All four bar items shipped.** T009 (derrick-tools) and
-T010 (derrick-flow) landed on the second overnight stretch
-after the user picked option A (split derrick-flow + derrick-
-tools) and option A (dogfood on first real artifacts) in the
-morning review.
+**All four bar items shipped + self-dogfooding unblocked.**
+T009 (derrick-tools) and T010 (derrick-flow) landed on the
+second stretch; T011 (derrick-adopt) on the third. The
+user's morning question 5 ("wait for T011 to do proper
+brownfield init") is now satisfied — bare `derrick init`
+against the derrick repo itself produces a valid yaml +
+substrate + Claude Code hooks without touching existing
+AGENTS.md / CLAUDE.md / .claude/.
+
+Also banked during this session: D31/D32/D33 (state-machine
+integrity, lessons from a gastown-at-scale incident reported
+by the user) and D34 (Codex host hooks deferred best-effort
+once we hit the spec/design mismatch in T011 round 3).
 
 End-to-end smoke verified against the built binary with
 mocked claude/codex hosts: `derrick run add-feature` walks
