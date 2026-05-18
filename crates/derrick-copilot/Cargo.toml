@@ -7,3 +7,17 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+derrick-config = { path = "../derrick-config" }
+derrick-substrate = { path = "../derrick-substrate" }
+derrick-substrate-native = { path = "../derrick-substrate-native" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

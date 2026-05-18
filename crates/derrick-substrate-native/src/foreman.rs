@@ -251,8 +251,14 @@ impl HandDispatcher for HumanHandDispatcher {
 
 /// Copilot dispatcher placeholder. Returns `DispatchError::NotImplemented`
 /// pointing at T013.
+///
+/// Superseded in T013 by `derrick_copilot::CopilotHandDispatcher`. Retained
+/// for one release so downstream code that still references the stub keeps
+/// compiling.
+#[deprecated(since = "0.1.0", note = "Use derrick_copilot::CopilotHandDispatcher")]
 pub struct CopilotStubDispatcher;
 
+#[allow(deprecated)]
 impl CopilotStubDispatcher {
     /// Construct the stub. No state needed.
     pub fn new() -> Self {
@@ -260,6 +266,7 @@ impl CopilotStubDispatcher {
     }
 }
 
+#[allow(deprecated)]
 impl Default for CopilotStubDispatcher {
     fn default() -> Self {
         Self::new()
@@ -267,6 +274,7 @@ impl Default for CopilotStubDispatcher {
 }
 
 #[async_trait]
+#[allow(deprecated)]
 impl HandDispatcher for CopilotStubDispatcher {
     fn kind(&self) -> &'static str {
         "copilot"

@@ -489,10 +489,7 @@ impl Default for Tools {
                 backend: SubstrateBackendKind::Native,
                 mode: SubstrateMode::Solo,
             },
-            copilot: Copilot {
-                enabled: false,
-                agent_identity: "derrick-hand".to_owned(),
-            },
+            copilot: Copilot::default(),
             git: Git::default(),
             foreman: Foreman::default(),
         }
@@ -684,6 +681,8 @@ pub enum SubstrateMode {
 pub struct Copilot {
     enabled: bool,
     agent_identity: String,
+    poll_interval: std::time::Duration,
+    poll_timeout: std::time::Duration,
 }
 
 impl Copilot {
@@ -695,6 +694,28 @@ impl Copilot {
     /// Returns the identity used for Copilot hands.
     pub fn agent_identity(&self) -> &str {
         &self.agent_identity
+    }
+
+    /// Interval between successive PR polls. Default 30s.
+    pub fn poll_interval(&self) -> std::time::Duration {
+        self.poll_interval
+    }
+
+    /// Maximum wall-clock duration the poll loop will wait for a PR before
+    /// giving up. Default 10 minutes.
+    pub fn poll_timeout(&self) -> std::time::Duration {
+        self.poll_timeout
+    }
+}
+
+impl Default for Copilot {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            agent_identity: "derrick-hand".to_owned(),
+            poll_interval: std::time::Duration::from_secs(30),
+            poll_timeout: std::time::Duration::from_secs(60 * 10),
+        }
     }
 }
 
@@ -1632,18 +1653,27 @@ impl From<Substrate> for SubstrateLayer {
 struct CopilotLayer {
     enabled: Option<bool>,
     agent_identity: Option<String>,
+    #[serde(default, with = "humantime_serde")]
+    poll_interval: Option<std::time::Duration>,
+    #[serde(default, with = "humantime_serde")]
+    poll_timeout: Option<std::time::Duration>,
 }
 
 impl CopilotLayer {
     fn merge(&mut self, other: Self) {
         merge_scalar(&mut self.enabled, other.enabled);
         merge_scalar(&mut self.agent_identity, other.agent_identity);
+        merge_scalar(&mut self.poll_interval, other.poll_interval);
+        merge_scalar(&mut self.poll_timeout, other.poll_timeout);
     }
 
     fn finalize(self) -> Result<Copilot, ConfigError> {
+        let defaults = Copilot::default();
         Ok(Copilot {
             enabled: self.enabled.unwrap_or(false),
             agent_identity: required(self.agent_identity, "tools.copilot.agent_identity")?,
+            poll_interval: self.poll_interval.unwrap_or(defaults.poll_interval),
+            poll_timeout: self.poll_timeout.unwrap_or(defaults.poll_timeout),
         })
     }
 }
@@ -1653,6 +1683,8 @@ impl From<Copilot> for CopilotLayer {
         Self {
             enabled: Some(copilot.enabled),
             agent_identity: Some(copilot.agent_identity),
+            poll_interval: Some(copilot.poll_interval),
+            poll_timeout: Some(copilot.poll_timeout),
         }
     }
 }

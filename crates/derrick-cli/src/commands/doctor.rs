@@ -120,6 +120,19 @@ async fn add_config_driven_checks(repo_root: &Path, config: &Config, checks: &mu
             "run `gh api repos/{owner}/{repo}` and inspect merge settings",
         ));
     }
+
+    if config.tools().copilot().enabled() {
+        // T013: the Copilot hand dispatches via `gh issue create` +
+        // `gh issue edit --add-assignee @copilot`. Both rely on the
+        // `gh` CLI being installed and authenticated, and on the
+        // repository having the Copilot coding agent enabled.
+        checks.push(binary_check("gh", true));
+        checks.push(Check::warn(
+            "copilot coding agent",
+            "tools.copilot.enabled is true; derrick cannot confirm the repo has the Copilot coding agent enabled without an API call",
+            "verify Copilot is reachable on this repo via the GitHub UI (Settings → Copilot → Coding agent) before running `derrick foreman start`",
+        ));
+    }
 }
 
 async fn check_native_substrate(repo_root: &Path, config: &Config, checks: &mut Vec<Check>) {

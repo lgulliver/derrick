@@ -6,8 +6,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use derrick_config::{Config, SubstrateBackendKind};
+use derrick_copilot::{
+    CopilotHandDispatcher, CopilotHandDispatcherConfig, GhCopilotClient, GitBranchCreator,
+};
 use derrick_substrate::Substrate;
-use derrick_substrate_native::foreman::{CopilotStubDispatcher, Foreman, ForemanTtls, GhRepoState};
+#[allow(deprecated)]
+use derrick_substrate_native::foreman::CopilotStubDispatcher;
+use derrick_substrate_native::foreman::{Foreman, ForemanTtls, GhRepoState, HandDispatcher};
 use derrick_substrate_native::NativeSubstrate;
 
 use crate::commands::{
@@ -95,15 +100,49 @@ fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstra
         worktree_ttl: chrono::Duration::from_std(config.tools().foreman().worktree_ttl())
             .unwrap_or_else(|_| chrono::Duration::hours(24)),
     };
+    let dispatcher: Box<dyn HandDispatcher> = build_dispatcher(repo_root, config, &substrate);
     Foreman::new(
         substrate,
         config.clone(),
         Box::new(GhRepoState::new(repo_root.to_path_buf())),
         repo_root.to_path_buf(),
-        Box::new(CopilotStubDispatcher),
+        dispatcher,
     )
     .with_ttls(ttls)
     .with_exit_when_idle(config.tools().foreman().exit_when_idle())
+}
+
+fn build_dispatcher(
+    repo_root: &Path,
+    config: &Config,
+    substrate: &Arc<NativeSubstrate>,
+) -> Box<dyn HandDispatcher> {
+    if config.tools().copilot().enabled() {
+        let copilot_config = CopilotHandDispatcherConfig {
+            poll_interval: config.tools().copilot().poll_interval(),
+            poll_timeout: config.tools().copilot().poll_timeout(),
+            base_branch: "main".to_owned(),
+            agent_identity: config.tools().copilot().agent_identity().to_owned(),
+        };
+        let branch_creator = Arc::new(GitBranchCreator::new(repo_root.to_path_buf()))
+            as Arc<dyn derrick_copilot::BranchCreator>;
+        let client = Arc::new(GhCopilotClient::new(repo_root.to_path_buf()))
+            as Arc<dyn derrick_copilot::CopilotDispatchClient>;
+        Box::new(CopilotHandDispatcher::new(
+            Arc::clone(substrate),
+            branch_creator,
+            client,
+            copilot_config,
+        ))
+    } else {
+        // tools.copilot.enabled = false: keep the stub in place so the
+        // foreman can still tick on non-copilot workloads (e.g. human
+        // mode). The stub returns NotImplemented, which the foreman
+        // surfaces as an event without failing the tick.
+        #[allow(deprecated)]
+        let stub = CopilotStubDispatcher;
+        Box::new(stub)
+    }
 }
 
 async fn open_substrate(

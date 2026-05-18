@@ -1,6 +1,12 @@
 //! Foreman tests. Real SQLite via tempfile; inline `RepoState` and
 //! `HandDispatcher` mocks (no external mocking crates per AGENTS.md).
 
+// `CopilotStubDispatcher` is deprecated in favour of
+// `derrick_copilot::CopilotHandDispatcher` (T013), but these tests
+// intentionally exercise the stub's NotImplemented path. Keep the
+// deprecation visible at compile time elsewhere.
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
