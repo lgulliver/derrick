@@ -18,12 +18,11 @@ pub(crate) async fn run_host(
     spec: CommandSpec,
     request: HostRequest,
 ) -> Result<HostResponse, HostError> {
-    if !is_available(&spec.binary) {
-        return Err(HostError::NotFound {
-            host: host.to_owned(),
-        });
-    }
-
+    // Note: no pre-check via `is_available` here. `spawn()` below already
+    // classifies missing binaries as `ErrorKind::NotFound` which is mapped
+    // to `HostError::NotFound`, and a pre-check would beat legitimate
+    // post-spawn errors (e.g. `NotADirectory` cwd) to the punch on some
+    // platforms where the binary check races the spawn check.
     let mut command = Command::new(&spec.binary);
     command
         .args(&spec.args)
