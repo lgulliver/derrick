@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "derrick: doctor",
+      "type": "shell",
+      "command": "derrick doctor",
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "derrick: status",
+      "type": "shell",
+      "command": "derrick status",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "derrick: observe",
+      "type": "shell",
+      "command": "derrick observe",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true }
+    },
+    {
+      "label": "derrick: foreman start (attached)",
+      "type": "shell",
+      "command": "derrick foreman start --attached",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true }
+    },
+    {
+      "label": "derrick: run add-feature",
+      "type": "shell",
+      "command": "derrick run add-feature",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    }
+  ]
+}

@@ -12,6 +12,22 @@ const INIT_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../templates/derrick.yaml.in"
 ));
+const VSCODE_TASKS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../templates/.vscode/tasks.json"
+));
+const IDEA_DOCTOR_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../templates/.idea/runConfigurations/derrick_doctor.xml"
+));
+const IDEA_OBSERVE_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../templates/.idea/runConfigurations/derrick_observe.xml"
+));
+const IDEA_FOREMAN_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../templates/.idea/runConfigurations/derrick_foreman_start.xml"
+));
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
     let repo_root = current_repo_root()?;
     if !args.greenfield {
@@ -69,6 +85,12 @@ async fn brownfield_init(repo_root: &Path, args: InitArgs) -> Result<CliExitCode
     if !outcome.bookkeeping.is_empty() {
         println!("bookkeeping  {}", join_paths(&outcome.bookkeeping));
     }
+    if args.vscode {
+        write_vscode_configs(repo_root)?;
+    }
+    if args.jetbrains {
+        write_jetbrains_configs(repo_root)?;
+    }
     if !args.yes {
         println!("next         review `git status` before committing");
     }
@@ -115,8 +137,47 @@ async fn greenfield_init(repo_root: &Path, args: InitArgs) -> Result<CliExitCode
         println!("written      .codex/instructions.md");
     }
 
+    if args.vscode {
+        write_vscode_configs(repo_root)?;
+    }
+    if args.jetbrains {
+        write_jetbrains_configs(repo_root)?;
+    }
+
     print_summary(&config);
     Ok(CliExitCode::Success)
+}
+
+fn write_vscode_configs(repo_root: &Path) -> Result<(), crate::CliError> {
+    let dir = repo_root.join(".vscode");
+    create_dir_all(&dir)?;
+    let path = dir.join("tasks.json");
+    if !path.exists() {
+        write_file(&path, VSCODE_TASKS_TEMPLATE)?;
+        println!("written      .vscode/tasks.json");
+    } else {
+        println!("skipped      .vscode/tasks.json (already exists)");
+    }
+    Ok(())
+}
+
+fn write_jetbrains_configs(repo_root: &Path) -> Result<(), crate::CliError> {
+    let dir = repo_root.join(".idea/runConfigurations");
+    create_dir_all(&dir)?;
+    for (filename, content) in [
+        ("derrick_doctor.xml", IDEA_DOCTOR_TEMPLATE),
+        ("derrick_observe.xml", IDEA_OBSERVE_TEMPLATE),
+        ("derrick_foreman_start.xml", IDEA_FOREMAN_TEMPLATE),
+    ] {
+        let path = dir.join(filename);
+        if !path.exists() {
+            write_file(&path, content)?;
+            println!("written      .idea/runConfigurations/{filename}");
+        } else {
+            println!("skipped      .idea/runConfigurations/{filename} (already exists)");
+        }
+    }
+    Ok(())
 }
 
 fn default_site_name(repo_root: &Path) -> String {

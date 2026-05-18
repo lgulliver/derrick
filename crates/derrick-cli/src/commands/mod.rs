@@ -81,6 +81,12 @@ pub(crate) struct InitArgs {
     pub(crate) constitution_stub: bool,
     #[arg(long, conflicts_with = "constitution_stub")]
     pub(crate) constitution_from_docs: bool,
+    /// Write VS Code task definitions to `.vscode/tasks.json` (opt-in).
+    #[arg(long)]
+    pub(crate) vscode: bool,
+    /// Write JetBrains run configurations to `.idea/runConfigurations/` (opt-in).
+    #[arg(long)]
+    pub(crate) jetbrains: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
