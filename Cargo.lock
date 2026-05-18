@@ -457,6 +457,7 @@ dependencies = [
  "derrick-tools",
  "derrick-tui",
  "libc",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

@@ -97,6 +97,9 @@ pub(crate) struct GainArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub(crate) format: OutputFormat,
+    /// Aggregate all sessions for this repo, not just the most recent.
+    #[arg(long)]
+    pub(crate) all: bool,
 }
 
 #[derive(Debug, Args)]

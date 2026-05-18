@@ -14,6 +14,7 @@ use thiserror::Error;
 mod commands;
 mod exit_code;
 mod output;
+mod telemetry;
 
 /// Runs the CLI with an argument iterator and returns the process exit code.
 pub async fn run<I, T>(args: I) -> ExitCode
