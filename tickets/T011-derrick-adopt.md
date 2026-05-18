@@ -2,7 +2,7 @@
 
 **Specialist owner**: `flow-engineer` (opus) — owns adopt + init flow per AGENTS.md routing
 **Crate**: `crates/derrick-adopt`
-**Depends on**: `derrick-config`, `derrick-substrate`, `derrick-substrate-native`, `derrick-tools` (for speckit/claude/codex detection), `derrick-cli` (to wire bare `derrick init`)
+**Depends on**: `derrick-config`, `derrick-substrate`, `derrick-substrate-native`, `derrick-tools` (for speckit/claude/codex detection), `derrick-models` (for the `--constitution-from-docs` LLM draft path via the `proposer` role), `derrick-cli` (to wire bare `derrick init`)
 **Priority**: P0 — unblocks self-dogfooding on the derrick repo itself (morning decision question 5) and OSS adoption for any non-empty repo.
 
 ## Why
@@ -284,12 +284,13 @@ input.
 9. Always: `derrick.yaml` (rendered from `templates/derrick.yaml.in` with site/prefix/mode substituted).
 10. Always: `.derrick/.gitignore` (gitignores `runs/`, `state.json`, `derrick.db*`, `worktrees/`).
 11. Optional append (`opts.append_agents_md`): a `<!-- derrick:start -->` / `<!-- derrick:end -->` block appended to existing `AGENTS.md` and `CLAUDE.md`. Idempotent: re-running with the same opts produces no change because the block is detected and replaced rather than re-appended.
-12. `opts.constitution == ConstitutionMode::Stub` AND no existing constitution → write `.specify/memory/constitution.md` with the canonical banner stub. Adds a runtime check: the `plan` pipeline step refuses to run until the banner is removed (per D4 enforcement).
-13. `opts.constitution == ConstitutionMode::FromDocs` AND no existing constitution → write the prior `draft_constitution` output (passed in as a separate input) to `.specify/memory/constitution.md`, banner intact.
+12. `opts.constitution == ConstitutionMode::Stub` AND no existing constitution AND `!report.speckit_cli_available` → write `.specify/memory/constitution.md` with the canonical banner stub. Adds a runtime check: the `plan` pipeline step refuses to run until the banner is removed (per D4 enforcement). If speckit *is* available, `--constitution-stub` instead refuses with a `blockers` entry pointing at `/speckit.constitution` — derrick defers to speckit as the constitution owner per D2/D3 (detect-then-defer).
+13. `opts.constitution == ConstitutionMode::FromDocs` AND no existing constitution AND `!report.speckit_cli_available` → write the prior `draft_constitution` output (passed in as a separate input) to `.specify/memory/constitution.md`, banner intact. With speckit available, `--constitution-from-docs` is similarly refused with a pointer to `/speckit.constitution`. (Detect-then-defer applies to both opt-in modes.)
 14. `.specify/extensions/derrick/scripts/tasks-to-tickets.sh` (always; if `.specify/extensions/derrick/` already exists, **merge by file** rather than overwrite — only files derrick owns get rewritten).
 15. `.claude/commands/add-feature.md`, `derrick-status.md`, `derrick-doctor.md`, `derrick-resume.md` (always; collision was blocked in Phase A).
 16. `.claude/agents/<name>.md` for each derrick agent. Skip any name colliding with `report.claude_agents` — add a `warnings` entry naming the skipped agent.
-17. Hooks (skipped entirely if `opts.no_hooks`): see "Hook representation" below.
+17. `.codex/instructions.md` (always — not gated on codex CLI presence, since the user may install codex after init): a static reference to the constitution path + `derrick.yaml` so codex picks up project context when running in `host: codex` pipeline steps. **No `.codex/` hook installation** per D34. If `.codex/instructions.md` already exists, append a derrick block (matching the `--append-agents-md` pattern in rule 11) so the user's own content survives.
+18. Hooks (skipped entirely if `opts.no_hooks`): see "Hook representation" below.
 
 #### Phase D — warnings (non-fatal observations)
 
@@ -447,6 +448,37 @@ matching `"derrick:scrub" | "derrick:caveman"`, and
 removes them while preserving the surrounding JSON
 structure exactly.
 
+#### Hook conflict semantics (D29 brownfield safety)
+
+A "conflict on a matcher" means: for a given
+`matcher` value (e.g. `"Bash"`) inside the `PreToolUse`
+or `PostToolUse` array, the existing settings.json
+already has at least one entry that derrick did not
+install (i.e. its `"description"` field is **not** the
+`derrick:scrub` / `derrick:caveman` marker, or the field
+is absent).
+
+**Detection happens in `propose`.** The plan builder reads
+`.claude/settings.json` once, scans its
+`PreToolUse`/`PostToolUse` arrays, and classifies each
+existing entry per-(stage, matcher) pair:
+
+| Existing entry | Plan behaviour |
+|---|---|
+| Marked derrick (`description == "derrick:scrub"` etc.) | **Idempotent replacement.** The planned write contains the current derrick template at that slot; if the existing entry is byte-equal, no change. If newer, the existing entry is overwritten in place (no array-position shuffle). This is what makes re-running adopt safe. |
+| Unmarked, different matcher than derrick's set | **Coexists.** Derrick's new entries are prepended to the front of the array; unmarked entries follow. |
+| Unmarked, same matcher as one derrick wants to install | **Conflict.** Without `--force`, the plan adds a `blockers` entry: *"`.claude/settings.json` PreToolUse already has an entry on matcher `<name>`; pass --force to prepend derrick's hook before it, or remove the conflicting entry first."* With `--force`, derrick's entry is prepended before the existing one (the existing one is not deleted or modified), and a `warnings` entry records that a force-merge happened. |
+| Existing settings.json file is corrupt JSON | Blocker recorded by `propose` (during the same parse pass that does hook classification). Surfaces in `derrick init --dry-run` and the confirmation prompt before `apply` is ever called. `apply` re-validates as a defensive second pass, but the user's first signal is at proposal time. |
+
+`--force` only relaxes the conflict refusal; it never deletes
+unmarked entries. The user retains control over their existing
+configuration.
+
+`apply` then writes the rendered `settings.json` (full JSON
+object) via the same stage-then-commit path as other files.
+Atomic rename guarantees the file is never seen as half-written
+by Claude Code (which reads it on session start).
+
 **Codex hook installation is deferred to a follow-up
 ticket.** Codex's hook surface is meaningfully thinner than
 Claude Code's at the time of writing (no documented
@@ -474,6 +506,7 @@ derrick-config = { path = "../derrick-config" }
 derrick-substrate = { path = "../derrick-substrate" }
 derrick-substrate-native = { path = "../derrick-substrate-native" }
 derrick-tools = { path = "../derrick-tools" }    # for speckit/host detection only
+derrick-models = { path = "../derrick-models" }  # for --constitution-from-docs draft
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -550,6 +583,24 @@ output for same inputs):**
   `"derrick:caveman"`.
 - `hooks_merge_into_existing_settings_json_preserves_unknown_fields`.
 - `hooks_prepended_before_existing_entries`.
+
+**Hook conflict semantics:**
+
+- `hook_replacement_is_idempotent_for_derrick_marked_entries` —
+  pre-existing settings has a derrick-marked entry with stale
+  content; re-running adopt updates it in place with no
+  array-position shuffle and produces an empty diff if
+  already current.
+- `hook_unmarked_different_matcher_coexists` — user has
+  their own hook on `Read`; derrick installs `Bash`;
+  result has both, derrick's first.
+- `hook_unmarked_same_matcher_blocks_without_force` —
+  blockers list contains the explicit message; no writes.
+- `hook_unmarked_same_matcher_force_merges_with_warning` —
+  with `--force`, derrick's entry is prepended, the
+  unmarked entry survives unchanged, warnings list
+  records the force-merge.
+- `hook_corrupt_settings_json_blocks_during_proposal`.
 
 **Apply (stage-then-commit):**
 

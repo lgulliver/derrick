@@ -530,8 +530,8 @@ Concrete behaviours:
 | No constitution at all | Offer to generate a *minimal stub* (`derrick init --constitution-stub`) or run a one-shot LLM pass that drafts one from existing docs (`--constitution-from-docs`). Both opt-in. |
 | Existing tracker (Linear, Jira, GitHub Projects) | Skip native substrate ticket creation; offer a future adapter (out of scope for v1, recorded as a constraint). |
 | Existing CI / pre-commit / git hooks | Untouched. |
-| Existing `.claude/settings.json` hooks | Adopt-additively. Derrick adds its `PreToolUse`/`PostToolUse` entries (D29) **before** existing ones in the array, with a comment marker (`// derrick:scrub`) so they're greppable for later removal. Refuses to overwrite; refuses without `--force` if the user has conflicting entries on the same tool. |
-| Existing `.codex/instructions.md` | Same pattern as `.claude/`. |
+| Existing `.claude/settings.json` hooks | Adopt-additively. Derrick adds its `PreToolUse`/`PostToolUse` entries (D29) **before** existing ones in the array, marked with a `"description"` field (`"description": "derrick:scrub"` for PreToolUse, `"description": "derrick:caveman"` for PostToolUse — JSON has no line comments, so the marker is a real field that Claude Code preserves on unknown keys). Refuses to overwrite; refuses without `--force` if the user has conflicting entries on the same tool. |
+| Existing `.codex/instructions.md` | Adopt-additively: append a derrick block; the user's own content is preserved. No `.codex/` hook installation per D34. |
 
 Switches:
 
@@ -1588,7 +1588,7 @@ links back to the section where it lives.
 |---|---|---|
 | D1 | **Plugin distribution**: own marketplace at `derrick.dev/marketplace.json` (primary) + GitHub release artefacts (fallback). | §11 |
 | D2 | **Speckit init**: detect-then-defer — use speckit if installed; fall back to a minimal `.specify/` skeleton derrick ships, with a banner requiring the user to author the constitution via `/speckit.constitution` before any pipeline runs. | §5.2 / §5.2.1 |
-| D3 | **Constitution stub**: derrick does not ship a constitution template at all — speckit owns that file. Brownfield init points at the existing constitution-like doc; greenfield init forces the speckit constitution flow. | §5.2 |
+| D3 | **Constitution stub**: derrick prefers speckit as the constitution owner. The detect-then-defer logic in §5.2.1 enforces this: if `specify` is on PATH, init runs `/speckit.constitution` (or `specify init --here`); derrick does **not** write a constitution. **Refined by T011 / D34 era**: when speckit is *not* available and the user explicitly opts in (`--constitution-stub` or `--constitution-from-docs`), `derrick-adopt` may write a minimal banner stub or LLM-drafted constitution as a fallback. Both opt-in modes refuse if speckit is available — derrick still defers. Greenfield init forces the speckit constitution flow. | §5.2 / §5.6 / T011 |
 | D4 | **Brownfield `--constitution-from-docs` drafts**: marked with a banner; `plan` step refuses to run until the user removes the banner. | §5.6 |
 | D5 | **Assay reviewers in v1**: codex only. Other providers slot in via the model abstraction later — no extra v1 work. | §7 |
 | D6 | **Split-verdict policy**: configurable per repo via `on_split:` (`reject` default fail-closed, `human`, `majority`). | §9.C.2 |
