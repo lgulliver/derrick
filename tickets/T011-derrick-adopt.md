@@ -38,19 +38,46 @@ impl Adopter {
     /// network, fast.
     pub fn detect(&self) -> Result<DetectionReport, AdoptError>;
 
+    /// (Only when `opts.constitution == ConstitutionMode::FromDocs`.)
+    /// Run the LLM draft over readme + contributing + ADRs.
+    /// 30s timeout. Returns the drafted constitution body
+    /// **with the canonical banner prepended**, ready to be
+    /// passed into `propose` as `drafted_constitution`. This
+    /// is the **only** network-touching method on `Adopter`.
+    pub async fn draft_constitution(
+        &self,
+        report: &DetectionReport,
+        opts: &AdoptOptions,
+    ) -> Result<String, AdoptError>;
+
     /// Produce a plan describing what `apply` would write,
     /// what it would reference, and what it would warn about.
-    /// Pure function of the detection report + the user's
-    /// options.
+    /// Pure function of the inputs — no I/O, no network.
+    /// `drafted_constitution` is `Some(text)` only when the
+    /// caller has already run `draft_constitution`; otherwise
+    /// `None`. If `opts.constitution == FromDocs` but
+    /// `drafted_constitution` is `None`, propose returns an
+    /// error rather than silently skipping the planned write.
     pub fn propose(
         &self,
         detection: &DetectionReport,
         opts: &AdoptOptions,
+        drafted_constitution: Option<&str>,
     ) -> Result<AdoptionPlan, AdoptError>;
 
-    /// Apply the plan. Writes only files in `plan.writes`;
-    /// touches no others. Returns the outcome with paths
-    /// actually written.
+    /// Apply the plan. Writes the files in `plan.writes`;
+    /// in addition, owns and may touch a small set of
+    /// derrick-bookkeeping paths regardless of the plan:
+    /// - `.derrick/state.json` (adoption history append)
+    /// - `.derrick/.adopt-stage-<uuid>/` (transient staging
+    ///   dir, cleaned up by D32's reconciliation pass)
+    /// - `.derrick/derrick.db` and friends (substrate open
+    ///   side-effect; covered by T007)
+    ///
+    /// Files **outside** that set and not in `plan.writes`
+    /// are guaranteed untouched. Returns the outcome with
+    /// every path written (including derrick-bookkeeping
+    /// paths) so callers can `git status`-cleanly review.
     pub async fn apply(&self, plan: &AdoptionPlan)
         -> Result<AdoptionOutcome, AdoptError>;
 }
@@ -71,13 +98,29 @@ pub struct DetectionReport {
     pub claude_agents: Vec<PathBuf>,             // .claude/agents/*.md
     pub claude_commands: Vec<PathBuf>,           // .claude/commands/*.md
     pub claude_skills: Vec<PathBuf>,             // .claude/skills/*/SKILL.md
+    pub codex_dir: Option<PathBuf>,              // .codex/
     pub codex_instructions: Option<PathBuf>,     // .codex/instructions.md
+    pub codex_config: Option<PathBuf>,           // .codex/config.toml or settings.json (if present)
     pub github_copilot_instructions: Option<PathBuf>,
                                                  // .github/copilot-instructions.md
+    pub codeowners: Option<PathBuf>,             // CODEOWNERS or .github/CODEOWNERS
 
     // Speckit footprint
     pub specify_dir: Option<PathBuf>,            // .specify/
-    pub constitution: Option<PathBuf>,           // .specify/memory/constitution.md or similar
+    pub specify_extensions_derrick: Option<PathBuf>,
+                                                 // .specify/extensions/derrick/ (existing reuse state)
+    pub constitution: Option<PathBuf>,           // first match of the canon list below
+
+    /// Files matched as constitution-like docs in priority
+    /// order. `constitution` above is the first entry (if any).
+    /// Canon search list (in this priority order):
+    /// `.specify/memory/constitution.md`, `CONSTITUTION.md`,
+    /// `PRINCIPLES.md`, `STYLE.md`, `RULES.md`,
+    /// `CONTRIBUTING.md`, `docs/constitution.md`,
+    /// `docs/principles.md`. `CONTRIBUTING.md` is included
+    /// per DESIGN.md §5.6 (which lists it explicitly as a
+    /// constitution-like doc derrick may reference).
+    pub constitution_candidates: Vec<PathBuf>,
 
     // Existing derrick state (refuse if --force not set)
     pub existing_derrick_yaml: Option<PathBuf>,
@@ -87,20 +130,31 @@ pub struct DetectionReport {
     pub speckit_cli_available: bool,             // `which specify`
     pub claude_cli_available: bool,
     pub codex_cli_available: bool,
+    pub gh_cli_available: bool,                  // for D21 squash check via gh
 
-    // Tracker / docs we'd reference as constitution sources
+    // Docs we'd reference as constitution-drafting inputs
     pub readme: Option<PathBuf>,
     pub contributing: Option<PathBuf>,
     pub adrs_dir: Option<PathBuf>,               // docs/adrs/ or similar
 
-    // Repo-level git metadata (for D21 squash warning)
-    pub default_branch: Option<String>,
+    /// Tracker prefixes scraped from existing AGENTS.md /
+    /// CLAUDE.md (e.g. "LIN-", "JIRA-", "BD-"). Detection
+    /// only — adoption of external trackers is out of scope
+    /// for v1 (DESIGN.md §5.6) but we record what we saw so
+    /// future tickets can wire it.
+    pub tracker_prefixes: Vec<String>,
 }
 ```
 
 Detection is **pure read** — no writes, no network, no
 subprocess calls beyond `which`-checks. Fast enough to run
 on every `derrick doctor` invocation too.
+
+Notably **no** `default_branch` here: D21's squash-merge
+warning requires `gh api repos/{owner}/{name}` per
+DESIGN.md §8.5, which is a network call. That check belongs
+to `derrick doctor` (already specified in T008) and not to
+`derrick-adopt`. Removed.
 
 ### `AdoptOptions`
 
@@ -121,10 +175,37 @@ pub struct AdoptOptions {
     /// CLAUDE.md instead of just referencing them.
     pub append_agents_md: bool,
 
-    /// Run an LLM pass over existing docs to draft a
-    /// constitution.md stub (D4). The draft lands with a
-    /// banner; `plan` step refuses until banner is removed.
-    pub constitution_from_docs: bool,
+    /// Constitution handling. Default is `Reference`:
+    /// reference whatever constitution-like doc detection
+    /// found; otherwise produce no constitution write.
+    /// `Stub` opts in to writing a minimal banner stub.
+    /// `FromDocs` opts in to the LLM draft path (D4).
+    /// The three variants are **mutually exclusive**, and
+    /// both `Stub` and `FromDocs` are no-ops when a
+    /// constitution-like doc already exists — they refuse
+    /// rather than silently double-writing.
+    pub constitution: ConstitutionMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ConstitutionMode {
+    /// Default: reference existing if found; write nothing
+    /// otherwise. Matches DESIGN.md §5.6 "no constitution"
+    /// row: opt-in only.
+    #[default]
+    Reference,
+    /// `--constitution-stub`: write the minimal banner stub
+    /// at `.specify/memory/constitution.md`. Refused (with
+    /// `blockers` entry) when a constitution-like doc was
+    /// already detected.
+    Stub,
+    /// `--constitution-from-docs`: run an LLM draft pass
+    /// over README + CONTRIBUTING + ADRs. Output lands with
+    /// a banner; `plan` step refuses until banner is
+    /// removed (D4). Refused (with `blockers` entry) when a
+    /// constitution-like doc was already detected.
+    FromDocs,
 }
 ```
 
@@ -172,47 +253,139 @@ pub struct PlannedReference {
 
 ### Detection → plan rules
 
-Given a `DetectionReport`, `propose` builds the plan by
-applying these rules in order (first match wins per file):
+`propose` is **pure** — no I/O, no network, no LLM. It
+takes a `DetectionReport` + `AdoptOptions` and returns an
+`AdoptionPlan`. The `--constitution-from-docs` LLM draft
+happens in a separate `draft_constitution` step called
+before `propose` (see "Two-phase flow" below); its output
+is fed back in as an additional input.
 
-| Detected | Plan |
-|---|---|
-| `existing_derrick_yaml` and `!force` | Add to `blockers`: *"derrick.yaml already exists at <path>; pass --force to overwrite or use `derrick adopt --merge` (future ticket)"*. |
-| `git_repo` is false | Add to `blockers`: *"derrick init must run inside a git repo"*. |
-| `agents_md` present | Add to `references`: `guardrails.agents_md = <path>`. If `opts.append_agents_md` also adds a planned append to that file with a `<!-- derrick:start -->` / `<!-- derrick:end -->` block referencing derrick. |
-| `claude_md` present | Same: reference + optional append, controlled by `append_agents_md`. |
-| `constitution` present | Add to `references`: `guardrails.constitution_path = <path>`. |
-| `constitution` absent and `opts.mode != solo` | Add to `writes`: a minimal `.specify/memory/constitution.md` stub with a banner *"This is a derrick-init stub. Run `/speckit.constitution` to author."*. Plan also adds a `BannerCheck` to `tools.speckit.pre_plan_hooks` so the `plan` step refuses until the banner is gone (D4 enforcement). |
-| `claude_settings` present and `!opts.no_hooks` | Add to `writes` with `WriteMode::MergeJson`: D29 `PreToolUse` + `PostToolUse` entries inserted **before** existing ones, comment-marker `// derrick:scrub` for later identification. If existing entries already cover the same tool, add to `warnings` and require `--force` to override per the §5.6 brownfield table. |
-| `claude_settings` absent and `!opts.no_hooks` | Add to `writes` with `WriteMode::Create`: minimal `.claude/settings.json` with derrick's hooks only. |
-| Equivalent paths for `.codex/instructions.md` and `.codex/settings.json` | Same pattern. Skip if codex CLI not available unless mode=copilot/crew. |
-| `claude_agents` contains agent names that collide with derrick's `foreman` / `assay-reviewer` / `hand-default` | Skip those — derrick doesn't overwrite existing agents. Add to `warnings`. Other derrick agent names ship cleanly. |
-| `claude_commands` contains `add-feature.md` etc. | Refuse with `blockers` unless `--force`. |
-| `opts.constitution_from_docs == true` | Inject an extra `writes` step (constitution.md.draft with banner per D4) and add a warning about the unreviewed prose. **Network-touching:** invokes the configured `proposer` role to draft from `readme + contributing + adrs_dir` content. Bounded by 30s timeout. |
-| `default_branch` repo allows squash-merge only | Add a `warnings` entry per D21 (squash-merge stance) — doesn't block, just informs. |
+The plan builder runs these rules in fixed declared order
+over sorted artifact lists. Every input has its sort key
+documented so the output is byte-deterministic for a given
+input.
+
+#### Phase A — blockers (terminate plan generation if any fire and `!force`)
+
+1. `!report.git_repo` → blocker: *"derrick init must run inside a git repo"*.
+2. `report.existing_derrick_yaml.is_some()` → blocker: *"derrick.yaml already exists at <path>; pass --force or use `derrick adopt --merge` (future)"*.
+3. `report.claude_commands` contains a name in `{add-feature.md, derrick-status.md, derrick-doctor.md, derrick-resume.md}` → blocker: *"existing Claude command <name> would be overwritten"*.
+4. `opts.constitution != Reference` AND `report.constitution.is_some()` → blocker: *"a constitution-like doc already exists at <path>; constitution flags refuse to overwrite"*.
+
+#### Phase B — references (read-only entries in derrick.yaml)
+
+5. `report.agents_md.is_some()` → reference `guardrails.agents_md = <path>`.
+6. `report.claude_md.is_some()` → reference `guardrails.claude_md = <path>`.
+7. `report.constitution.is_some()` → reference `guardrails.constitution_path = <path>`.
+8. `report.codeowners.is_some()` → reference `guardrails.codeowners = <path>`.
+
+#### Phase C — writes (each in fixed precedence order)
+
+9. Always: `derrick.yaml` (rendered from `templates/derrick.yaml.in` with site/prefix/mode substituted).
+10. Always: `.derrick/.gitignore` (gitignores `runs/`, `state.json`, `derrick.db*`, `worktrees/`).
+11. Optional append (`opts.append_agents_md`): a `<!-- derrick:start -->` / `<!-- derrick:end -->` block appended to existing `AGENTS.md` and `CLAUDE.md`. Idempotent: re-running with the same opts produces no change because the block is detected and replaced rather than re-appended.
+12. `opts.constitution == ConstitutionMode::Stub` AND no existing constitution → write `.specify/memory/constitution.md` with the canonical banner stub. Adds a runtime check: the `plan` pipeline step refuses to run until the banner is removed (per D4 enforcement).
+13. `opts.constitution == ConstitutionMode::FromDocs` AND no existing constitution → write the prior `draft_constitution` output (passed in as a separate input) to `.specify/memory/constitution.md`, banner intact.
+14. `.specify/extensions/derrick/scripts/tasks-to-tickets.sh` (always; if `.specify/extensions/derrick/` already exists, **merge by file** rather than overwrite — only files derrick owns get rewritten).
+15. `.claude/commands/add-feature.md`, `derrick-status.md`, `derrick-doctor.md`, `derrick-resume.md` (always; collision was blocked in Phase A).
+16. `.claude/agents/<name>.md` for each derrick agent. Skip any name colliding with `report.claude_agents` — add a `warnings` entry naming the skipped agent.
+17. Hooks (skipped entirely if `opts.no_hooks`): see "Hook representation" below.
+
+#### Phase D — warnings (non-fatal observations)
+
+18. If `report.specify_extensions_derrick.is_some()` → warn: *"existing `.specify/extensions/derrick/` will be merged file-by-file; review the diff before committing."*
+19. If `report.tracker_prefixes` is non-empty → warn: *"detected tracker prefixes <list>; v1 only ships the native substrate, no external-tracker adoption."*
+20. If `opts.constitution == ConstitutionMode::FromDocs` → warn: *"the constitution draft is unreviewed LLM prose; `plan` will refuse to run until you remove the banner."*
+
+**Squash-merge (D21) is NOT detected here** — that requires
+`gh api` which is a network call and `derrick doctor`
+already covers it.
+
+### Two-phase flow
+
+The `--constitution-from-docs` path requires a network call.
+We separate it from `propose` to keep `propose` pure:
+
+```text
+detect (pure)
+   ↓
+[--constitution-from-docs only:] draft_constitution
+   (LLM call, bounded 30s timeout, returns the drafted text)
+   ↓
+propose (pure; takes report + opts + optional drafted text)
+   ↓
+[interactive confirm]
+   ↓
+apply (I/O, idempotent staging + commit)
+```
+
+`Adopter::draft_constitution(report, opts) -> Result<String,
+AdoptError>` is the LLM step. It invokes the configured
+`proposer` role via `derrick-models`, passing the contents
+of `readme`, `contributing`, and any `adrs_dir` files as a
+structured prompt. Bounded by 30s timeout. Output is
+prepended with the canonical banner *"DERRICK-DRAFT — review,
+edit, remove this banner before running plan. Generated
+from <docs> on <date> by <model>."*
 
 ### Apply semantics
 
-`apply` performs writes in a fixed order:
+`apply` is **stage-then-commit** with a best-effort
+atomicity goal across multiple files:
 
-1. Verify blockers list is empty (or `force` is set).
-2. Pre-flight: for each `PlannedWrite`, check that the
-   target file matches expectations (e.g. for `MergeJson`,
-   that the existing JSON is parseable). On mismatch, abort
-   without writing anything.
-3. Materialise writes one by one, each via temp-file-and-
-   rename. If any single write fails, the rest are
-   attempted (best-effort recovery) and the outcome
-   records `failed: Vec<(PathBuf, AdoptError)>`. We don't
-   roll back successful writes — they're real files; the
-   user can `git status` to see what changed.
-4. Open the substrate (`NativeSubstrate::open`) with the
-   chosen site — this runs migrations on a fresh DB or
-   verifies the existing one (per T007).
-5. Write a small adoption record to
-   `.derrick/state.json#adoption`: timestamp, opts used,
-   files written, files referenced. Used by future
-   `derrick adopt --reverse` (out of scope here).
+1. **Pre-flight.** Verify `blockers` is empty or `force` is
+   set. For each `PlannedWrite`, validate the target file
+   matches expectations (`MergeJson` requires the existing
+   JSON to be parseable). Substrate open is attempted in a
+   dry-run mode (open + close immediately on a temp shadow
+   of the planned `.derrick/derrick.db` path) to confirm
+   it'd work. Any pre-flight failure → return error,
+   nothing on disk has changed.
+
+2. **Stage.** Render every output to a temp directory
+   (`.derrick/.adopt-stage-<uuid>/`). All file contents
+   exist as real bytes on disk before any production path
+   is touched. Pre-flight is repeated against the staged
+   `derrick.yaml` (parse + validate) so a misrender is
+   caught before commit.
+
+3. **Commit.** For each staged file in plan order, rename
+   into the production path. Renames are atomic on the
+   same filesystem. If any rename fails:
+   - Stop committing remaining files.
+   - Best-effort revert: any files already committed during
+     this run are listed in the outcome's `partial_failure`
+     field; the user is **explicitly told** which paths to
+     `git checkout --` to revert. We don't attempt
+     auto-revert because the user might have intentionally
+     scheduled non-derrick changes alongside the init.
+   - Write a `.derrick/state.json#last_partial_adoption`
+     record with the staged dir path so a follow-up
+     `derrick adopt --resume <id>` (future ticket) can
+     pick up.
+
+4. **Substrate open.** With all writes successful, open
+   `NativeSubstrate` with the chosen site (real this time,
+   not the dry-run shadow). Migrations run.
+
+5. **Record.** Append an immutable entry to
+   `.derrick/state.json#adoption_history` (note: append,
+   not overwrite — every re-run of adopt adds a new
+   record so `derrick adopt --history` works). Entry
+   contains timestamp, opts, files written, files
+   referenced.
+
+Failure modes that leave on-disk state:
+
+- Pre-flight failure → no state change. Safe to retry.
+- Stage failure → temp dir leaked, no production change.
+  Cleanup happens on next `derrick run` startup via D32's
+  abandoned-stage prune (extends D32's worktree
+  reconciliation to also clean `.adopt-stage-*`).
+- Commit failure → `partial_failure` outcome + explicit
+  paths to revert. The user must run `git checkout --` on
+  the listed paths before retrying. Future
+  `derrick adopt --resume` will automate.
 
 ### CLI wiring (replaces T008's bare-init refusal)
 
@@ -234,7 +407,17 @@ shipped — no detection, just writes the canonical template.
 
 ### Hook content (D29)
 
-`.claude/settings.json` `PreToolUse` entry derrick installs:
+Coverage in v1: **all standard tool boundaries** per D29.
+That's the matcher set `Bash | Read | Write | Edit | Glob |
+Grep`. Each gets a paired PreToolUse + PostToolUse entry.
+
+JSON has no comments, so the derrick marker is a literal
+field `"description"` (Claude Code preserves unknown
+fields). One marker shape, one place. We pick
+`"description": "derrick:scrub"` for PreToolUse and
+`"description": "derrick:caveman"` for PostToolUse.
+
+Example PreToolUse entry derrick installs:
 
 ```json
 {
@@ -242,23 +425,46 @@ shipped — no detection, just writes the canonical template.
   "hooks": [
     {
       "type": "command",
-      "command": "derrick scrub --tool bash <(cat)",
-      "comment": "derrick:scrub"
+      "command": "derrick scrub --tool bash",
+      "description": "derrick:scrub"
     }
   ]
 }
 ```
 
-`PostToolUse` is the same shape but with `derrick caveman
---intensity lite <(cat)`. Both stream stdin → stdout (the
-hooks are pipe-style per Claude Code's hook spec). The
-marker `derrick:scrub` lets `derrick adopt --reverse`
-identify derrick-installed entries for cleanup.
+PostToolUse mirrors with `derrick caveman --intensity lite`
+and `"description": "derrick:caveman"`.
 
-For tools the user doesn't run via Bash (Read, Glob, Grep,
-etc.) the hooks fire on the matcher pattern Claude Code
-documents. We start with `Bash` only and extend in a
-follow-up; v1 is "scrub the noisy ones".
+Each derrick-installed hook command **reads from stdin
+and writes to stdout** — that's the Claude Code hook
+contract. `derrick scrub --tool <name>` already supports
+this (T009: subprocess scrubbing was always streaming).
+`derrick caveman --intensity lite` ditto.
+
+`derrick adopt --reverse` (future ticket) identifies
+derrick-installed entries by the `"description"` field
+matching `"derrick:scrub" | "derrick:caveman"`, and
+removes them while preserving the surrounding JSON
+structure exactly.
+
+**Codex hook installation is deferred to a follow-up
+ticket.** Codex's hook surface is meaningfully thinner than
+Claude Code's at the time of writing (no documented
+PreToolUse / PostToolUse equivalents derrick can rely on),
+and D29's Codex path is described as best-effort.
+
+T011 writes `.codex/instructions.md` only — a static file
+referencing the constitution + derrick.yaml. No
+`.codex/settings.toml` mutation, no hook installation
+through `.codex/`. When Codex grows a stable hook
+mechanism, a follow-up ticket extends `derrick-adopt` to
+install the equivalent there.
+
+Add to the proposal `warnings` set: *"Codex host hook
+installation is deferred; Codex tool I/O is not scrubbed in
+v1. See <follow-up ticket id when filed>."* — so users
+running `mode: copilot` or `mode: crew` with codex hosts
+know the gap is real.
 
 ### Dependencies
 
@@ -305,7 +511,8 @@ path is exercised via a mocked `Model` from `derrick-models`
 - `detect_runs_in_under_50ms_on_a_realistic_repo` —
   perf guardrail, snapshot a synthetic ~200-file repo.
 
-**Proposal:**
+**Proposal (pure-function tests, deterministic byte
+output for same inputs):**
 
 - `propose_on_clean_repo_writes_full_skeleton`.
 - `propose_with_existing_agents_md_references_it`.
@@ -313,29 +520,69 @@ path is exercised via a mocked `Model` from `derrick-models`
 - `propose_skips_colliding_agents`.
 - `propose_blocks_on_existing_yaml_without_force`.
 - `propose_allows_existing_yaml_with_force`.
-- `propose_emits_squash_only_warning_when_repo_default_is_squash`.
 - `propose_skips_hooks_when_no_hooks_flag`.
 - `propose_inserts_derrick_hooks_before_existing_ones`.
 - `propose_blocks_on_command_name_collision_without_force`.
-- `propose_emits_banner_check_when_constitution_drafted`.
+- `propose_is_deterministic` — same inputs → byte-identical
+  output across 10 runs.
 
-**Apply:**
+**Constitution handling (four-way matrix):**
+
+- `constitution_mode_reference_with_existing_doc_only_references`.
+- `constitution_mode_reference_without_doc_writes_nothing`.
+- `constitution_mode_stub_with_existing_doc_blocks` —
+  blockers list includes the explicit message.
+- `constitution_mode_stub_without_doc_writes_banner_stub`.
+- `constitution_mode_fromdocs_with_existing_doc_blocks`.
+- `constitution_mode_fromdocs_without_doc_writes_drafted_text` —
+  uses a mocked `Model` from `derrick-models` to supply
+  the draft content.
+- `constitution_with_banner_makes_plan_step_refuse` —
+  exercises the runtime check via a mocked
+  `derrick-flow` pipeline.
+
+**Hook coverage:**
+
+- `hooks_installed_for_all_matchers` — Bash, Read, Write,
+  Edit, Glob, Grep.
+- `hooks_use_description_marker_for_identification` —
+  asserts `"description": "derrick:scrub"` /
+  `"derrick:caveman"`.
+- `hooks_merge_into_existing_settings_json_preserves_unknown_fields`.
+- `hooks_prepended_before_existing_entries`.
+
+**Apply (stage-then-commit):**
 
 - `apply_writes_only_planned_files` — assert no other
   files are touched.
-- `apply_uses_atomic_write` — kill mid-write via injected
-  panic; on-disk file is either pristine or fully new.
+- `apply_stages_before_committing` — fail at the stage
+  step via permission-denied on the stage dir; assert no
+  production paths changed.
+- `apply_partial_commit_surfaces_files_to_revert` — inject
+  a rename failure on the third commit; assert the
+  outcome's `partial_failure` lists the first two
+  committed paths and the recovery message.
+- `apply_pre_flight_dry_run_substrate_open_fails_aborts_cleanly` —
+  inject a corrupt site DB scenario; pre-flight fails;
+  nothing on disk changes.
 - `apply_preserves_existing_unrelated_files`.
-- `apply_records_adoption_to_state_json`.
+- `apply_appends_to_adoption_history_each_run` — run apply
+  twice with `--force`; the history has two entries.
 - `apply_opens_substrate_after_writes` — migrations run.
+- `apply_resume_from_partial_failure_is_documented_followup`
+  (placeholder test that exists but is `#[ignore]` until
+  the resume path lands).
 
-**Constitution-from-docs (D4):**
+**Constitution-from-docs LLM path (D4):**
 
-- `constitution_draft_includes_banner`.
-- `plan_step_refuses_against_unreviewed_banner` — exercised
-  by feeding the drafted constitution into a mocked
-  `derrick-flow` pipeline run; assert it halts with the
-  banner message.
+- `draft_constitution_returns_banner_prefixed_text` —
+  mocked Model returns canned response; assert the
+  banner is prepended.
+- `draft_constitution_respects_30s_timeout` — mocked
+  Model sleeps; assert timeout error.
+- `draft_constitution_aggregates_readme_contributing_adrs` —
+  inspect the passed-in prompt to confirm all three sources
+  are included.
 
 **End-to-end smoke (in tests/integration):**
 
@@ -413,6 +660,19 @@ hook JSON and the constitution stub go in
 workspace root, alongside the existing
 `templates/derrick.yaml.in`.
 
+`propose` must be a pure function. Tests assert byte-
+determinism for identical inputs (the
+`propose_is_deterministic` test asserts this explicitly).
+That means no `HashMap` iteration order leaks into the
+plan output — use `BTreeMap` everywhere and sort
+detection results in fixed order (alphabetic by path).
+
 The interactive prompt path needs to be testable —
 extract the I/O behind a trait so tests can drive it with
 canned inputs.
+
+D32 cleanup pass also needs to walk `.derrick/.adopt-
+stage-*/` directories with `created_at` older than 24h.
+This extends the cleanup logic specified in §8.6; add a
+TODO comment in the cleanup code pointing here so the
+T012 foreman implementer knows.

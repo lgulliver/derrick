@@ -128,7 +128,7 @@ modules can be tested, profiled, and (later) ported in isolation.
 | Caveman | `crates/derrick-caveman` | Text compressor for inter-step handoff, pure functions |
 | Copilot | `crates/derrick-copilot` | Dispatches steps or tickets to Copilot agents (CLI + Workspace API) |
 | Models | `crates/derrick-models` | Provider trait; adapters for API providers, local runtimes, CLI shells (see §6.5) |
-| Adopt | `crates/derrick-adopt` | Brownfield detection of AGENTS.md, CLAUDE.md, agents/, skills/, docs (§5.6); also writes host hook configs (`.claude/settings.json` PreToolUse/PostToolUse, `.codex/` equivalents) so scrub+caveman fire at every model boundary (D29). |
+| Adopt | `crates/derrick-adopt` | Brownfield detection of AGENTS.md, CLAUDE.md, agents/, skills/, docs (§5.6); writes Claude Code host hook configs (`.claude/settings.json` PreToolUse/PostToolUse) so scrub+caveman fire at host boundaries (D29). Codex hook installation deferred (D34); T011 writes `.codex/instructions.md` only. |
 | Substrate trait | `crates/derrick-substrate` | One async trait (`Substrate`); a native impl, future impls slot in behind it |
 | Native substrate | `crates/derrick-substrate-native` | SQLite-backed execution substrate + in-process foreman |
 | Stack | `crates/derrick-stack` | PR stacking: trait + native / graphite / git-spice backends (see §8.5) |
@@ -352,10 +352,10 @@ See §5.6 for the full brownfield adoption contract; the short version:
 7. Write host hooks so scrub+caveman fire at every model boundary
    (D29): `.claude/settings.json` gets `PreToolUse` and
    `PostToolUse` entries that pipe tool I/O through `derrick scrub`
-   and `derrick caveman --intensity lite`. `.codex/` gets the
-   equivalent. Brownfield repos: refuse to overwrite existing
-   hook entries; surface a merge plan instead. `--no-hooks` opts
-   out entirely.
+   and `derrick caveman --intensity lite`. Codex equivalent
+   is deferred per D34; T011 writes only `.codex/instructions.md`.
+   Brownfield repos: refuse to overwrite existing hook entries;
+   surface a merge plan instead. `--no-hooks` opts out entirely.
 8. `derrick doctor` on the freshly initialised repo.
 
 ### 5.2.1 Speckit detect-then-defer
@@ -1346,7 +1346,7 @@ pipeline seams. Three classes:
 | Boundary | Mechanism |
 |---|---|
 | Derrick-internal (foreman dispatch, step handoff, assay brief) | Inline in `derrick-flow` / `derrick-substrate-native`. |
-| Host tool calls (Claude Code `Bash`/`Read` → host context; Codex shell → Codex context) | Hooks. `derrick init` writes `PreToolUse`+`PostToolUse` entries in `.claude/settings.json` and the equivalent in `.codex/` that pipe tool I/O through `derrick scrub`. |
+| Host tool calls (Claude Code `Bash`/`Read` → host context) | Hooks. `derrick init` writes `PreToolUse`+`PostToolUse` entries in `.claude/settings.json` that pipe tool I/O through `derrick scrub`. Codex equivalent is deferred per D34 (no stable hook surface today). |
 | Copilot dispatch input/output | Inline in `derrick-copilot`'s adapter (Copilot's hook surface is too thin to plug today). |
 
 Direction: scrub fires on both **input** (before embedding tool
@@ -1366,7 +1366,7 @@ prose. Same three classes as scrub:
 | Boundary | Mechanism |
 |---|---|
 | Derrick-internal | Inline; full log to disk, compressed summary into the next prompt. |
-| Host tool calls | Hooks (same `.claude/settings.json` and `.codex/` entries) route prose-shaped tool output through `derrick caveman --intensity lite`. Code spans and file paths are preserved verbatim. |
+| Host tool calls | Hooks in `.claude/settings.json` route prose-shaped tool output through `derrick caveman --intensity lite`. Code spans and file paths preserved verbatim. Codex equivalent deferred per D34. |
 | Copilot dispatch | Inline in `derrick-copilot`. |
 
 `derrick caveman --intensity lite path/file.md` for ad-hoc use.
@@ -1617,7 +1617,8 @@ links back to the section where it lives.
 | D32 | **Worktree and ticket cleanup is continuous and self-healing.** Lessons banked from gastown's gt-pvx WISP-branch leak. Periodic cleanup runs (a) on every `derrick run` startup before doing anything else and (b) optionally as a launchd/systemd plist for long-lived setups. It walks worktree rows whose runs have crashed (no `finalize_worktree` event after a configurable TTL, default 24h), and either prunes them or marks them `Abandoned`. Same pattern for tickets stuck in `InReview` past a TTL: the foreman re-checks the PR and either transitions to `Done` (if observably merged), `Blocked` (if the PR was closed unmerged), or surfaces an escalation event. **There is no "trust eventually consistent state" path** — every long-lived state has an explicit reconciliation pass that can fail loud. | §8.2 / §9.C.5 / future T012 |
 | D33 | **The foreman never has authoritative state independent of the substrate and git.** Where gastown's Mayor reads `gt convoy status` and trusts it, derrick's foreman treats its own poll as a hint and the substrate + git as the truth. Concretely: on every loop iteration the foreman (a) reads `bd ready`-equivalent tickets from the substrate, (b) for any in `InReview`, queries `git log` and `gh pr view` for the PR's actual state, (c) reconciles before dispatching new work. The dispatch is idempotent against state drift — if a ticket the substrate says is `Ready` is actually merged on main, the foreman corrects to `Done` and continues. | future T012 |
 | D30 | **`derrick-tools` owns host CLI subprocess invocations; `derrick-models` owns the `Model` trait and providers.** Hosts (claude / codex / copilot) are invoked when a pipeline step sets `host:`. They receive an opaque prompt-as-argv (typically a slash command), they load their own context per the host rules, and derrick captures stdout. Providers are invoked when derrick needs a model completion via a structured `CompletionRequest` (assay reviewers, future direct-API calls). The same underlying binary (e.g. `codex`) may be reached via either path: as a host running a derrick-supplied prompt verbatim (`derrick-tools`), or as a backend for a model role that needs a structured completion (`derrick-models`'s `openai-cli` provider, etc.). The split is **invocation-shape-driven**, not binary-driven. | §3.1 / §6.5 / new T009 |
-| D29 | **Scrub and caveman fire at every model boundary, not just derrick's pipeline seams.** Three boundary classes: (a) derrick-internal — inline in `derrick-flow` and `derrick-substrate-native`; (b) host tool calls — `derrick init` writes `PreToolUse`+`PostToolUse` hooks in `.claude/settings.json` and the equivalent in `.codex/` that pipe tool I/O through `derrick scrub` (CLI shapes) and `derrick caveman --intensity lite` (prose); (c) Copilot dispatch — inline in `derrick-copilot` until Copilot's hook surface lands. Both directions matter: input (before embedding tool output into the next prompt) saves the most because of prompt caching; output (when an agent quotes tool output back) catches the second-order leakage. | §9.B.2 / §9.B.3 |
+| D34 | **D29 refinement — Codex host hooks are best-effort/deferred.** Codex's CLI today does not expose a stable `PreToolUse`/`PostToolUse`-equivalent hook surface that derrick can rely on. T011 writes `.codex/instructions.md` (constitution + derrick.yaml reference) but does **not** install Codex tool-boundary hooks. When Codex grows a stable hook mechanism a follow-up ticket extends `derrick-adopt`. Claude Code hooks (D29 path b) remain mandatory; Copilot inline path (D29 path c) is unchanged. Users in `mode: copilot`/`crew` with codex hosts see a documented warning at init that Codex tool I/O is not scrubbed in v1. | §9.B.2 / §9.B.3 / T011 |
+| D29 | **Scrub and caveman fire at every model boundary, not just derrick's pipeline seams.** Three boundary classes: (a) derrick-internal — inline in `derrick-flow` and `derrick-substrate-native`; (b) host tool calls — `derrick init` writes `PreToolUse`+`PostToolUse` hooks in `.claude/settings.json` for Claude Code; Codex's equivalent is **deferred** (see D34); (c) Copilot dispatch — inline in `derrick-copilot` until Copilot's hook surface lands. Both directions matter: input (before embedding tool output into the next prompt) saves the most because of prompt caching; output (when an agent quotes tool output back) catches the second-order leakage. | §9.B.2 / §9.B.3 |
 | D28 | **Supersedes D1 and D24 — GitHub-only distribution.** The `derrick.dev` domain was unavailable, so all derrick artefacts (install script, marketplace JSON, release binaries) live under `github.com/lgulliver/derrick`. The Claude Code marketplace JSON is fetched from `https://raw.githubusercontent.com/lgulliver/derrick/main/marketplace.json`. There is no longer a separate marketplace host to health-check, so D24's fallback logic collapses to a single GitHub-releases path; transient GitHub unavailability surfaces as a normal network error to the user with the documented recovery (`gh release download` or manual binary install). | §11 |
 
 ### Remaining open questions
