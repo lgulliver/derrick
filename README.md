@@ -10,10 +10,10 @@
 [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-**derrick** is a Rust CLI that turns a single slash command into a full dark-factory feature pipeline — spec, adversarial review, tickets, dispatch, PR stacking — without asking you to wire each underlying tool by hand.
+**derrick** is a Rust CLI that turns a single command into a full dark-factory feature pipeline — spec, adversarial review, tickets, dispatch, PR stacking — without asking you to wire each underlying tool by hand.
 
-```
-/add-feature build a webhook ingest endpoint with idempotent dedupe
+```bash
+derrick add "build a webhook ingest endpoint with idempotent dedupe"
 ```
 
 That one line walks the entire pipeline, remembers what it learns about your codebase, compresses everything that crosses a model boundary, and runs independent work in parallel. One binary, SQLite, no daemon required.
@@ -23,7 +23,7 @@ That one line walks the entire pipeline, remembers what it learns about your cod
 ## How it works
 
 ```
-/add-feature "description"
+derrick add "description"
       │
       ▼
   clarify ──► plan ──► checkpoint ──► assay (adversarial review)
@@ -85,11 +85,19 @@ derrick doctor                   # checks toolchain, hooks, squash-merge policy
 derrick foreman start --attached # start the dispatch loop
 ```
 
-In Claude Code:
+Start a feature:
 
+```bash
+derrick add "build a webhook ingest endpoint with idempotent dedupe"
+
+# Skip steps you don't need right now
+derrick add "fix the auth token refresh race" --no-clarify --no-assay
+
+# Dry run to see the plan without executing
+derrick add "refactor the rate limiter" --dry-run
 ```
-/add-feature build a webhook ingest endpoint with idempotent dedupe
-```
+
+Or trigger from inside Claude Code with `/add-feature` (maps to the same pipeline).
 
 ---
 
@@ -99,8 +107,9 @@ In Claude Code:
 derrick <COMMAND>
 
 PIPELINE
+  add          Run the full pipeline — prompt is a positional argument
   init         Adopt a repo (brownfield-safe, VS Code / JetBrains opt-in)
-  run          add-feature — the full dark-factory pipeline
+  run          add-feature — canonical form of `add` (scripts / CI)
   foreman      start / stop / tick the dispatch loop
 
 VISIBILITY
@@ -180,6 +189,7 @@ Configured per pipeline step in `derrick.yaml`. Bring your own model on any step
 
 What's landed and tested:
 
+- ✅ `derrick add` — positional-prompt shorthand; `run add-feature` for scripts
 - ✅ Full pipeline executor with multi-reviewer assay and `parallel_group` steps
 - ✅ Foreman dispatch loop (attached and detached daemon)
 - ✅ Ticket state machine (ready → in-flight → in-review → done / blocked / rejected)
