@@ -48,6 +48,10 @@ impl HostAdapter for ClaudeHost {
 
     async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
         let mut args = vec![OsString::from("--print")];
+        if let Some(ref model) = request.model {
+            args.push(OsString::from("--model"));
+            args.push(OsString::from(model.as_str()));
+        }
         if request.headless {
             // Suppress interactive permission prompts when running without a
             // terminal. Pipeline steps always set `HostRequest::headless = true`.

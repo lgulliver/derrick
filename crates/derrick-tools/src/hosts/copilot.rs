@@ -53,6 +53,10 @@ impl HostAdapter for CopilotHost {
             OsString::from("--add-dir"),
             request.cwd.as_os_str().to_owned(),
         ];
+        if let Some(ref model) = request.model {
+            args.push(OsString::from("--model"));
+            args.push(OsString::from(model.as_str()));
+        }
         if request.copilot_tools == CopilotToolPermission::AllowAll {
             args.push(OsString::from("--allow-all-tools"));
         }

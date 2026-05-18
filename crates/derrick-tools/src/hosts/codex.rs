@@ -47,13 +47,18 @@ impl HostAdapter for CodexHost {
     }
 
     async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
+        let mut args = vec![
+            OsString::from("exec"),
+            OsString::from("--skip-git-repo-check"),
+        ];
+        if let Some(ref model) = request.model {
+            args.push(OsString::from("--model"));
+            args.push(OsString::from(model.as_str()));
+        }
+        args.push(OsString::from(&request.prompt));
         let spec = CommandSpec {
             binary: self.binary.clone(),
-            args: vec![
-                OsString::from("exec"),
-                OsString::from("--skip-git-repo-check"),
-                OsString::from(&request.prompt),
-            ],
+            args,
         };
         run_host(NAME, spec, request).await
     }
