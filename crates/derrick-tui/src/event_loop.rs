@@ -1,0 +1,188 @@
+//! Async event loop that drives the dashboard.
+//!
+//! `tokio::select!`s over:
+//!   1. crossterm key events (via `EventStream`)
+//!   2. a 1-second tick interval
+//!   3. an mpsc channel fed by a `notify` filesystem watcher
+//!
+//! Each event triggers a `DataModel::refresh` when appropriate, then a
+//! redraw.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crossterm::event::{Event as CtEvent, EventStream, KeyCode};
+use derrick_substrate::Substrate;
+use futures::StreamExt;
+use ratatui::backend::Backend;
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::Terminal;
+use tokio::sync::mpsc;
+
+use crate::app::App;
+use crate::data::{DataModel, MemoryEntry, StackNode};
+use crate::tabs::{render_active_tab, render_footer, render_header, render_tabs_bar};
+
+/// Install a panic hook that restores the terminal before letting the
+/// default hook print the panic. Idempotent — safe to call multiple times.
+pub fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::execute!(
+            std::io::stderr(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show,
+        );
+        let _ = crossterm::terminal::disable_raw_mode();
+        default(info);
+    }));
+}
+
+/// Spawn an OS-thread `notify` watcher and bridge its events into a tokio
+/// channel. The watcher itself is held inside the thread to keep it alive.
+fn spawn_watcher(paths: Vec<PathBuf>) -> mpsc::Receiver<()> {
+    let (tx, rx) = mpsc::channel::<()>(16);
+    std::thread::spawn(move || {
+        let (raw_tx, raw_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+        let watcher_result = notify::recommended_watcher(move |res| {
+            let _ = raw_tx.send(res);
+        });
+        let mut watcher = match watcher_result {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!("notify: failed to create watcher: {e}");
+                return;
+            }
+        };
+        for path in &paths {
+            // It's normal for some of these to not exist yet (e.g. foreman.pid
+            // before the foreman starts). Log and continue.
+            if let Err(e) =
+                notify::Watcher::watch(&mut watcher, path, notify::RecursiveMode::Recursive)
+            {
+                tracing::debug!("notify: skipping {}: {e}", path.display());
+            }
+        }
+        while let Ok(_res) = raw_rx.recv() {
+            // Coalesce: a single send is enough to wake the loop.
+            if tx.blocking_send(()).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Run the event loop until `app.quit` is set.
+///
+/// `stack_nodes` and `memory_entries` are read each tick to pick up updates
+/// made by background tasks (stack adapter shell-out, future memory file
+/// changes).
+pub async fn run_event_loop<B: Backend>(
+    app: &mut App,
+    substrate: Arc<dyn Substrate>,
+    stack_nodes: Arc<std::sync::RwLock<Vec<StackNode>>>,
+    memory_entries: Arc<std::sync::RwLock<Vec<MemoryEntry>>>,
+    watch_paths: Vec<PathBuf>,
+    terminal: &mut Terminal<B>,
+) -> anyhow::Result<()> {
+    let mut events = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut watcher_rx = spawn_watcher(watch_paths);
+
+    // Initial draw.
+    redraw(terminal, app)?;
+
+    loop {
+        if app.quit {
+            break;
+        }
+
+        let mut needs_refresh = false;
+        let mut needs_redraw = false;
+
+        tokio::select! {
+            biased;
+
+            maybe_key = events.next() => {
+                match maybe_key {
+                    Some(Ok(CtEvent::Key(k))) => {
+                        // Ignore key release on terminals that send them.
+                        if k.kind == crossterm::event::KeyEventKind::Release {
+                            continue;
+                        }
+                        app.handle_key(k.code);
+                        if app.refresh_requested {
+                            app.refresh_requested = false;
+                            needs_refresh = true;
+                        }
+                        // Treat ctrl-c as quit too.
+                        if k.code == KeyCode::Char('c')
+                            && k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                        {
+                            app.quit = true;
+                        }
+                        needs_redraw = true;
+                    }
+                    Some(Ok(_)) => {
+                        needs_redraw = true;
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!("crossterm event error: {e}");
+                    }
+                    None => break,
+                }
+            }
+            _ = tick.tick() => {
+                needs_refresh = true;
+                needs_redraw = true;
+            }
+            _ = watcher_rx.recv() => {
+                needs_refresh = true;
+                needs_redraw = true;
+            }
+        }
+
+        if needs_refresh {
+            let sn = match stack_nodes.read() {
+                Ok(g) => g.clone(),
+                Err(p) => p.into_inner().clone(),
+            };
+            let me = match memory_entries.read() {
+                Ok(g) => g.clone(),
+                Err(p) => p.into_inner().clone(),
+            };
+            match DataModel::refresh(&*substrate, &sn, &me).await {
+                Ok(data) => app.set_data(data),
+                Err(e) => tracing::warn!("data refresh failed: {e}"),
+            }
+        }
+        if needs_redraw {
+            redraw(terminal, app)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn redraw<B: Backend>(terminal: &mut Terminal<B>, app: &App) -> anyhow::Result<()> {
+    terminal.draw(|frame| {
+        let size = frame.area();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(2), // header
+                Constraint::Length(3), // tabs bar
+                Constraint::Min(5),    // body
+                Constraint::Length(2), // footer
+            ])
+            .split(size);
+        render_header(frame, chunks[0], app);
+        render_tabs_bar(frame, chunks[1], app);
+        render_active_tab(frame, chunks[2], app);
+        render_footer(frame, chunks[3]);
+    })?;
+    Ok(())
+}

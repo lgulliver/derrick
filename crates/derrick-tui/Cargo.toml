@@ -7,3 +7,18 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ratatui = { workspace = true }
+crossterm = { workspace = true, features = ["event-stream"] }
+tokio = { workspace = true }
+notify = { workspace = true }
+chrono = { workspace = true }
+unicode-width = "0.1"
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+derrick-substrate = { path = "../derrick-substrate" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

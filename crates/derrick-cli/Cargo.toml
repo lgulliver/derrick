@@ -22,6 +22,8 @@ derrick-stack = { path = "../derrick-stack" }
 derrick-substrate = { path = "../derrick-substrate" }
 derrick-substrate-native = { path = "../derrick-substrate-native" }
 derrick-tools = { path = "../derrick-tools" }
+derrick-observe = { path = "../derrick-observe" }
+derrick-tui = { path = "../derrick-tui" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

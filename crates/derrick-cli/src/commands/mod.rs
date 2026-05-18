@@ -6,6 +6,7 @@ pub(crate) mod completions;
 pub(crate) mod doctor;
 pub(crate) mod foreman;
 pub(crate) mod init;
+pub(crate) mod observe;
 pub(crate) mod run;
 pub(crate) mod stack;
 pub(crate) mod status;
@@ -28,6 +29,20 @@ pub(crate) enum Command {
     Ticket(TicketArgs),
     Foreman(ForemanArgs),
     Stack(StackArgs),
+    Observe(ObserveArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ObserveArgs {
+    /// Initial tab: overview, tickets, stack, activity, tokens, memory.
+    #[arg(long)]
+    pub(crate) tab: Option<String>,
+    /// Optional site name selector (reserved for multi-site v1.1).
+    #[arg(long)]
+    pub(crate) site: Option<String>,
+    /// Accepted as a no-op in v1; the TUI is already read-only.
+    #[arg(long = "read-only")]
+    pub(crate) read_only: bool,
 }
 
 #[derive(Debug, Args)]
