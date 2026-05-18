@@ -1,5 +1,7 @@
 #![allow(clippy::print_stdout)]
 
+use std::path::{Path, PathBuf};
+
 use anyhow::Result;
 
 use crate::commands::GainArgs;
@@ -7,6 +9,10 @@ use crate::output::OutputFormat;
 use crate::telemetry;
 
 pub(crate) async fn run(args: GainArgs) -> Result<()> {
+    if let Some(run_id) = args.run.clone() {
+        return run_for_run_id(args, &run_id).await;
+    }
+
     // Attempt to find the repo root and project dir; degrade gracefully if absent.
     let repo_root = std::env::current_dir().ok();
     let project_dir = repo_root.as_deref().and_then(telemetry::project_dir);
@@ -77,6 +83,20 @@ fn print_human(
                     fmt_tokens(u.cache_savings_tokens())
                 );
             }
+
+            println!();
+            let input_cost = (u.input_tokens as f64 / 1_000_000.0) * 3.0;
+            let output_cost = (u.output_tokens as f64 / 1_000_000.0) * 15.0;
+            let total_cost = telemetry::estimate_session_cost_usd(u);
+            println!("  Estimated cost (claude-sonnet-4, model steps only)");
+            println!("  {}", "\u{2500}".repeat(49));
+            println!("  {:<28} {:>16}", "input", fmt_usd(input_cost));
+            println!("  {:<28} {:>16}", "output", fmt_usd(output_cost));
+            println!("  {:<28} {:>16}", "total", fmt_usd(total_cost));
+            println!();
+            println!(
+                "  (claude-sonnet-4 list price; see derrick.yaml models.[name].cost_hint to configure)"
+            );
         }
         None => {
             if project_dir.is_none() {
@@ -120,6 +140,7 @@ fn print_json(usage: &Option<telemetry::TokenUsage>, all_sessions: bool) {
             "cache_creation_input_tokens": u.cache_creation_input_tokens,
             "total_tokens": u.total_tokens(),
             "cache_savings_tokens": u.cache_savings_tokens(),
+            "estimated_cost_usd": telemetry::estimate_session_cost_usd(u),
         }),
         None => serde_json::json!({ "scope": "none", "reason": "no_session_data" }),
     };
@@ -138,6 +159,247 @@ fn print_json(usage: &Option<telemetry::TokenUsage>, all_sessions: bool) {
     println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
 }
 
+// ── --run <id> handling ──────────────────────────────────────────────────────
+
+async fn run_for_run_id(args: GainArgs, run_id: &str) -> Result<()> {
+    let manifest_path = match locate_manifest(run_id) {
+        Some(path) if path.exists() => path,
+        Some(path) => {
+            match args.format {
+                OutputFormat::Human => {
+                    println!("derrick gain \u{2014} run {run_id}\n");
+                    println!("  Run manifest not found: {}", path.display());
+                }
+                OutputFormat::Json => {
+                    let obj = serde_json::json!({
+                        "run_id": run_id,
+                        "error": "manifest_not_found",
+                        "path": path.display().to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+                }
+            }
+            return Ok(());
+        }
+        None => {
+            match args.format {
+                OutputFormat::Human => {
+                    println!("derrick gain \u{2014} run {run_id}\n");
+                    println!(
+                        "  Could not resolve repo root or config; run from within a derrick repo."
+                    );
+                }
+                OutputFormat::Json => {
+                    let obj = serde_json::json!({
+                        "run_id": run_id,
+                        "error": "repo_root_not_found",
+                    });
+                    println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    let value: serde_json::Value = match std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(v) => v,
+        None => {
+            match args.format {
+                OutputFormat::Human => {
+                    println!("derrick gain \u{2014} run {run_id}\n");
+                    println!("  Failed to read manifest: {}", manifest_path.display());
+                }
+                OutputFormat::Json => {
+                    let obj = serde_json::json!({
+                        "run_id": run_id,
+                        "error": "manifest_unreadable",
+                        "path": manifest_path.display().to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    match args.format {
+        OutputFormat::Human => print_run_human(run_id, &value, &manifest_path),
+        OutputFormat::Json => print_run_json(run_id, &value),
+    }
+    Ok(())
+}
+
+fn locate_manifest(run_id: &str) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let repo_root = find_repo_root(&cwd)?;
+    // Default state dir is `.derrick`; try config first, fall back to default.
+    let state_dir: PathBuf =
+        derrick_config::Config::load_from_path(&repo_root.join("derrick.yaml"))
+            .map(|cfg| cfg.state().dir().to_path_buf())
+            .unwrap_or_else(|_| PathBuf::from(".derrick"));
+    Some(
+        repo_root
+            .join(state_dir)
+            .join("runs")
+            .join(run_id)
+            .join("manifest.json"),
+    )
+}
+
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    for candidate in start.ancestors() {
+        if candidate.join(".git").exists() {
+            return Some(candidate.to_path_buf());
+        }
+    }
+    None
+}
+
+fn step_rows(value: &serde_json::Value) -> Vec<StepRow> {
+    let steps = value.get("steps").and_then(|s| s.as_array());
+    let mut rows = Vec::new();
+    if let Some(arr) = steps {
+        for step in arr {
+            let id = step
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let status = step
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let tokens_in = step.get("tokens_in").and_then(|v| v.as_u64()).unwrap_or(0);
+            let tokens_out = step.get("tokens_out").and_then(|v| v.as_u64()).unwrap_or(0);
+            let started = step.get("started_at").and_then(|v| v.as_str());
+            let finished = step.get("finished_at").and_then(|v| v.as_str());
+            let duration_s = duration_seconds(started, finished);
+            rows.push(StepRow {
+                id,
+                status,
+                tokens_in,
+                tokens_out,
+                duration_s,
+            });
+        }
+    }
+    rows
+}
+
+struct StepRow {
+    id: String,
+    status: String,
+    tokens_in: u64,
+    tokens_out: u64,
+    duration_s: f64,
+}
+
+fn duration_seconds(started: Option<&str>, finished: Option<&str>) -> f64 {
+    let (Some(s), Some(f)) = (started, finished) else {
+        return 0.0;
+    };
+    let (Ok(s), Ok(f)) = (
+        chrono::DateTime::parse_from_rfc3339(s),
+        chrono::DateTime::parse_from_rfc3339(f),
+    ) else {
+        return 0.0;
+    };
+    let delta = f.signed_duration_since(s);
+    delta.num_milliseconds() as f64 / 1000.0
+}
+
+fn print_run_human(run_id: &str, value: &serde_json::Value, manifest_path: &Path) {
+    println!("derrick gain \u{2014} run {run_id}\n");
+    let rows = step_rows(value);
+    let tokens_in: u64 = rows.iter().map(|r| r.tokens_in).sum();
+    let tokens_out: u64 = rows.iter().map(|r| r.tokens_out).sum();
+    let duration_s: f64 = rows.iter().map(|r| r.duration_s).sum();
+
+    println!(
+        "  {:<13} {:<9} {:>9} {:>9} {:>10}",
+        "Step", "Status", "Tok-in", "Tok-out", "Duration"
+    );
+    println!("  {}", "\u{2500}".repeat(54));
+    for row in &rows {
+        println!(
+            "  {:<13} {:<9} {:>9} {:>9} {:>9.1}s",
+            truncate(&row.id, 13),
+            truncate(&row.status, 9),
+            fmt_tokens(row.tokens_in),
+            fmt_tokens(row.tokens_out),
+            row.duration_s
+        );
+    }
+    println!("  {}", "\u{2500}".repeat(54));
+    println!(
+        "  {:<13} {:<9} {:>9} {:>9} {:>9.1}s",
+        "total",
+        "",
+        fmt_tokens(tokens_in),
+        fmt_tokens(tokens_out),
+        duration_s
+    );
+
+    let cost = derrick_models::CostHint {
+        in_per_mtok: 3.0,
+        out_per_mtok: 15.0,
+    }
+    .estimate_usd(tokens_in, tokens_out);
+    println!();
+    println!("  Estimated cost (claude-sonnet-4): {}", fmt_usd(cost));
+    println!("  Run manifest: {}", manifest_path.display());
+}
+
+fn print_run_json(run_id: &str, value: &serde_json::Value) {
+    let rows = step_rows(value);
+    let tokens_in: u64 = rows.iter().map(|r| r.tokens_in).sum();
+    let tokens_out: u64 = rows.iter().map(|r| r.tokens_out).sum();
+    let cost = derrick_models::CostHint {
+        in_per_mtok: 3.0,
+        out_per_mtok: 15.0,
+    }
+    .estimate_usd(tokens_in, tokens_out);
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let steps: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "status": r.status,
+                "tokens_in": r.tokens_in,
+                "tokens_out": r.tokens_out,
+            })
+        })
+        .collect();
+    let obj = serde_json::json!({
+        "run_id": run_id,
+        "status": status,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_estimate_usd": cost,
+        "steps": steps,
+    });
+    println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_owned()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('\u{2026}');
+        out
+    }
+}
+
 fn fmt_tokens(n: u64) -> String {
     // Format with thousands separators: 1234567 → "1,234,567"
     let s = n.to_string();
@@ -151,6 +413,10 @@ fn fmt_tokens(n: u64) -> String {
     out.chars().rev().collect()
 }
 
+fn fmt_usd(amount: f64) -> String {
+    format!("${amount:.4}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +427,13 @@ mod tests {
         assert_eq!(fmt_tokens(999), "999");
         assert_eq!(fmt_tokens(1_000), "1,000");
         assert_eq!(fmt_tokens(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn fmt_usd_uses_four_decimals() {
+        assert_eq!(fmt_usd(0.0), "$0.0000");
+        assert_eq!(fmt_usd(0.0099), "$0.0099");
+        assert_eq!(fmt_usd(1.5), "$1.5000");
     }
 
     #[test]
@@ -188,5 +461,27 @@ mod tests {
         });
         assert_eq!(val["total_tokens"], 6500);
         assert_eq!(val["cache_savings_tokens"], 4500);
+    }
+
+    #[test]
+    fn step_rows_extracts_tokens_and_duration() {
+        let value = serde_json::json!({
+            "steps": [
+                {
+                    "id": "clarify",
+                    "status": "success",
+                    "tokens_in": 1234,
+                    "tokens_out": 456,
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "finished_at": "2026-01-01T00:00:02.5Z"
+                }
+            ]
+        });
+        let rows = step_rows(&value);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "clarify");
+        assert_eq!(rows[0].tokens_in, 1234);
+        assert_eq!(rows[0].tokens_out, 456);
+        assert!((rows[0].duration_s - 2.5).abs() < 1e-6);
     }
 }

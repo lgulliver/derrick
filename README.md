@@ -185,7 +185,7 @@ Configured per pipeline step in `derrick.yaml`. Bring your own model on any step
 
 ## Status
 
-**Active development.** Architecture and 39 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 40 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -195,6 +195,7 @@ What's landed and tested:
 - ✅ Ticket state machine (ready → in-flight → in-review → done / blocked / rejected)
 - ✅ `derrick ticket code-review` — adversarial pre-PR code review with auto-remediation loop
 - ✅ Per-run isolated git worktrees (`.derrick/worktrees/<run-id>/`) for parallel safety
+- ✅ Token tracking per pipeline step + cost estimates — `derrick gain --run <id>` for per-step breakdown
 - ✅ `derrick scrub` with 80%+ reduction on git and cargo output
 - ✅ `derrick caveman` with 60%+ reduction at Full intensity on verbose prose
 - ✅ `derrick observe` — live ratatui dashboard
@@ -210,13 +211,13 @@ What's landed and tested:
 - 🔜 Per-session token telemetry in `derrick gain`
 - 🔜 True parallel fan-out for multi-reviewer assay
 
-425 tests passing across 17 crates.
+432 tests passing across 17 crates.
 
 ---
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 39 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 40 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 

@@ -125,6 +125,14 @@ impl Runner {
             state.feature_dir =
                 prior_feature_dir(&prior_steps).or_else(|| read_feature_dir(&self.repo_root).ok());
             manifest.feature_dir = state.feature_dir.clone();
+            for prior in &prior_steps {
+                manifest.tokens_in = manifest
+                    .tokens_in
+                    .saturating_add(u64::from(prior.tokens_in));
+                manifest.tokens_out = manifest
+                    .tokens_out
+                    .saturating_add(u64::from(prior.tokens_out));
+            }
             manifest.steps = prior_steps;
         }
 
@@ -160,6 +168,12 @@ impl Runner {
                 None => {
                     if self.should_skip(step, &input) {
                         let record = self.skipped_record(step);
+                        manifest.tokens_in = manifest
+                            .tokens_in
+                            .saturating_add(u64::from(record.tokens_in));
+                        manifest.tokens_out = manifest
+                            .tokens_out
+                            .saturating_add(u64::from(record.tokens_out));
                         manifest.steps.push(ManifestStep::from_record(&record));
                         write_manifest(&self.manifest_path(&run_id), &manifest)?;
                         idx += 1;
@@ -168,6 +182,12 @@ impl Runner {
 
                     let record = self.execute_step(step, &mut state).await?;
                     manifest.feature_dir = state.feature_dir.clone();
+                    manifest.tokens_in = manifest
+                        .tokens_in
+                        .saturating_add(u64::from(record.tokens_in));
+                    manifest.tokens_out = manifest
+                        .tokens_out
+                        .saturating_add(u64::from(record.tokens_out));
                     manifest.steps.push(ManifestStep::from_record(&record));
                     write_manifest(&self.manifest_path(&run_id), &manifest)?;
 
@@ -205,12 +225,24 @@ impl Runner {
                     for step in &tail[idx..group_end] {
                         if self.should_skip(step, &input) {
                             let record = self.skipped_record(step);
+                            manifest.tokens_in = manifest
+                                .tokens_in
+                                .saturating_add(u64::from(record.tokens_in));
+                            manifest.tokens_out = manifest
+                                .tokens_out
+                                .saturating_add(u64::from(record.tokens_out));
                             manifest.steps.push(ManifestStep::from_record(&record));
                             write_manifest(&self.manifest_path(&run_id), &manifest)?;
                             continue;
                         }
                         let record = self.execute_step(step, &mut state).await?;
                         manifest.feature_dir = state.feature_dir.clone();
+                        manifest.tokens_in = manifest
+                            .tokens_in
+                            .saturating_add(u64::from(record.tokens_in));
+                        manifest.tokens_out = manifest
+                            .tokens_out
+                            .saturating_add(u64::from(record.tokens_out));
                         manifest.steps.push(ManifestStep::from_record(&record));
                         write_manifest(&self.manifest_path(&run_id), &manifest)?;
                         match record.status {
@@ -240,11 +272,15 @@ impl Runner {
             self.teardown_worktree(&run_id, &path).await;
         }
 
+        let tokens_in_total = manifest.tokens_in;
+        let tokens_out_total = manifest.tokens_out;
         Ok(RunOutcome {
             run_id,
             status: outcome_status,
             feature_dir: state.feature_dir.map(|path| self.repo_root.join(path)),
             steps: manifest.steps.into_iter().map(StepRecord::from).collect(),
+            tokens_in: tokens_in_total,
+            tokens_out: tokens_out_total,
         })
     }
 
@@ -342,13 +378,20 @@ impl Runner {
         let finished_at = Utc::now();
 
         match result {
-            Ok(StepExecution { status, artifacts }) => Ok(StepRecord {
+            Ok(StepExecution {
+                status,
+                artifacts,
+                tokens_in,
+                tokens_out,
+            }) => Ok(StepRecord {
                 id: step.id().to_owned(),
                 status,
                 started_at,
                 finished_at,
                 log_path,
                 artifacts,
+                tokens_in,
+                tokens_out,
             }),
             Err(error) => {
                 let _ignored = append_log(&log_path, &format!("{error}\n"));
@@ -359,6 +402,8 @@ impl Runner {
                     finished_at,
                     log_path,
                     artifacts: Vec::new(),
+                    tokens_in: 0,
+                    tokens_out: 0,
                 };
                 let manifest_path = self.manifest_path(&state.run_id);
                 if let Ok(mut manifest) = read_manifest(&manifest_path) {
@@ -432,9 +477,10 @@ impl Runner {
                 .complete(completion_request(rendered, None, None))
                 .await?;
             write_log(log_path, &response.text, "")?;
-            Ok(StepExecution::success(
-                self.detect_artifacts(step.id(), state),
-            ))
+            Ok(
+                StepExecution::success(self.detect_artifacts(step.id(), state))
+                    .with_tokens(response.tokens_in, response.tokens_out),
+            )
         }
     }
 
@@ -552,19 +598,23 @@ impl Runner {
                 ReviewerRoundOutcome::Skipped => return Ok(StepExecution::skipped()),
                 ReviewerRoundOutcome::Decided(outcome) => outcome,
             };
+            let (tokens_in, tokens_out) = (outcome.tokens_in, outcome.tokens_out);
             return match outcome.verdict.as_str() {
                 "accept" => Ok(StepExecution::success(vec![relative_to_root(
                     &self.repo_root,
                     outcome.verdict_path,
-                )?])),
+                )?])
+                .with_tokens(tokens_in, tokens_out)),
                 "reject" => Ok(StepExecution::halted(
                     vec![relative_to_root(&self.repo_root, outcome.verdict_path)?],
                     "assay rejected",
-                )),
+                )
+                .with_tokens(tokens_in, tokens_out)),
                 _ => Ok(StepExecution::halted(
                     vec![relative_to_root(&self.repo_root, outcome.verdict_path)?],
                     "assay requested revisions past configured rounds",
-                )),
+                )
+                .with_tokens(tokens_in, tokens_out)),
             };
         }
 
@@ -643,11 +693,14 @@ impl Runner {
         let verdict_path = reviewer_dir.join("verdict.md");
         create_dir_all(parent(&verdict_path)?)?;
 
+        let mut tokens_in_total: u32 = 0;
+        let mut tokens_out_total: u32 = 0;
+
         for round in 1..=rounds {
             let plan = read_to_string(&self.working_dir(state).join(&feature_dir).join("plan.md"))?;
             let prompt = format!("Task: {}\n\nPlan:\n{plan}", state.prompt);
             let cached = format!("Constitution:\n{constitution}\n\nSpec:\n{spec}");
-            let (response_text, model_name) = if codex_fallback {
+            let (response_text, model_name, round_tokens_in, round_tokens_out) = if codex_fallback {
                 let host = self.hosts.get("claude").ok_or_else(|| {
                     RunError::Config("host \"claude\" is not registered".to_owned())
                 })?;
@@ -662,7 +715,7 @@ impl Runner {
                         id: step.id().to_owned(),
                         message: source.to_string(),
                     })?;
-                (host_response.stdout, "claude".to_owned())
+                (host_response.stdout, "claude".to_owned(), 0u32, 0u32)
             } else {
                 let model = resolve_role(
                     reviewer_role,
@@ -679,8 +732,10 @@ impl Runner {
                         Some(ASSAY_SYSTEM.to_owned()),
                     ))
                     .await?;
-                (response.text, name)
+                (response.text, name, response.tokens_in, response.tokens_out)
             };
+            tokens_in_total = tokens_in_total.saturating_add(round_tokens_in);
+            tokens_out_total = tokens_out_total.saturating_add(round_tokens_out);
             append_log(log_path, &response_text)?;
             let verdict = parse_verdict(&response_text).ok_or_else(|| RunError::StepFailed {
                 id: step.id().to_owned(),
@@ -696,6 +751,8 @@ impl Runner {
                         role: reviewer_role.to_owned(),
                         verdict: verdict.to_owned(),
                         verdict_path: verdict_path.clone(),
+                        tokens_in: tokens_in_total,
+                        tokens_out: tokens_out_total,
                     }));
                 }
                 "revise" if round < rounds => {
@@ -713,6 +770,8 @@ impl Runner {
                         role: reviewer_role.to_owned(),
                         verdict: "revise".to_owned(),
                         verdict_path: verdict_path.clone(),
+                        tokens_in: tokens_in_total,
+                        tokens_out: tokens_out_total,
                     }));
                 }
                 _ => unreachable_verdict(step.id())?,
@@ -723,6 +782,8 @@ impl Runner {
             role: reviewer_role.to_owned(),
             verdict: "revise".to_owned(),
             verdict_path,
+            tokens_in: tokens_in_total,
+            tokens_out: tokens_out_total,
         }))
     }
 
@@ -924,6 +985,8 @@ impl Runner {
             finished_at: now,
             log_path: PathBuf::new(),
             artifacts: Vec::new(),
+            tokens_in: 0,
+            tokens_out: 0,
         }
     }
 
@@ -1013,6 +1076,19 @@ pub struct RunOutcome {
     pub feature_dir: Option<PathBuf>,
     /// Per-step records.
     pub steps: Vec<StepRecord>,
+    /// Total input tokens consumed by model calls in this run.
+    pub tokens_in: u64,
+    /// Total output tokens produced by model calls in this run.
+    pub tokens_out: u64,
+}
+
+impl RunOutcome {
+    /// Estimate USD cost for model-backed steps, using the built-in pricing table.
+    /// Returns `None` if the model name is unknown.
+    pub fn cost_estimate_usd(&self, model_name: &str) -> Option<f64> {
+        derrick_models::builtin_cost_hint(model_name)
+            .map(|hint| hint.estimate_usd(self.tokens_in, self.tokens_out))
+    }
 }
 
 /// Final run status.
@@ -1042,6 +1118,10 @@ pub struct StepRecord {
     pub log_path: PathBuf,
     /// Artifacts observed after this step.
     pub artifacts: Vec<PathBuf>,
+    /// Input tokens consumed by model calls in this step (0 for non-model steps).
+    pub tokens_in: u32,
+    /// Output tokens produced by model calls in this step (0 for non-model steps).
+    pub tokens_out: u32,
 }
 
 impl From<ManifestStep> for StepRecord {
@@ -1053,6 +1133,8 @@ impl From<ManifestStep> for StepRecord {
             finished_at: step.finished_at,
             log_path: step.log_path,
             artifacts: step.artifacts,
+            tokens_in: step.tokens_in,
+            tokens_out: step.tokens_out,
         }
     }
 }
@@ -1145,6 +1227,8 @@ struct ReviewerOutcome {
     role: String,
     verdict: String,
     verdict_path: PathBuf,
+    tokens_in: u32,
+    tokens_out: u32,
 }
 
 #[derive(Debug)]
@@ -1156,6 +1240,8 @@ enum ReviewerRoundOutcome {
 struct StepExecution {
     status: StepStatus,
     artifacts: Vec<PathBuf>,
+    tokens_in: u32,
+    tokens_out: u32,
 }
 
 impl StepExecution {
@@ -1163,6 +1249,8 @@ impl StepExecution {
         Self {
             status: StepStatus::Success,
             artifacts,
+            tokens_in: 0,
+            tokens_out: 0,
         }
     }
 
@@ -1170,6 +1258,8 @@ impl StepExecution {
         Self {
             status: StepStatus::Skipped,
             artifacts: Vec::new(),
+            tokens_in: 0,
+            tokens_out: 0,
         }
     }
 
@@ -1177,7 +1267,15 @@ impl StepExecution {
         Self {
             status: StepStatus::Halted,
             artifacts,
+            tokens_in: 0,
+            tokens_out: 0,
         }
+    }
+
+    fn with_tokens(mut self, tokens_in: u32, tokens_out: u32) -> Self {
+        self.tokens_in = tokens_in;
+        self.tokens_out = tokens_out;
+        self
     }
 }
 
@@ -1193,6 +1291,10 @@ struct RunManifest {
     status: RunStatus,
     feature_dir: Option<PathBuf>,
     steps: Vec<ManifestStep>,
+    #[serde(default)]
+    tokens_in: u64,
+    #[serde(default)]
+    tokens_out: u64,
 }
 
 impl RunManifest {
@@ -1215,6 +1317,8 @@ impl RunManifest {
             status: RunStatus::Success,
             feature_dir: None,
             steps: Vec::new(),
+            tokens_in: 0,
+            tokens_out: 0,
         }
     }
 }
@@ -1244,6 +1348,10 @@ struct ManifestStep {
     finished_at: DateTime<Utc>,
     log_path: PathBuf,
     artifacts: Vec<PathBuf>,
+    #[serde(default)]
+    tokens_in: u32,
+    #[serde(default)]
+    tokens_out: u32,
 }
 
 impl ManifestStep {
@@ -1255,6 +1363,8 @@ impl ManifestStep {
             finished_at: record.finished_at,
             log_path: record.log_path.clone(),
             artifacts: record.artifacts.clone(),
+            tokens_in: record.tokens_in,
+            tokens_out: record.tokens_out,
         }
     }
 }
@@ -1369,6 +1479,10 @@ pub struct CodeReviewOutcome {
     pub verdict: String,
     /// Full review text produced by the reviewer model.
     pub review_text: String,
+    /// Input tokens consumed by the review call.
+    pub tokens_in: u32,
+    /// Output tokens produced by the review call.
+    pub tokens_out: u32,
 }
 
 /// Run one adversarial code review pass.
@@ -1412,6 +1526,8 @@ pub async fn run_code_review(
     Ok(CodeReviewOutcome {
         verdict,
         review_text: response.text,
+        tokens_in: response.tokens_in,
+        tokens_out: response.tokens_out,
     })
 }
 
@@ -1825,12 +1941,22 @@ fn reconcile_verdicts(
         }
     }
 
+    let tokens_in: u32 = outcomes
+        .iter()
+        .map(|o| o.tokens_in)
+        .fold(0u32, |a, b| a.saturating_add(b));
+    let tokens_out: u32 = outcomes
+        .iter()
+        .map(|o| o.tokens_out)
+        .fold(0u32, |a, b| a.saturating_add(b));
+
     match final_verdict {
-        "accept" => Ok(StepExecution::success(artifacts)),
+        "accept" => Ok(StepExecution::success(artifacts).with_tokens(tokens_in, tokens_out)),
         _ => Ok(StepExecution::halted(
             artifacts,
             format!("assay rejected (on_split: {policy_name})"),
-        )),
+        )
+        .with_tokens(tokens_in, tokens_out)),
     }
 }
 

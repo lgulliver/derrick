@@ -144,6 +144,58 @@ pub struct CostHint {
     pub out_per_mtok: f64,
 }
 
+impl CostHint {
+    /// Estimate cost in USD for the given token counts.
+    pub fn estimate_usd(&self, tokens_in: u64, tokens_out: u64) -> f64 {
+        (tokens_in as f64 / 1_000_000.0) * self.in_per_mtok
+            + (tokens_out as f64 / 1_000_000.0) * self.out_per_mtok
+    }
+}
+
+/// Returns built-in cost hints for well-known model names (substring match).
+/// Returns `None` for unknown models.
+pub fn builtin_cost_hint(model_name: &str) -> Option<CostHint> {
+    let n = model_name.to_ascii_lowercase();
+    if n.contains("claude-opus-4") {
+        Some(CostHint {
+            in_per_mtok: 15.0,
+            out_per_mtok: 75.0,
+        })
+    } else if n.contains("claude-sonnet-4") {
+        Some(CostHint {
+            in_per_mtok: 3.0,
+            out_per_mtok: 15.0,
+        })
+    } else if n.contains("claude-haiku-3") {
+        Some(CostHint {
+            in_per_mtok: 0.8,
+            out_per_mtok: 4.0,
+        })
+    } else if n.contains("gpt-4o-mini") {
+        Some(CostHint {
+            in_per_mtok: 0.15,
+            out_per_mtok: 0.60,
+        })
+    } else if n.contains("gpt-4o") {
+        Some(CostHint {
+            in_per_mtok: 2.5,
+            out_per_mtok: 10.0,
+        })
+    } else if n.contains("gemini-2.5-pro") {
+        Some(CostHint {
+            in_per_mtok: 1.25,
+            out_per_mtok: 10.0,
+        })
+    } else if n.contains("gemini-2.0-flash") || n.contains("gemini-flash") {
+        Some(CostHint {
+            in_per_mtok: 0.10,
+            out_per_mtok: 0.40,
+        })
+    } else {
+        None
+    }
+}
+
 /// Credentials lookup backed by environment variables and test overrides.
 #[derive(Clone, Debug, Default)]
 pub struct AuthStore {
@@ -342,4 +394,40 @@ pub async fn resolve_role(
         .ok_or_else(|| ModelError::UnknownModel(model_name.to_owned()))?;
 
     ProviderRegistry::with_defaults().build(model_def, auth)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cost_hint_estimate_usd_zero_for_zero_tokens() {
+        let hint = CostHint {
+            in_per_mtok: 3.0,
+            out_per_mtok: 15.0,
+        };
+        assert_eq!(hint.estimate_usd(0, 0), 0.0);
+    }
+
+    #[test]
+    fn cost_hint_estimate_usd_rounds_correctly() {
+        let hint = CostHint {
+            in_per_mtok: 3.0,
+            out_per_mtok: 15.0,
+        };
+        // 1M input + 100k output = $3.00 + $1.50 = $4.50
+        let cost = hint.estimate_usd(1_000_000, 100_000);
+        assert!((cost - 4.5).abs() < 1e-9, "expected ~$4.50, got {cost}");
+    }
+
+    #[test]
+    fn builtin_cost_hint_recognises_claude_sonnet() {
+        let hint = builtin_cost_hint("claude-sonnet-4-5").unwrap();
+        assert_eq!(hint.in_per_mtok, 3.0);
+    }
+
+    #[test]
+    fn builtin_cost_hint_returns_none_for_unknown() {
+        assert!(builtin_cost_hint("my-local-llama").is_none());
+    }
 }

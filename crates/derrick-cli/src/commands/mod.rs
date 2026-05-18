@@ -100,6 +100,9 @@ pub(crate) struct GainArgs {
     /// Aggregate all sessions for this repo, not just the most recent.
     #[arg(long)]
     pub(crate) all: bool,
+    /// Show token breakdown for a specific pipeline run by run-id.
+    #[arg(long = "run")]
+    pub(crate) run: Option<String>,
 }
 
 #[derive(Debug, Args)]

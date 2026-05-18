@@ -38,6 +38,16 @@ impl TokenUsage {
     }
 }
 
+/// Estimate USD cost for a session using claude-sonnet-4 pricing.
+/// This is a rough estimate since session-level data doesn't have model breakdown.
+pub(crate) fn estimate_session_cost_usd(usage: &TokenUsage) -> f64 {
+    derrick_models::CostHint {
+        in_per_mtok: 3.0,
+        out_per_mtok: 15.0,
+    }
+    .estimate_usd(usage.input_tokens, usage.output_tokens)
+}
+
 // ── serde types ──────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
