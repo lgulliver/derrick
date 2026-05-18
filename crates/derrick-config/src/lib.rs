@@ -22,6 +22,28 @@ use thiserror::Error;
 
 const CONFIG_VERSION: u32 = 1;
 
+/// Init-time values substituted into `templates/derrick.yaml.in`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InitTemplateVars<'a> {
+    /// Site name written to `site.name`.
+    pub site_name: &'a str,
+    /// Ticket prefix written to `site.prefix`.
+    pub prefix: &'a str,
+    /// Operating mode written to `tools.substrate.mode`.
+    pub mode: &'a str,
+}
+
+/// Renders an init template with minimal `{{var}}` substitution.
+///
+/// Unknown placeholders are left intact so runtime pipeline variables such as
+/// `{{prompt}}` and `{{feature_dir}}` survive for later flow execution.
+pub fn render_init_template(template: &str, vars: InitTemplateVars<'_>) -> String {
+    template
+        .replace("{{site_name}}", vars.site_name)
+        .replace("{{prefix}}", vars.prefix)
+        .replace("{{mode}}", vars.mode)
+}
+
 /// A loaded and structurally validated derrick configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -1889,6 +1911,25 @@ state:
 
     fn replace(source: &str, from: &str, to: &str) -> String {
         source.replacen(from, to, 1)
+    }
+
+    #[test]
+    fn render_init_template_replaces_init_vars_and_preserves_flow_vars() {
+        let template = "site: {{site_name}}\nprefix: {{prefix}}\nmode: {{mode}}\nflow: {{prompt}}";
+
+        let rendered = render_init_template(
+            template,
+            InitTemplateVars {
+                site_name: "test",
+                prefix: "tst",
+                mode: "solo",
+            },
+        );
+
+        assert_eq!(
+            rendered,
+            "site: test\nprefix: tst\nmode: solo\nflow: {{prompt}}"
+        );
     }
 
     #[test]

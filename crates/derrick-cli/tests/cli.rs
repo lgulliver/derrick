@@ -1,0 +1,589 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use assert_cmd::Command;
+use tempfile::TempDir;
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+fn derrick() -> TestResult<Command> {
+    Ok(Command::cargo_bin("derrick")?)
+}
+
+fn repo() -> TestResult<TempDir> {
+    let dir = tempfile::tempdir()?;
+    fs::create_dir(dir.path().join(".git"))?;
+    Ok(dir)
+}
+
+fn greenfield(dir: &Path) -> TestResult<assert_cmd::assert::Assert> {
+    Ok(derrick()?
+        .current_dir(dir)
+        .args([
+            "init",
+            "--greenfield",
+            "--site",
+            "test",
+            "--prefix",
+            "tst",
+            "--mode",
+            "solo",
+        ])
+        .assert())
+}
+
+fn mock_path(dir: &Path, names: &[&str]) -> TestResult<PathBuf> {
+    let bin_dir = dir.join("bin");
+    fs::create_dir(&bin_dir)?;
+    for name in names {
+        let path = bin_dir.join(name);
+        fs::write(&path, "#!/bin/sh\nexit 0\n")?;
+        let mut permissions = fs::metadata(&path)?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o755);
+        }
+        fs::set_permissions(&path, permissions)?;
+    }
+    Ok(bin_dir)
+}
+
+fn utf8(bytes: &[u8]) -> TestResult<String> {
+    Ok(String::from_utf8(bytes.to_vec())?)
+}
+
+fn assert_contains(haystack: &[u8], needle: &str) -> TestResult {
+    let text = utf8(haystack)?;
+    assert!(
+        text.contains(needle),
+        "expected output to contain {needle:?}, got {text:?}"
+    );
+    Ok(())
+}
+
+fn assert_not_contains(haystack: &[u8], needle: &str) -> TestResult {
+    let text = utf8(haystack)?;
+    assert!(
+        !text.contains(needle),
+        "expected output not to contain {needle:?}, got {text:?}"
+    );
+    Ok(())
+}
+
+fn write_minimal_config(dir: &Path, backend: &str, mode: &str, pipeline: &str) -> TestResult {
+    let pipeline_block = if pipeline == "[]" {
+        "[]".to_owned()
+    } else {
+        format!("\n{pipeline}")
+    };
+    fs::write(
+        dir.join("derrick.yaml"),
+        format!(
+            r#"
+version: 1
+site:
+  name: test
+  prefix: tst
+models:
+  claude-sonnet:
+    provider: shell
+    cli: "claude"
+    model: claude-sonnet
+roles:
+  drafter: claude-sonnet
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: false
+    role: drafter
+    reviewers: [drafter]
+  substrate:
+    backend: {backend}
+    mode: {mode}
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+pipeline: {pipeline_block}
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#
+        ),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn bare_init_refuses_with_t011_pointer() -> TestResult {
+    let dir = repo()?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+
+    assert_contains(&output, "T011")?;
+    assert_contains(&output, "derrick init --greenfield")?;
+    assert!(!dir.path().join("derrick.yaml").exists());
+    Ok(())
+}
+
+#[test]
+fn greenfield_init_in_empty_repo_creates_files() -> TestResult {
+    let dir = repo()?;
+
+    let output = greenfield(dir.path())?
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "initialised derrick site test")?;
+    assert!(dir.path().join("derrick.yaml").exists());
+    assert!(dir.path().join(".derrick/derrick.db").exists());
+    Ok(())
+}
+
+#[test]
+fn greenfield_init_refuses_existing_yaml_without_force() -> TestResult {
+    let dir = repo()?;
+    fs::write(dir.path().join("derrick.yaml"), "not: overwritten")?;
+
+    let output = greenfield(dir.path())?
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+
+    assert_contains(&output, "--force")?;
+    assert_eq!(
+        fs::read_to_string(dir.path().join("derrick.yaml"))?,
+        "not: overwritten"
+    );
+    Ok(())
+}
+
+#[test]
+fn greenfield_init_overwrites_with_force() -> TestResult {
+    let dir = repo()?;
+    fs::write(dir.path().join("derrick.yaml"), "not: valid")?;
+
+    derrick()?
+        .current_dir(dir.path())
+        .args([
+            "init",
+            "--greenfield",
+            "--site",
+            "test",
+            "--prefix",
+            "tst",
+            "--mode",
+            "solo",
+            "--force",
+        ])
+        .assert()
+        .success();
+
+    assert!(fs::read_to_string(dir.path().join("derrick.yaml"))?.contains("name: test"));
+    Ok(())
+}
+
+#[test]
+fn init_refuses_outside_git_repo() -> TestResult {
+    let dir = tempfile::tempdir()?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert_contains(&output, "inside a git repo")?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .args(["init", "--greenfield"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert_contains(&output, "inside a git repo")?;
+
+    Ok(())
+}
+
+#[test]
+fn greenfield_init_validates_prefix() -> TestResult {
+    let dir = repo()?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .args(["init", "--greenfield", "--prefix", "BAD"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+
+    assert_contains(&output, "^[a-z]{1,6}$")?;
+    Ok(())
+}
+
+#[test]
+fn status_shows_site_after_init() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "test")?;
+    assert_contains(&output, "mode: solo")?;
+    Ok(())
+}
+
+#[test]
+fn status_json_round_trips() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .args(["status", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output)?;
+
+    assert_eq!(value["site"], "test");
+    assert_eq!(value["mode"], "solo");
+    assert_eq!(value["backend"], "native");
+    Ok(())
+}
+
+#[test]
+fn doctor_passes_after_successful_init() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_not_contains(&output, "fail")?;
+    Ok(())
+}
+
+#[test]
+fn doctor_json_round_trips() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .args(["doctor", "--format", "json"])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output)?;
+
+    assert!(value.as_array().is_some_and(|checks| !checks.is_empty()));
+    assert_contains(&output, "derrick.yaml")?;
+    Ok(())
+}
+
+#[test]
+fn doctor_fails_when_yaml_missing() -> TestResult {
+    let dir = repo()?;
+    let path = mock_path(dir.path(), &["git"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .arg("doctor")
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "derrick.yaml")?;
+    assert_contains(&output, "does not exist")?;
+    Ok(())
+}
+
+#[test]
+fn doctor_fails_when_yaml_invalid() -> TestResult {
+    let dir = repo()?;
+    fs::write(dir.path().join("derrick.yaml"), "not: [valid")?;
+    let path = mock_path(dir.path(), &["git"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .arg("doctor")
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "derrick.yaml")?;
+    assert_contains(&output, "fail")?;
+    Ok(())
+}
+
+#[test]
+fn doctor_fails_for_reachable_env_provider() -> TestResult {
+    let dir = repo()?;
+    fs::write(
+        dir.path().join("derrick.yaml"),
+        r#"
+version: 1
+site:
+  name: test
+  prefix: tst
+models:
+  claude-sonnet:
+    provider: anthropic
+    model: claude-sonnet
+roles:
+  drafter: claude-sonnet
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: false
+    role: drafter
+    reviewers: [drafter]
+  substrate:
+    backend: none
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+pipeline:
+  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#,
+    )?;
+    let path = mock_path(dir.path(), &["git", "claude"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .env_remove("ANTHROPIC_API_KEY")
+        .arg("doctor")
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "ANTHROPIC_API_KEY")?;
+    Ok(())
+}
+
+#[test]
+fn doctor_skips_state_for_substrate_none() -> TestResult {
+    let dir = repo()?;
+    write_minimal_config(dir.path(), "none", "solo", "[]")?;
+    let path = mock_path(dir.path(), &["git"])?;
+
+    derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .arg("doctor")
+        .assert()
+        .code(0);
+
+    Ok(())
+}
+
+#[test]
+fn doctor_fails_when_substrate_corrupt() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+    fs::write(dir.path().join(".derrick/derrick.db"), "not sqlite")?;
+    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .arg("doctor")
+        .assert()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "native substrate")?;
+    assert_contains(&output, "fail")?;
+    Ok(())
+}
+
+#[test]
+fn status_fails_when_native_db_missing() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+    fs::remove_file(dir.path().join(".derrick/derrick.db"))?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .arg("status")
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+
+    assert_contains(&output, "derrick.db")?;
+    Ok(())
+}
+
+#[test]
+fn status_handles_substrate_none_json() -> TestResult {
+    let dir = repo()?;
+    write_minimal_config(dir.path(), "none", "crew", "[]")?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .args(["status", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output)?;
+
+    assert_eq!(value["backend"], "none");
+    assert_eq!(value["mode"], "crew");
+    Ok(())
+}
+
+#[test]
+fn doctor_exit_code_equals_fail_count() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+    let path = mock_path(dir.path(), &["git"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .arg("doctor")
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "claude")?;
+    assert_contains(&output, "codex")?;
+    Ok(())
+}
+
+#[test]
+fn run_stub_prints_t009_hint_and_exits_1() -> TestResult {
+    let output = derrick()?
+        .args([
+            "run",
+            "add-feature",
+            "--prompt",
+            "hello",
+            "--resume-from",
+            "plan",
+            "--no-clarify",
+            "--no-checkpoint",
+            "--no-assay",
+        ])
+        .assert()
+        .code(1)
+        .get_output()
+        .stderr
+        .clone();
+
+    assert_contains(&output, "T009")?;
+    Ok(())
+}
+
+#[test]
+fn completions_emit_for_each_shell() -> TestResult {
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let output = derrick()?
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_contains(&output, "derrick")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn version_matches_cargo_pkg_version() -> TestResult {
+    let output = derrick()?
+        .arg("--version")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, &format!("derrick {}", env!("CARGO_PKG_VERSION")))?;
+    Ok(())
+}

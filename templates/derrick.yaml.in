@@ -1,0 +1,86 @@
+version: 1
+site:
+  name: {{site_name}}
+  prefix: {{prefix}}
+models:
+  claude-sonnet:
+    provider: shell
+    cli: "claude"
+    model: claude-sonnet
+  codex-gpt5:
+    provider: shell
+    cli: "codex"
+    model: codex-gpt5
+  copilot:
+    provider: shell
+    cli: "copilot"
+    model: copilot
+roles:
+  proposer: claude-sonnet
+  drafter: claude-sonnet
+  reviewer: codex-gpt5
+  executor: copilot
+  summariser: claude-sonnet
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: 1
+    strict: false
+    on_split: reject
+  substrate:
+    backend: native
+    mode: {{mode}}
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+  git:
+    stacking:
+      backend: none
+pipeline:
+  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+  - id: clarify
+    role: drafter
+    host: claude
+    command: "/speckit.clarify"
+    skippable: true
+  - id: plan
+    role: proposer
+    host: claude
+    command: "/speckit.plan"
+  - id: checkpoint
+    runner: human
+    prompt: "Review plan.md at {{feature_dir}}/plan.md - continue? [y/N]"
+    skippable: true
+  - id: assay
+    runner: derrick
+    inputs: ["{{feature_dir}}/spec.md", "{{feature_dir}}/plan.md"]
+    rounds: "{{tools.assay.rounds}}"
+    on_reject: halt
+  - id: analyze
+    role: proposer
+    host: claude
+    command: "/speckit.analyze"
+  - id: tasks
+    role: drafter
+    host: claude
+    command: "/speckit.tasks"
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees

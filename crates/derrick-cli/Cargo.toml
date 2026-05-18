@@ -7,3 +7,28 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+crossterm = { workspace = true }
+derrick-config = { path = "../derrick-config" }
+derrick-models = { path = "../derrick-models" }
+derrick-substrate = { path = "../derrick-substrate" }
+derrick-substrate-native = { path = "../derrick-substrate-native" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+which = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+tempfile = { workspace = true }
+
+[lib]
+name = "derrick_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "derrick"
+path = "src/main.rs"
