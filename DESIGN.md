@@ -968,8 +968,19 @@ hooks. When `derrick run add-feature` returns, the foreman either:
   (`copilot agent run --task <body> --label
   "derrick/ticket=<id>"`) and watches the resulting PR for the
   ticket-id label to detect completion.
-- `human` hand just marks the ticket `in_flight` and waits for
-  the user to flip it `done` via `derrick ticket done <id>`.
+- `human` hand marks the ticket `in_flight` and waits for the
+  user to declare completion. The completion path depends on
+  `mode` (D35 / T012):
+  - `mode: solo` — `derrick ticket done <id>` (transitions
+    directly to `Done` with an attestation event; no PR
+    expected).
+  - `mode: crew` or `copilot` — `derrick ticket review <id>
+    --branch <b> [--pr-url <u>] --head-sha <s>` (transitions
+    to `InReview`; the foreman's verifier moves it to `Done`
+    after observing the merge SHA on the target branch).
+    `derrick ticket done` is refused outside solo mode to
+    keep D31's "Done requires observable evidence" rule
+    enforceable.
 - `claude` hand writes a `.derrick/queue/<ticket-id>.md` file
   and prints a hint — the user picks it up in their Claude
   Code session.
@@ -986,9 +997,10 @@ read-only against its own substrate):
 | Command | Purpose |
 |---|---|
 | `derrick ticket new` | Create a ticket (used internally by `bridge`) |
-| `derrick ticket done <id>` | Mark complete |
+| `derrick ticket done <id>` | Mark complete (solo mode only) |
+| `derrick ticket review <id> --branch <b> --head-sha <s>` | Declare InReview (crew mode human path) |
 | `derrick ticket block <id> --on <id>` | Add a `blocks` link |
-| `derrick ticket reopen <id>` | Re-ready a done/rejected ticket |
+| `derrick ticket reopen <id> --note <text>` | Re-ready a Blocked ticket (T012); Done/Rejected reopen deferred to a follow-up |
 | `derrick batch close <name>` | Force-close a batch |
 
 Reads (status, tickets, ticket, batch, etc.) are §5.5 already.
@@ -1181,10 +1193,11 @@ shape doesn't guarantee any of those autonomously.
                        │            │ (merge_sha set)  │
                        │            └──────────────────┘
                        │
-                       │ closed unmerged or rejected
+                       │ closed unmerged
                        ▼
                 ┌──────────────────────────────────┐
-                │ Rejected                         │
+                │ Blocked                          │
+                │ (human re-opens or rejects)      │
                 └──────────────────────────────────┘
 ```
 
@@ -1193,18 +1206,23 @@ hole. A hand finishing work and opening a PR transitions the
 ticket to `InReview`, *not* `Done`. Only the foreman's
 verifier path — observing the merge SHA on the target branch
 — moves it forward. If the PR is closed unmerged, the verifier
-moves it to `Rejected`. If the PR has been pending past
-`tools.git.stacking.in_review_ttl` (default 24h), the foreman
+moves it to `Blocked` (a human re-opens with a new branch or
+explicitly rejects — D32). If the PR has been pending past
+`tools.foreman.in_review_ttl` (default 24h), the foreman
 re-queries `gh` and either rolls forward or flags
 `escalation: stuck-in-review`.
 
 #### Append-only events
 
 Every state transition writes an `events` row. Reverting a
-state moves *forward* to a different state — `Done` → `Reopened`
-(when a merge gets reverted), never erases the `Done` event.
-The activity log is the durable record; the current state on
-the ticket row is a projection of the latest event.
+state moves *forward* to a different state — e.g.
+`Blocked` → `Ready` via `derrick ticket reopen` (T012), or
+`Done` → a future "Reopened" variant when a merge gets
+reverted (deferred to a follow-up ticket; T012 does not
+implement the Done-revert path). State changes never erase
+prior events. The activity log is the durable record; the
+current state on the ticket row is a projection of the
+latest event.
 
 #### Verifier loop
 
@@ -1216,7 +1234,8 @@ The foreman's loop iteration (T012):
    target branch's git log for the recorded `pr_head_sha`'s
    merge commit. If found → transition to `Done` with
    `merge_sha` set. If `gh pr view` says closed-unmerged →
-   transition to `Rejected`. If neither resolves and the ticket
+   transition to `Blocked` (D32; not `Rejected`). If neither
+   resolves and the ticket
    has been `InReview` longer than the TTL → emit an
    escalation event but don't change state automatically.
 3. Reconcile `Blocked` tickets: re-check whether their `blocks`
@@ -1631,6 +1650,7 @@ links back to the section where it lives.
 | D32 | **Worktree and ticket cleanup is continuous and self-healing.** Lessons banked from gastown's gt-pvx WISP-branch leak. Periodic cleanup runs (a) on every `derrick run` startup before doing anything else and (b) optionally as a launchd/systemd plist for long-lived setups. It walks worktree rows whose runs have crashed (no `finalize_worktree` event after a configurable TTL, default 24h), and either prunes them or marks them `Abandoned`. Same pattern for tickets stuck in `InReview` past a TTL: the foreman re-checks the PR and either transitions to `Done` (if observably merged), `Blocked` (if the PR was closed unmerged), or surfaces an escalation event. **There is no "trust eventually consistent state" path** — every long-lived state has an explicit reconciliation pass that can fail loud. | §8.2 / §9.C.5 / future T012 |
 | D33 | **The foreman never has authoritative state independent of the substrate and git.** Where gastown's Mayor reads `gt convoy status` and trusts it, derrick's foreman treats its own poll as a hint and the substrate + git as the truth. Concretely: on every loop iteration the foreman (a) reads `bd ready`-equivalent tickets from the substrate, (b) for any in `InReview`, queries `git log` and `gh pr view` for the PR's actual state, (c) reconciles before dispatching new work. The dispatch is idempotent against state drift — if a ticket the substrate says is `Ready` is actually merged on main, the foreman corrects to `Done` and continues. | future T012 |
 | D30 | **`derrick-tools` owns host CLI subprocess invocations; `derrick-models` owns the `Model` trait and providers.** Hosts (claude / codex / copilot) are invoked when a pipeline step sets `host:`. They receive an opaque prompt-as-argv (typically a slash command), they load their own context per the host rules, and derrick captures stdout. Providers are invoked when derrick needs a model completion via a structured `CompletionRequest` (assay reviewers, future direct-API calls). The same underlying binary (e.g. `codex`) may be reached via either path: as a host running a derrick-supplied prompt verbatim (`derrick-tools`), or as a backend for a model role that needs a structured completion (`derrick-models`'s `openai-cli` provider, etc.). The split is **invocation-shape-driven**, not binary-driven. | §3.1 / §6.5 / new T009 |
+| D35 | **§8.6 alignment with D32: a closed-unmerged PR transitions its ticket to `Blocked`, not `Rejected`.** Earlier §8.6 prose used `Rejected` for both closed-unmerged and explicit user rejection. D32 distinguishes them: closed-unmerged is recoverable (a human may re-open with a new branch or explicitly reject), so the verifier moves to `Blocked` and waits for a human decision. `Rejected` is reserved for explicit user rejection via the §8.2 mutation API. The §8.6 diagram and verifier prose are updated to match; the T012 trait method `verify_ticket_unmerged` transitions to `Blocked`. | §8.6 / T012 |
 | D34 | **D29 refinement — Codex host hooks are best-effort/deferred.** Codex's CLI today does not expose a stable `PreToolUse`/`PostToolUse`-equivalent hook surface that derrick can rely on. T011 writes `.codex/instructions.md` (constitution + derrick.yaml reference) but does **not** install Codex tool-boundary hooks. When Codex grows a stable hook mechanism a follow-up ticket extends `derrick-adopt`. Claude Code hooks (D29 path b) remain mandatory; Copilot inline path (D29 path c) is unchanged. Users in `mode: copilot`/`crew` with codex hosts see a documented warning at init that Codex tool I/O is not scrubbed in v1. | §9.B.2 / §9.B.3 / T011 |
 | D29 | **Scrub and caveman fire at every model boundary, not just derrick's pipeline seams.** Three boundary classes: (a) derrick-internal — inline in `derrick-flow` and `derrick-substrate-native`; (b) host tool calls — `derrick init` writes `PreToolUse`+`PostToolUse` hooks in `.claude/settings.json` for Claude Code; Codex's equivalent is **deferred** (see D34); (c) Copilot dispatch — inline in `derrick-copilot` until Copilot's hook surface lands. Both directions matter: input (before embedding tool output into the next prompt) saves the most because of prompt caching; output (when an agent quotes tool output back) catches the second-order leakage. | §9.B.2 / §9.B.3 |
 | D28 | **Supersedes D1 and D24 — GitHub-only distribution.** The `derrick.dev` domain was unavailable, so all derrick artefacts (install script, marketplace JSON, release binaries) live under `github.com/lgulliver/derrick`. The Claude Code marketplace JSON is fetched from `https://raw.githubusercontent.com/lgulliver/derrick/main/marketplace.json`. There is no longer a separate marketplace host to health-check, so D24's fallback logic collapses to a single GitHub-releases path; transient GitHub unavailability surfaces as a normal network error to the user with the documented recovery (`gh release download` or manual binary install). | §11 |
