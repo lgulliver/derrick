@@ -72,8 +72,20 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
         run: |
-          cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
-          cargo llvm-cov report --fail-under-lines 80
+          # Exclude files that require a live terminal, external CLIs (gh/git),
+          # or user interaction — none of these can be meaningfully exercised in
+          # a headless CI environment:
+          #   derrick-tui/src/event_loop.rs  — crossterm event loop (real terminal)
+          #   derrick-tui/src/tabs.rs        — ratatui render functions (real terminal)
+          #   derrick-observe/src/*          — wires a live terminal + substrate
+          #   commands/observe.rs            — delegates to the terminal TUI
+          #   commands/stack.rs              — shells out to git/gh
+          #   commands/uninstall.rs          — user confirmation prompt + FS deletion
+          EXCLUDE='event_loop\.rs|derrick-tui/src/tabs\.rs|derrick-observe/src|commands/(observe|stack|uninstall)\.rs'
+          cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info \
+            --ignore-filename-regex "$EXCLUDE"
+          cargo llvm-cov report --fail-under-lines 80 \
+            --ignore-filename-regex "$EXCLUDE"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
