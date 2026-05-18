@@ -40,7 +40,7 @@ pub trait Substrate: Send + Sync {
     /// - `→ Blocked` → [`Substrate::block_ticket`]
     /// - `→ Done` → [`Substrate::verify_ticket_merged`] /
     ///   [`Substrate::mark_ticket_done_manually`]
-    /// - `→ Rejected` → future `reject_ticket` API
+    /// - `→ Rejected` → [`Substrate::reject_ticket`]
     /// - `→ Ready` from non-`Blocked` → [`Substrate::release_from_hand`]
     /// - `→ Ready` from `Blocked` → [`Substrate::unblock_ticket`]
     ///
@@ -138,6 +138,13 @@ pub trait Substrate: Send + Sync {
         id: &TicketId,
         attestation: ManualDoneAttestation,
     ) -> Result<Ticket, SubstrateError>;
+
+    /// Human rejection path: transition any non-terminal state → `Rejected`,
+    /// recording the human reason. Refuses if the ticket is already terminal
+    /// (`Done` or `Rejected`). This is the typed counterpart to `block_ticket`
+    /// for the irreversible rejection branch of the state machine
+    /// (DESIGN.md §8.6).
+    async fn reject_ticket(&self, id: &TicketId, reason: String) -> Result<Ticket, SubstrateError>;
 
     /// Assigns or clears the hand that owns a ticket.
     ///

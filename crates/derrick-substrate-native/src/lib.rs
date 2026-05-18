@@ -1184,6 +1184,45 @@ impl Substrate for NativeSubstrate {
         .await
     }
 
+    async fn reject_ticket(&self, id: &TicketId, reason: String) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state.is_terminal() {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "reject_ticket refused: ticket already terminal ({})",
+                        current.state
+                    ),
+                });
+            }
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'rejected', updated_at = ?1 WHERE id = ?2",
+                    params![now_text(), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: current.state,
+                    to: TicketState::Rejected,
+                    reason: Some(reason),
+                },
+            )?;
+            if let Some(batch) = current.batch.as_ref() {
+                maybe_auto_close_batch(&transaction, batch.as_str())?;
+            }
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
     async fn assign_ticket(
         &self,
         id: &TicketId,
@@ -2023,7 +2062,7 @@ fn set_ticket_state_redirect(target: TicketState) -> SubstrateError {
         TicketState::InReview => "use transition_to_in_review",
         TicketState::Blocked => "use block_ticket",
         TicketState::Done => "use verify_ticket_merged or mark_ticket_done_manually",
-        TicketState::Rejected => "use reject_ticket (future API)",
+        TicketState::Rejected => "use reject_ticket",
         TicketState::Ready => "use release_from_hand or unblock_ticket",
         _ => "see DESIGN.md §8.6 D31 for the typed state machine",
     };

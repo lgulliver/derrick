@@ -13,7 +13,7 @@ use derrick_substrate_native::NativeSubstrate;
 
 use crate::commands::{
     TicketArgs, TicketBlockArgs, TicketCodeReviewArgs, TicketCommand, TicketDoneArgs,
-    TicketReopenArgs, TicketReviewArgs, TicketShowArgs,
+    TicketRejectArgs, TicketReopenArgs, TicketReviewArgs, TicketShowArgs,
 };
 use crate::exit_code::CliExitCode;
 use crate::{create_dir_all, current_repo_root, message, native_paths, read_config, write_file};
@@ -44,13 +44,7 @@ async fn dispatch(
         TicketCommand::Review(review) => ticket_review(review, repo_root, substrate).await,
         TicketCommand::List => ticket_list(substrate).await,
         TicketCommand::Show(show) => ticket_show(show, substrate).await,
-        TicketCommand::Reject(_) => {
-            eprintln!(
-                "Rejection workflow is implemented in a follow-up ticket. See T012 \
-                 Out-of-scope notes."
-            );
-            Ok(CliExitCode::Refused)
-        }
+        TicketCommand::Reject(reject) => ticket_reject(reject, substrate).await,
         TicketCommand::Reopen(reopen) => ticket_reopen(reopen, substrate).await,
         TicketCommand::Block(block) => ticket_block(block, substrate).await,
         TicketCommand::CodeReview(args) => {
@@ -182,6 +176,43 @@ async fn ticket_reopen(
         .human_reopen_blocked(&ticket_id, args.note)
         .await?;
     println!("ticket {} -> {}", ticket.id, ticket.state);
+    Ok(CliExitCode::Success)
+}
+
+async fn ticket_reject(
+    args: TicketRejectArgs,
+    substrate: &NativeSubstrate,
+) -> Result<CliExitCode, crate::CliError> {
+    let ticket_id = parse_ticket_id(&args.id)?;
+    let existing = substrate
+        .get_ticket(&ticket_id)
+        .await?
+        .ok_or_else(|| message(format!("ticket {} not found", ticket_id)))?;
+
+    // Done and already-Rejected are terminal — refuse so the user gets a
+    // clear, non-zero exit without a substrate error.
+    match existing.state {
+        TicketState::Done => {
+            eprintln!(
+                "ticket {} is already Done and cannot be rejected",
+                ticket_id
+            );
+            return Ok(CliExitCode::Refused);
+        }
+        TicketState::Rejected => {
+            eprintln!("ticket {} is already Rejected", ticket_id);
+            return Ok(CliExitCode::Refused);
+        }
+        _ => {}
+    }
+
+    let reason = match args.reason {
+        Some(r) => r,
+        None => prompt_for_note("Reason: ")?,
+    };
+
+    let ticket = substrate.reject_ticket(&ticket_id, reason.clone()).await?;
+    println!("ticket {} -> {} ({})", ticket.id, ticket.state, reason);
     Ok(CliExitCode::Success)
 }
 
