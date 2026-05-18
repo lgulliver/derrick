@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Semaphore;
+
 use chrono::{DateTime, Utc};
 use derrick_config::{Config, Host, OnSplit, PipelineStep, Runner as StepRunner};
 use derrick_models::{resolve_role, AuthStore, CompletionRequest, ModelError};
@@ -22,10 +24,14 @@ const FEATURE_JSON: &str = ".specify/feature.json";
 const ASSAY_SYSTEM: &str = "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` followed by exactly one of: accept, revise, reject.";
 
 /// Executes derrick pipelines against a repository.
+///
+/// Clone is O(1) — all shared state is behind `Arc`. Clones share the
+/// same config, substrate connection, and host registry.
+#[derive(Clone)]
 pub struct Runner {
-    config: Config,
+    config: Arc<Config>,
     substrate: Arc<dyn Substrate>,
-    hosts: HostRegistry,
+    hosts: Arc<HostRegistry>,
     repo_root: PathBuf,
 }
 
@@ -38,9 +44,9 @@ impl Runner {
         repo_root: PathBuf,
     ) -> Self {
         Self {
-            config,
+            config: Arc::new(config),
             substrate,
-            hosts,
+            hosts: Arc::new(hosts),
             repo_root,
         }
     }
@@ -158,8 +164,8 @@ impl Runner {
         let start_index = manifest.steps.len();
         let mut outcome_status = RunStatus::Success;
         // Walk the pipeline tail, batching consecutive steps that share a
-        // `parallel_group`. Steps with no group run sequentially as before.
-        // TODO(9.C.4): true parallelism once Self is Arc-wrapped (sendable).
+        // `parallel_group`. Steps with no group run sequentially; grouped
+        // steps fan out via tokio::spawn bounded by parallelism.step_max.
         let tail = &self.config.pipeline()[start_index..];
         let mut idx = 0usize;
         'outer: while idx < tail.len() {
@@ -218,24 +224,64 @@ impl Runner {
                     {
                         group_end += 1;
                     }
-                    // 9.C.7 failure isolation: if any step in the group halts or
-                    // fails, stop running remaining steps in this group. Since
-                    // we run groups sequentially, this naturally leaves later
-                    // groups unaffected (we just break the outer loop).
-                    for step in &tail[idx..group_end] {
+
+                    // §9.C.4 True parallel fan-out: run independent steps
+                    // concurrently, bounded by parallelism.step_max.
+                    let group_steps: Vec<PipelineStep> = tail[idx..group_end].to_vec();
+                    let step_max = self.config.parallelism().step_max().max(1) as usize;
+                    let semaphore = Arc::new(Semaphore::new(step_max));
+                    let mut handles: Vec<tokio::task::JoinHandle<Result<StepRecord, RunError>>> =
+                        Vec::new();
+                    let mut skipped: Vec<StepRecord> = Vec::new();
+
+                    for step in &group_steps {
                         if self.should_skip(step, &input) {
                             let record = self.skipped_record(step);
-                            manifest.tokens_in = manifest
-                                .tokens_in
-                                .saturating_add(u64::from(record.tokens_in));
-                            manifest.tokens_out = manifest
-                                .tokens_out
-                                .saturating_add(u64::from(record.tokens_out));
-                            manifest.steps.push(ManifestStep::from_record(&record));
-                            write_manifest(&self.manifest_path(&run_id), &manifest)?;
+                            skipped.push(record);
                             continue;
                         }
-                        let record = self.execute_step(step, &mut state).await?;
+                        let sem = semaphore.clone();
+                        let runner = self.clone();
+                        let step = step.clone();
+                        let state_clone = state.clone();
+                        handles.push(tokio::task::spawn(async move {
+                            let _permit =
+                                sem.acquire_owned().await.expect("semaphore never closed");
+                            let mut st = state_clone;
+                            runner.execute_step(&step, &mut st).await
+                        }));
+                    }
+
+                    // Flush skipped steps into the manifest first.
+                    for record in &skipped {
+                        manifest.tokens_in = manifest
+                            .tokens_in
+                            .saturating_add(u64::from(record.tokens_in));
+                        manifest.tokens_out = manifest
+                            .tokens_out
+                            .saturating_add(u64::from(record.tokens_out));
+                        manifest.steps.push(ManifestStep::from_record(record));
+                        write_manifest(&self.manifest_path(&run_id), &manifest)?;
+                    }
+
+                    // §9.C.7 failure isolation — all steps in the group run
+                    // concurrently; if any halts or fails we stop the outer
+                    // pipeline loop after collecting all results.
+                    let mut halted = false;
+                    let mut failed = false;
+                    for handle in handles {
+                        let record = handle
+                            .await
+                            .map_err(|e| RunError::Config(format!("parallel task join: {e}")))?
+                            .map_err(|e| {
+                                tracing::error!(
+                                    run_id = %run_id,
+                                    group = %group_name,
+                                    error = %e,
+                                    "step in parallel group failed"
+                                );
+                                e
+                            })?;
                         manifest.feature_dir = state.feature_dir.clone();
                         manifest.tokens_in = manifest
                             .tokens_in
@@ -247,15 +293,17 @@ impl Runner {
                         write_manifest(&self.manifest_path(&run_id), &manifest)?;
                         match record.status {
                             StepStatus::Success | StepStatus::Skipped => {}
-                            StepStatus::Halted => {
-                                outcome_status = RunStatus::Halted;
-                                break 'outer;
-                            }
-                            StepStatus::Failed => {
-                                outcome_status = RunStatus::Failed;
-                                break 'outer;
-                            }
+                            StepStatus::Halted => halted = true,
+                            StepStatus::Failed => failed = true,
                         }
+                    }
+                    if halted {
+                        outcome_status = RunStatus::Halted;
+                        break 'outer;
+                    }
+                    if failed {
+                        outcome_status = RunStatus::Failed;
+                        break 'outer;
                     }
                     idx = group_end;
                 }
@@ -618,26 +666,67 @@ impl Runner {
             };
         }
 
-        // Multi-reviewer path.
-        // TODO(9.C.2): fan out with tokio::task::spawn_local or Arc<Self> for true parallelism.
-        // For now run reviewers sequentially; this still respects on_split semantics and is a
-        // meaningful improvement over the previous single-reviewer-only behaviour.
-        let _assay_max = self.config.parallelism().assay_max().max(1);
-        let mut outcomes: Vec<ReviewerOutcome> = Vec::with_capacity(reviewers.len());
+        // §9.C.2 True parallel fan-out: run each reviewer concurrently bounded
+        // by parallelism.assay_max. Each reviewer gets its own log path to avoid
+        // concurrent append races on the step-level log file.
+        let assay_max = self.config.parallelism().assay_max().max(1) as usize;
+        let semaphore = Arc::new(Semaphore::new(assay_max));
+        let mut handles: Vec<tokio::task::JoinHandle<Result<ReviewerRoundOutcome, RunError>>> =
+            Vec::with_capacity(reviewers.len());
+        let working_dir = self.working_dir(state).to_path_buf();
+
         for reviewer_role in &reviewers {
-            let reviewer_dir = self
-                .working_dir(state)
+            let reviewer_dir = working_dir
                 .join(&feature_dir)
                 .join("assay")
                 .join(reviewer_role);
             create_dir_all(&reviewer_dir)?;
-            match self
-                .run_reviewer_rounds(step, state, log_path, reviewer_role, &reviewer_dir)
-                .await?
+
+            let sem = semaphore.clone();
+            let runner = self.clone();
+            let step = step.clone();
+            let mut state_clone = state.clone();
+            let role = reviewer_role.clone();
+            let reviewer_log =
+                state
+                    .run_dir
+                    .join(format!("step-{}-{}.log", step.id(), reviewer_role));
+
+            handles.push(tokio::task::spawn(async move {
+                let _permit = sem.acquire_owned().await.expect("semaphore never closed");
+                runner
+                    .run_reviewer_rounds(
+                        &step,
+                        &mut state_clone,
+                        &reviewer_log,
+                        &role,
+                        &reviewer_dir,
+                    )
+                    .await
+            }));
+        }
+
+        let mut outcomes: Vec<ReviewerOutcome> = Vec::with_capacity(reviewers.len());
+        let mut any_skipped = false;
+        for handle in handles {
+            match handle
+                .await
+                .map_err(|e| RunError::Config(format!("reviewer task join: {e}")))?
             {
-                ReviewerRoundOutcome::Skipped => return Ok(StepExecution::skipped()),
-                ReviewerRoundOutcome::Decided(outcome) => outcomes.push(outcome),
+                Ok(ReviewerRoundOutcome::Decided(outcome)) => outcomes.push(outcome),
+                Ok(ReviewerRoundOutcome::Skipped) => any_skipped = true,
+                Err(e) => {
+                    tracing::error!(
+                        run_id = %state.run_id,
+                        error = %e,
+                        "reviewer in multi-reviewer assay failed"
+                    );
+                    return Err(e);
+                }
             }
+        }
+        if any_skipped {
+            return Ok(StepExecution::skipped());
         }
 
         let combined_path = self
