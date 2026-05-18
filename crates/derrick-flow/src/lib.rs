@@ -122,7 +122,8 @@ impl Runner {
         );
 
         if let Some(prior_steps) = prior_steps {
-            state.feature_dir = prior_feature_dir(&prior_steps);
+            state.feature_dir =
+                prior_feature_dir(&prior_steps).or_else(|| read_feature_dir(&self.repo_root).ok());
             manifest.feature_dir = state.feature_dir.clone();
             manifest.steps = prior_steps;
         }
