@@ -20,15 +20,12 @@ means:
 2. Install the `courtroom` Claude Code plugin.
 3. Run `specify init` and tune `.specify/` for the project.
 4. Author a `rigs.json` entry and bootstrap the rig with `gt`.
-5. Write a per-repo `flight.sh` (see `blacksmith/.specify/extensions/blacksmith/commands/flight.sh`)
-   that hardcodes feature paths, agent identities, and checkpoint policy.
-6. Wire `tasks-to-beads.sh` as a SpecKit post-tasks hook.
-7. Author a CLAUDE.md and AGENTS.md that explain the flow.
-8. Document the runbook, the dolt-server caveats, the mayor session etc.
+5. Wire `tasks-to-beads.sh` as a SpecKit post-tasks hook.
+6. Author a CLAUDE.md and AGENTS.md that explain the flow.
+7. Document the runbook, the dolt-server caveats, the mayor session etc.
 
-This is bespoke per repo. `flight.sh` is the proven shape but it is **glued
-to blacksmith** — its phase labels, its five-service rule, its
-constitution path, its `gt prime --rig blacksmith --role mayor`.
+This is bespoke per repo. Every part is **glued to a specific toolchain** —
+its phase labels, its rule, its constitution path.
 
 We want: **any user, any repo, single command, `/add-feature` UX.**
 
@@ -62,7 +59,7 @@ Plus the product surface:
 - **One front door for observability**: `derrick status` is the
   answer to "what's going on?" — never `gt status` + `bd query` +
   `gt mail` separately.
-- **Reusable**: nothing in derrick assumes blacksmith. Project-
+- **Reusable**: nothing in derrick assumes a specific toolchain. Project-
   specific rules live in the repo's constitution + `derrick.yaml`,
   not in derrick.
 - **Transparent**: every underlying tool call is logged and exit
@@ -398,8 +395,8 @@ What happens (this is the load-bearing flow):
    - On `runner: human`, prompts on stdout and reads stdin (or auto-skips
      when `--no-checkpoint`).
 4. After `specify`, derrick reads `.specify/feature.json` to pin
-   `feature_dir` for subsequent steps (mirrors flight.sh — solves the
-   "stale feature.json" bug it already fixed).
+    `feature_dir` for subsequent steps, solving the
+    "stale feature.json" bug.
 5. Failure of any step halts the pipeline with a numbered error and the
    exact resume command (`derrick run add-feature --resume-from plan`).
 
@@ -857,8 +854,7 @@ We do **not** fork speckit. We own the execution substrate. Derrick's
 contract:
 
 - **speckit**: invoked via `claude /speckit.*`. Derrick assumes speckit
-  writes `.specify/feature.json` and a per-feature directory; that's the
-  same assumption flight.sh already makes.
+   writes `.specify/feature.json` and a per-feature directory.
 - **Substrate is ours** (§8) — SQLite-backed, no external service. The
   trait allows additional backends later but v1 ships only the native one.
 
@@ -1494,7 +1490,7 @@ state). The clean answer is git worktrees:
   abandoned.
 
 This obsoletes the file-lock / `SPECIFY_FEATURE_DIRECTORY` env
-trick from flight.sh. Worktrees give us *real* isolation, not
+trick. Worktrees give us *real* isolation, not
 just polite cooperation between sub-processes.
 
 **9.C.6 What isn't parallel** (by design): the sequential spine
