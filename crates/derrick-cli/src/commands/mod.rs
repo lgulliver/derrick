@@ -2,6 +2,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::output::OutputFormat;
 
+pub(crate) mod add;
 pub(crate) mod caveman;
 pub(crate) mod completions;
 pub(crate) mod doctor;
@@ -25,6 +26,8 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Shorthand for `run add-feature` — prompt is a positional argument.
+    Add(AddArgs),
     Init(InitArgs),
     Status(StatusArgs),
     Doctor(DoctorArgs),
@@ -38,6 +41,29 @@ pub(crate) enum Command {
     Scrub(ScrubArgs),
     Caveman(CavemanArgs),
     Gain(GainArgs),
+}
+
+/// Arguments for `derrick add` — positional prompt shorthand for `run add-feature`.
+#[derive(Debug, Args)]
+pub(crate) struct AddArgs {
+    /// Feature description. Equivalent to `run add-feature --prompt "..."`.
+    pub(crate) prompt: Option<String>,
+    #[arg(long = "resume-from")]
+    pub(crate) resume_from: Option<String>,
+    #[arg(long = "run")]
+    pub(crate) run_id: Option<String>,
+    #[arg(long = "skip")]
+    pub(crate) skip: Vec<String>,
+    #[arg(long = "unskip")]
+    pub(crate) unskip: Vec<String>,
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+    #[arg(long, help = "Alias for `--skip clarify`")]
+    pub(crate) no_clarify: bool,
+    #[arg(long, help = "Alias for `--skip checkpoint`")]
+    pub(crate) no_checkpoint: bool,
+    #[arg(long, help = "Alias for `--skip assay`")]
+    pub(crate) no_assay: bool,
 }
 
 #[derive(Debug, Args)]

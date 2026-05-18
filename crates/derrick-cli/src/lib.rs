@@ -43,6 +43,7 @@ where
 
 async fn dispatch(cli: Cli) -> Result<exit_code::CliExitCode, CliError> {
     match cli.command {
+        Command::Add(args) => commands::add::execute(args).await,
         Command::Init(args) => commands::init::execute(args).await,
         Command::Status(args) => commands::status::execute(args).await,
         Command::Doctor(args) => commands::doctor::execute(args).await,
