@@ -383,7 +383,13 @@ What happens (this is the load-bearing flow):
 2. Derrick walks the `pipeline:` from `derrick.yaml`.
 3. Each step:
    - Logs to `.derrick/runs/<utc-ts>/step-<id>.log`.
-   - On `runner: claude`, shells out to `claude --model X "<command>"`.
+   - On `host: claude` (or `codex`/`copilot`), goes through
+     a `derrick-tools` host adapter that shells to the host
+     CLI with the step's command/prompt and the current cwd
+     (e.g. `claude --print "<command>"`, `codex exec
+     --skip-git-repo-check "<command>"`, `copilot -p
+     "<command>" --add-dir <cwd>`). The host loads its own
+     context (D30).
    - On `runner: gt`/`bash`, shells out and streams output.
    - On `runner: human`, prompts on stdout and reads stdin (or auto-skips
      when `--no-checkpoint`).
@@ -672,19 +678,26 @@ Gemini is one line in `models:`; no pipeline edits.
 
 #### Supported providers (v1)
 
+Providers are reached through `derrick-models`'s `Model`
+trait. They take a structured `CompletionRequest` and return
+a `CompletionResponse`. This is distinct from **hosts**
+(claude / codex / copilot CLIs invoked when a pipeline step
+sets `host:` — those go through `derrick-tools` per D30).
+The same binary may serve both roles via different paths.
+
 | Provider | Type | Notes |
 |---|---|---|
 | `anthropic` | API | First-class. Prompt caching used by §9.B.4. |
 | `openai` | API | Used for non-Claude reasoning roles. |
-| `openai-cli` | CLI | `codex exec` etc — for users who prefer the local CLI. |
+| `openai-cli` | CLI-backed provider | Wraps `codex exec` in the Model trait, for users who want codex as a *backend completion source* (e.g. for an assay reviewer role). Distinct from `host: codex` pipeline steps, which use the host adapter in `derrick-tools` directly. |
 | `google` | API | Gemini. |
 | `bedrock` | API | AWS Bedrock. Region + model-id. |
 | `azure-openai` | API | Endpoint + deployment. |
-| `copilot-cli` | CLI | Standalone `copilot` CLI (`@github/copilot`) for ticket dispatch. v1 default. |
+| `copilot-cli` | CLI-backed provider | Wraps the `copilot` CLI in the Model trait for *completion-style* use. The `derrick-tools` Copilot host adapter handles `host: copilot` pipeline-step invocations separately (D30). |
 | `copilot-sdk` | Lib | GitHub Copilot SDK in-process. v1.1 research target. |
 | `ollama` | Local | `base_url` + model tag. Sensible for `summariser` role to keep tokens off the network entirely. |
 | `llamacpp` | Local | Same idea. |
-| `shell` | Generic | Any command that takes a prompt on stdin and emits a response on stdout. Escape hatch. |
+| `shell` | Generic | Any command that takes a structured prompt envelope on stdin and emits a sentinel-delimited response on stdout. Escape hatch. |
 
 #### Respecting the host's own rules
 
@@ -1484,6 +1497,7 @@ links back to the section where it lives.
 | D25 | **Foreman exit mode**: `derrick run` detaches the foreman to `.derrick/foreman.pid` and returns; a watch hint is printed (`derrick observe` or `derrick status --watch`). `--attach` for foreground for users who want it. | §8.2 |
 | D26 | **Install paths**: ship three. `curl | bash` (primary, one-line install), `cargo install derrick` (Rust-native), and a Homebrew tap (macOS native). All three resolve to the same release artefact. | §11 |
 | D27 | **Drop `site.role` and `pipeline[].role` for `runner: derrick` steps**: `site.role` was vestigial gastown vocabulary; the derrick substrate has one orchestrator (the foreman), no multi-role agent system. Pipeline steps with `runner: derrick` carry their own runner-specific fields (`executor_role`, `batch`, `inputs`) and do not also need a `role:` binding. Steps that need a model role still use `role:` (mutually exclusive with `runner:` in that case). | §4 |
+| D30 | **`derrick-tools` owns host CLI subprocess invocations; `derrick-models` owns the `Model` trait and providers.** Hosts (claude / codex / copilot) are invoked when a pipeline step sets `host:`. They receive an opaque prompt-as-argv (typically a slash command), they load their own context per the host rules, and derrick captures stdout. Providers are invoked when derrick needs a model completion via a structured `CompletionRequest` (assay reviewers, future direct-API calls). The same underlying binary (e.g. `codex`) may be reached via either path: as a host running a derrick-supplied prompt verbatim (`derrick-tools`), or as a backend for a model role that needs a structured completion (`derrick-models`'s `openai-cli` provider, etc.). The split is **invocation-shape-driven**, not binary-driven. | §3.1 / §6.5 / new T009 |
 | D29 | **Scrub and caveman fire at every model boundary, not just derrick's pipeline seams.** Three boundary classes: (a) derrick-internal — inline in `derrick-flow` and `derrick-substrate-native`; (b) host tool calls — `derrick init` writes `PreToolUse`+`PostToolUse` hooks in `.claude/settings.json` and the equivalent in `.codex/` that pipe tool I/O through `derrick scrub` (CLI shapes) and `derrick caveman --intensity lite` (prose); (c) Copilot dispatch — inline in `derrick-copilot` until Copilot's hook surface lands. Both directions matter: input (before embedding tool output into the next prompt) saves the most because of prompt caching; output (when an agent quotes tool output back) catches the second-order leakage. | §9.B.2 / §9.B.3 |
 | D28 | **Supersedes D1 and D24 — GitHub-only distribution.** The `derrick.dev` domain was unavailable, so all derrick artefacts (install script, marketplace JSON, release binaries) live under `github.com/lgulliver/derrick`. The Claude Code marketplace JSON is fetched from `https://raw.githubusercontent.com/lgulliver/derrick/main/marketplace.json`. There is no longer a separate marketplace host to health-check, so D24's fallback logic collapses to a single GitHub-releases path; transient GitHub unavailability surfaces as a normal network error to the user with the documented recovery (`gh release download` or manual binary install). | §11 |
 
