@@ -400,6 +400,14 @@ dependencies = [
 [[package]]
 name = "derrick-tools"
 version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "which",
+]
 
 [[package]]
 name = "derrick-tui"
