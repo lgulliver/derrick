@@ -85,6 +85,7 @@ pub async fn run_event_loop<B: Backend>(
     stack_nodes: Arc<std::sync::RwLock<Vec<StackNode>>>,
     memory_entries: Arc<std::sync::RwLock<Vec<MemoryEntry>>>,
     watch_paths: Vec<PathBuf>,
+    prune_queue_path: Option<std::path::PathBuf>,
     terminal: &mut Terminal<B>,
 ) -> anyhow::Result<()> {
     let mut events = EventStream::new();
@@ -117,6 +118,14 @@ pub async fn run_event_loop<B: Backend>(
                         if app.refresh_requested {
                             app.refresh_requested = false;
                             needs_refresh = true;
+                        }
+                        if let Some(url) = app.pending_open_url.take() {
+                            open_in_browser(&url);
+                        }
+                        if let Some(slug) = app.pending_prune_slug.take() {
+                            if let Some(ref path) = prune_queue_path {
+                                append_prune_slug(path, &slug);
+                            }
                         }
                         // Treat ctrl-c as quit too.
                         if k.code == KeyCode::Char('c')
@@ -165,6 +174,30 @@ pub async fn run_event_loop<B: Backend>(
     }
 
     Ok(())
+}
+
+fn open_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(not(target_os = "macos"))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+fn append_prune_slug(path: &std::path::Path, slug: &str) {
+    let mut slugs: Vec<String> = if path.exists() {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if !slugs.contains(&slug.to_owned()) {
+        slugs.push(slug.to_owned());
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&slugs) {
+        let _ = std::fs::write(path, json);
+    }
 }
 
 fn redraw<B: Backend>(terminal: &mut Terminal<B>, app: &App) -> anyhow::Result<()> {

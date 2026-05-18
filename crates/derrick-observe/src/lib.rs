@@ -6,6 +6,8 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+mod stack;
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,6 +48,16 @@ pub async fn observe(initial_tab: Tab, _site: Option<String>) -> anyhow::Result<
     // empty; the renderer shows a "loading" sentinel.
     let stack_nodes = Arc::new(std::sync::RwLock::new(Vec::<StackNode>::new()));
 
+    // Spawn a background task to populate stack nodes from the gh CLI.
+    {
+        let backend = config.tools().git().stacking().backend();
+        let root = repo_root.clone();
+        let sn_clone = Arc::clone(&stack_nodes);
+        tokio::spawn(async move {
+            stack::refresh_stack_nodes(backend, &root, sn_clone).await;
+        });
+    }
+
     let watch_paths = vec![
         db_path,
         state_dir.join("runs"),
@@ -77,6 +89,7 @@ pub async fn observe(initial_tab: Tab, _site: Option<String>) -> anyhow::Result<
         stack_nodes,
         memory_entries,
         watch_paths,
+        Some(state_dir.join("memory-prune-queue.json")),
         &mut terminal,
     )
     .await;

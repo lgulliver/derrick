@@ -114,11 +114,7 @@ async fn add_config_driven_checks(repo_root: &Path, config: &Config, checks: &mu
 
     if config.tools().git().stacking().backend() != StackBackendKind::None {
         checks.push(binary_check("gh", true));
-        checks.push(Check::warn(
-            "git merge policy",
-            "T008 does not query GitHub merge policy; verify squash is not the only merge option",
-            "run `gh api repos/{owner}/{repo}` and inspect merge settings",
-        ));
+        check_squash_merge_policy(repo_root, checks).await;
     }
 
     if config.tools().copilot().enabled() {
@@ -327,6 +323,130 @@ fn runner_binary(runner: Runner) -> Option<&'static str> {
         Runner::Copilot => Some("copilot"),
         Runner::Derrick | Runner::Human | Runner::Bash => None,
     }
+}
+
+async fn check_squash_merge_policy(repo_root: &Path, checks: &mut Vec<Check>) {
+    // Resolve origin URL → owner/repo.
+    let origin_url = match std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_root)
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+        _ => {
+            checks.push(Check::warn(
+                "git merge policy (D21)",
+                "could not read origin remote URL",
+                "ensure `git remote get-url origin` works in this repo",
+            ));
+            return;
+        }
+    };
+
+    let (owner, repo_name) = match parse_github_owner_repo(&origin_url) {
+        Some(pair) => pair,
+        None => {
+            checks.push(Check::warn(
+                "git merge policy (D21)",
+                format!("origin does not look like a GitHub URL: {origin_url}"),
+                "stacking relies on GitHub PRs; ensure origin points to github.com",
+            ));
+            return;
+        }
+    };
+
+    let api_path = format!("repos/{owner}/{repo_name}");
+    let api_output = match std::process::Command::new("gh")
+        .args(["api", &api_path])
+        .current_dir(repo_root)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            checks.push(Check::warn(
+                "git merge policy (D21)",
+                format!("could not run `gh api {api_path}`: {e}"),
+                "install and authenticate the `gh` CLI",
+            ));
+            return;
+        }
+    };
+
+    if !api_output.status.success() {
+        let stderr = String::from_utf8_lossy(&api_output.stderr);
+        checks.push(Check::warn(
+            "git merge policy (D21)",
+            format!("gh api returned non-zero: {}", stderr.trim()),
+            "ensure `gh auth login` is complete and you have repo access",
+        ));
+        return;
+    }
+
+    let repo_json: serde_json::Value = match serde_json::from_slice(&api_output.stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            checks.push(Check::warn(
+                "git merge policy (D21)",
+                format!("could not parse gh api response: {e}"),
+                "run `gh api repos/{owner}/{repo}` manually to inspect",
+            ));
+            return;
+        }
+    };
+
+    let allow_squash = repo_json["allow_squash_merge"].as_bool().unwrap_or(true);
+    let allow_merge = repo_json["allow_merge_commit"].as_bool().unwrap_or(true);
+    let allow_rebase = repo_json["allow_rebase_merge"].as_bool().unwrap_or(true);
+
+    if allow_squash && !allow_merge && !allow_rebase {
+        checks.push(Check::warn(
+            "git merge policy (D21)",
+            format!(
+                "{owner}/{repo_name}: squash-merge is the ONLY option — stacked PRs will \
+                 have their parent SHA rewritten on merge, breaking downstream branches",
+            ),
+            "enable merge commits or rebase-merge in GitHub repo Settings → \
+             General → Pull Requests for derrick-managed PRs",
+        ));
+    } else if allow_squash {
+        checks.push(Check::warn(
+            "git merge policy (D21)",
+            format!(
+                "{owner}/{repo_name}: squash-merge is enabled — if reviewers use it on \
+                 stacked PRs the parent SHA will be rewritten, breaking downstream branches",
+            ),
+            "prefer merge commits or rebase-merge for derrick-managed stacked PRs",
+        ));
+    } else {
+        checks.push(Check::pass(
+            "git merge policy (D21)",
+            format!("{owner}/{repo_name}: squash-merge is disabled — stacking is safe"),
+        ));
+    }
+}
+
+/// Extract `(owner, repo)` from common GitHub remote URL formats:
+/// - `https://github.com/owner/repo.git`
+/// - `https://github.com/owner/repo`
+/// - `git@github.com:owner/repo.git`
+fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
+    let url = url.trim();
+    // HTTPS form
+    let path = if let Some(rest) = url.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("http://github.com/") {
+        rest
+    } else {
+        url.strip_prefix("git@github.com:")?
+    };
+    let path = path.trim_end_matches(".git");
+    let mut parts = path.splitn(2, '/');
+    let owner = parts.next()?.to_owned();
+    let repo = parts.next()?.trim_end_matches('/').to_owned();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner, repo))
 }
 
 fn binary_check(binary: &str, required: bool) -> Check {

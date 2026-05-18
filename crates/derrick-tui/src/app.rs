@@ -60,6 +60,10 @@ pub struct App {
     /// `true` when the user has scrolled away from the bottom of Activity;
     /// the auto-scroll behaviour pauses until the user returns to bottom.
     pub activity_auto_scroll: bool,
+    /// PR URL to open in the system browser on the next event loop iteration.
+    pub pending_open_url: Option<String>,
+    /// Memory slug to append to the prune queue on the next event loop iteration.
+    pub pending_prune_slug: Option<String>,
 }
 
 impl App {
@@ -76,6 +80,8 @@ impl App {
             show_help: false,
             refresh_requested: false,
             activity_auto_scroll: true,
+            pending_open_url: None,
+            pending_prune_slug: None,
         }
     }
 
@@ -111,9 +117,18 @@ impl App {
                     self.filter = FilterState::Inactive;
                 }
             }
-            KeyCode::Enter => {
-                self.detail_open = !self.detail_open;
-            }
+            KeyCode::Enter => match self.active_tab {
+                Tab::Stack => {
+                    if let Some(node) = self.data.stack_nodes.get(self.selected_row) {
+                        if let Some(url) = &node.pr_url {
+                            self.pending_open_url = Some(url.clone());
+                        }
+                    }
+                }
+                _ => {
+                    self.detail_open = !self.detail_open;
+                }
+            },
             KeyCode::Up => {
                 if self.selected_row > 0 {
                     self.selected_row -= 1;
@@ -128,6 +143,11 @@ impl App {
                     // Returning to the bottom re-enables auto-scroll. The
                     // renderer is responsible for clamping the index.
                     self.activity_auto_scroll = true;
+                }
+            }
+            KeyCode::Char('d') if self.active_tab == Tab::Memory => {
+                if let Some(entry) = self.data.memory_entries.get(self.selected_row) {
+                    self.pending_prune_slug = Some(entry.slug.clone());
                 }
             }
             KeyCode::Char(c @ '1'..='6') => {
@@ -177,7 +197,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::DataModel;
+    use crate::data::{DataModel, MemoryEntry, StackNode};
 
     fn app() -> App {
         App::new(Tab::Overview, DataModel::empty())
@@ -232,6 +252,45 @@ mod tests {
         a.filter = FilterState::Active("foo".into());
         a.handle_key(KeyCode::Esc);
         assert_eq!(a.filter, FilterState::Inactive);
+    }
+
+    #[test]
+    fn key_enter_on_stack_sets_pending_open_url() {
+        let mut data = DataModel::empty();
+        data.stack_nodes.push(StackNode {
+            ticket_id: "T1".into(),
+            branch: "feature/x".into(),
+            pr_url: Some("https://example.com/pr/1".into()),
+            pr_number: Some(1),
+            state: "open".into(),
+            parent_branch: None,
+        });
+        let mut a = App::new(Tab::Stack, data);
+        a.handle_key(KeyCode::Enter);
+        assert_eq!(
+            a.pending_open_url.as_deref(),
+            Some("https://example.com/pr/1")
+        );
+    }
+
+    #[test]
+    fn key_d_on_memory_sets_pending_prune_slug() {
+        let mut data = DataModel::empty();
+        data.memory_entries.push(MemoryEntry {
+            slug: "my-entry".into(),
+            path: std::path::PathBuf::from("/tmp/my-entry.md"),
+            preview: String::new(),
+        });
+        let mut a = App::new(Tab::Memory, data);
+        a.handle_key(KeyCode::Char('d'));
+        assert_eq!(a.pending_prune_slug.as_deref(), Some("my-entry"));
+    }
+
+    #[test]
+    fn key_enter_on_overview_toggles_detail() {
+        let mut a = app();
+        a.handle_key(KeyCode::Enter);
+        assert!(a.detail_open);
     }
 
     #[test]
