@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use derrick_config::{Config, Host, PipelineStep, Runner as StepRunner};
+use derrick_config::{Config, Host, OnSplit, PipelineStep, Runner as StepRunner};
 use derrick_models::{resolve_role, AuthStore, CompletionRequest, ModelError};
 use derrick_substrate::{Substrate, SubstrateError};
 use derrick_tools::{CopilotToolPermission, HostError, HostRegistry, HostRequest};
@@ -133,34 +133,84 @@ impl Runner {
 
         let start_index = manifest.steps.len();
         let mut outcome_status = RunStatus::Success;
-        for step in &self.config.pipeline()[start_index..] {
-            if self.should_skip(step, &input) {
-                let record = self.skipped_record(step);
-                manifest.steps.push(ManifestStep::from_record(&record));
-                write_manifest(&self.manifest_path(&run_id), &manifest)?;
-                continue;
-            }
+        // Walk the pipeline tail, batching consecutive steps that share a
+        // `parallel_group`. Steps with no group run sequentially as before.
+        // TODO(9.C.4): true parallelism once Self is Arc-wrapped (sendable).
+        let tail = &self.config.pipeline()[start_index..];
+        let mut idx = 0usize;
+        'outer: while idx < tail.len() {
+            let step = &tail[idx];
+            match step.parallel_group() {
+                None => {
+                    if self.should_skip(step, &input) {
+                        let record = self.skipped_record(step);
+                        manifest.steps.push(ManifestStep::from_record(&record));
+                        write_manifest(&self.manifest_path(&run_id), &manifest)?;
+                        idx += 1;
+                        continue;
+                    }
 
-            let record = self.execute_step(step, &mut state).await?;
-            manifest.feature_dir = state.feature_dir.clone();
-            manifest.steps.push(ManifestStep::from_record(&record));
-            write_manifest(&self.manifest_path(&run_id), &manifest)?;
+                    let record = self.execute_step(step, &mut state).await?;
+                    manifest.feature_dir = state.feature_dir.clone();
+                    manifest.steps.push(ManifestStep::from_record(&record));
+                    write_manifest(&self.manifest_path(&run_id), &manifest)?;
 
-            match record.status {
-                StepStatus::Success | StepStatus::Skipped => {}
-                StepStatus::Halted => {
-                    outcome_status = RunStatus::Halted;
-                    break;
+                    match record.status {
+                        StepStatus::Success | StepStatus::Skipped => {}
+                        StepStatus::Halted => {
+                            outcome_status = RunStatus::Halted;
+                            break 'outer;
+                        }
+                        StepStatus::Failed => {
+                            outcome_status = RunStatus::Failed;
+                            break 'outer;
+                        }
+                    }
+
+                    if input.dry_run && step.id() == "tasks" {
+                        outcome_status = RunStatus::Halted;
+                        break 'outer;
+                    }
+                    idx += 1;
                 }
-                StepStatus::Failed => {
-                    outcome_status = RunStatus::Failed;
-                    break;
+                Some(group_name) => {
+                    let group_name = group_name.to_owned();
+                    // Collect this run of consecutive steps with the same group name.
+                    let mut group_end = idx;
+                    while group_end < tail.len()
+                        && tail[group_end].parallel_group() == Some(group_name.as_str())
+                    {
+                        group_end += 1;
+                    }
+                    // 9.C.7 failure isolation: if any step in the group halts or
+                    // fails, stop running remaining steps in this group. Since
+                    // we run groups sequentially, this naturally leaves later
+                    // groups unaffected (we just break the outer loop).
+                    for step in &tail[idx..group_end] {
+                        if self.should_skip(step, &input) {
+                            let record = self.skipped_record(step);
+                            manifest.steps.push(ManifestStep::from_record(&record));
+                            write_manifest(&self.manifest_path(&run_id), &manifest)?;
+                            continue;
+                        }
+                        let record = self.execute_step(step, &mut state).await?;
+                        manifest.feature_dir = state.feature_dir.clone();
+                        manifest.steps.push(ManifestStep::from_record(&record));
+                        write_manifest(&self.manifest_path(&run_id), &manifest)?;
+                        match record.status {
+                            StepStatus::Success | StepStatus::Skipped => {}
+                            StepStatus::Halted => {
+                                outcome_status = RunStatus::Halted;
+                                break 'outer;
+                            }
+                            StepStatus::Failed => {
+                                outcome_status = RunStatus::Failed;
+                                break 'outer;
+                            }
+                        }
+                    }
+                    idx = group_end;
                 }
-            }
-
-            if input.dry_run && step.id() == "tasks" {
-                outcome_status = RunStatus::Halted;
-                break;
             }
         }
 
@@ -391,14 +441,82 @@ impl Runner {
             .feature_dir
             .clone()
             .ok_or_else(|| RunError::Config("assay requires feature_dir".to_owned()))?;
+        let reviewers: Vec<String> = self.config.tools().assay().reviewers().to_vec();
+        let on_split = self.config.tools().assay().on_split();
+        let fallback_role = self.config.tools().assay().role().to_owned();
+
+        if reviewers.len() <= 1 {
+            let reviewer_role = reviewers
+                .first()
+                .cloned()
+                .unwrap_or_else(|| fallback_role.clone());
+            let reviewer_dir = self.repo_root.join(&feature_dir).join("assay");
+            let outcome = match self
+                .run_reviewer_rounds(step, state, log_path, &reviewer_role, &reviewer_dir)
+                .await?
+            {
+                ReviewerRoundOutcome::Skipped => return Ok(StepExecution::skipped()),
+                ReviewerRoundOutcome::Decided(outcome) => outcome,
+            };
+            return match outcome.verdict.as_str() {
+                "accept" => Ok(StepExecution::success(vec![relative_to_root(
+                    &self.repo_root,
+                    outcome.verdict_path,
+                )?])),
+                "reject" => Ok(StepExecution::halted(
+                    vec![relative_to_root(&self.repo_root, outcome.verdict_path)?],
+                    "assay rejected",
+                )),
+                _ => Ok(StepExecution::halted(
+                    vec![relative_to_root(&self.repo_root, outcome.verdict_path)?],
+                    "assay requested revisions past configured rounds",
+                )),
+            };
+        }
+
+        // Multi-reviewer path.
+        // TODO(9.C.2): fan out with tokio::task::spawn_local or Arc<Self> for true parallelism.
+        // For now run reviewers sequentially; this still respects on_split semantics and is a
+        // meaningful improvement over the previous single-reviewer-only behaviour.
+        let _assay_max = self.config.parallelism().assay_max().max(1);
+        let mut outcomes: Vec<ReviewerOutcome> = Vec::with_capacity(reviewers.len());
+        for reviewer_role in &reviewers {
+            let reviewer_dir = self
+                .repo_root
+                .join(&feature_dir)
+                .join("assay")
+                .join(reviewer_role);
+            create_dir_all(&reviewer_dir)?;
+            match self
+                .run_reviewer_rounds(step, state, log_path, reviewer_role, &reviewer_dir)
+                .await?
+            {
+                ReviewerRoundOutcome::Skipped => return Ok(StepExecution::skipped()),
+                ReviewerRoundOutcome::Decided(outcome) => outcomes.push(outcome),
+            }
+        }
+
+        let combined_path = self
+            .repo_root
+            .join(&feature_dir)
+            .join("assay")
+            .join("verdict.md");
+        reconcile_verdicts(&outcomes, on_split, &combined_path, &self.repo_root)
+    }
+
+    async fn run_reviewer_rounds(
+        &self,
+        step: &PipelineStep,
+        state: &mut ExecutionState,
+        log_path: &Path,
+        reviewer_role: &str,
+        reviewer_dir: &Path,
+    ) -> Result<ReviewerRoundOutcome, RunError> {
+        let feature_dir = state
+            .feature_dir
+            .clone()
+            .ok_or_else(|| RunError::Config("assay requires feature_dir".to_owned()))?;
         let rounds = self.assay_rounds(step, state)?;
-        let reviewer_role = self
-            .config
-            .tools()
-            .assay()
-            .reviewers()
-            .first()
-            .map_or_else(|| self.config.tools().assay().role(), String::as_str);
         let spec = read_to_string(&self.repo_root.join(&feature_dir).join("spec.md"))?;
         let constitution = read_to_string(
             &self
@@ -416,15 +534,20 @@ impl Runner {
             if self.hosts.get("claude").is_none() {
                 tracing::warn!(
                     step = "assay",
+                    reviewer = reviewer_role,
                     reason = "codex requires TTY; claude host not registered, skipping assay"
                 );
-                return Ok(StepExecution::skipped());
+                return Ok(ReviewerRoundOutcome::Skipped);
             }
             tracing::warn!(
                 step = "assay",
+                reviewer = reviewer_role,
                 reason = "codex requires TTY; falling back to claude reviewer"
             );
         }
+
+        let verdict_path = reviewer_dir.join("verdict.md");
+        create_dir_all(parent(&verdict_path)?)?;
 
         for round in 1..=rounds {
             let plan = read_to_string(&self.repo_root.join(&feature_dir).join("plan.md"))?;
@@ -469,28 +592,17 @@ impl Runner {
                 id: step.id().to_owned(),
                 message: "could not parse verdict from reviewer response".to_owned(),
             })?;
-            let verdict_path = self
-                .repo_root
-                .join(&feature_dir)
-                .join("assay")
-                .join("verdict.md");
-            create_dir_all(parent(&verdict_path)?)?;
             let verdict_body = format!(
-                "model: {model_name}\nround: {round}\nverdict: {verdict}\n\n{response_text}"
+                "model: {model_name}\nreviewer: {reviewer_role}\nround: {round}\nverdict: {verdict}\n\n{response_text}"
             );
             write_file(&verdict_path, &verdict_body)?;
             match verdict {
-                "accept" => {
-                    return Ok(StepExecution::success(vec![relative_to_root(
-                        &self.repo_root,
-                        verdict_path,
-                    )?]));
-                }
-                "reject" => {
-                    return Ok(StepExecution::halted(
-                        vec![relative_to_root(&self.repo_root, verdict_path)?],
-                        "assay rejected",
-                    ));
+                "accept" | "reject" => {
+                    return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
+                        role: reviewer_role.to_owned(),
+                        verdict: verdict.to_owned(),
+                        verdict_path: verdict_path.clone(),
+                    }));
                 }
                 "revise" if round < rounds => {
                     let objections = suggested_revisions(&response_text).ok_or_else(|| {
@@ -503,16 +615,21 @@ impl Runner {
                     self.replan_from_objections(state, objections).await?;
                 }
                 "revise" => {
-                    return Ok(StepExecution::halted(
-                        vec![relative_to_root(&self.repo_root, verdict_path)?],
-                        "assay requested revisions past configured rounds",
-                    ));
+                    return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
+                        role: reviewer_role.to_owned(),
+                        verdict: "revise".to_owned(),
+                        verdict_path: verdict_path.clone(),
+                    }));
                 }
                 _ => unreachable_verdict(step.id())?,
             }
         }
 
-        Ok(StepExecution::halted(Vec::new(), "assay halted"))
+        Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
+            role: reviewer_role.to_owned(),
+            verdict: "revise".to_owned(),
+            verdict_path,
+        }))
     }
 
     /// Returns true when stdin is not a TTY and the configured reviewer role
@@ -625,12 +742,6 @@ impl Runner {
             if !seen.insert(step.id().to_owned()) {
                 return Err(RunError::Config(format!(
                     "pipeline.{}: duplicate step id",
-                    step.id()
-                )));
-            }
-            if let Some(group) = step.parallel_group() {
-                return Err(RunError::Config(format!(
-                    "pipeline.{}: parallel_group is not supported in T010; sequential execution only. Remove the field or wait for T015 (§9.C.4). Found {group:?}",
                     step.id()
                 )));
             }
@@ -931,6 +1042,19 @@ impl ExecutionState {
             feature_dir: None,
         }
     }
+}
+
+#[derive(Debug)]
+struct ReviewerOutcome {
+    role: String,
+    verdict: String,
+    verdict_path: PathBuf,
+}
+
+#[derive(Debug)]
+enum ReviewerRoundOutcome {
+    Decided(ReviewerOutcome),
+    Skipped,
 }
 
 struct StepExecution {
@@ -1424,6 +1548,91 @@ fn runner_name(runner: StepRunner) -> &'static str {
     }
 }
 
+fn reconcile_verdicts(
+    outcomes: &[ReviewerOutcome],
+    on_split: OnSplit,
+    combined_path: &Path,
+    repo_root: &Path,
+) -> Result<StepExecution, RunError> {
+    let all_accept = outcomes.iter().all(|o| o.verdict == "accept");
+    let summary = outcomes
+        .iter()
+        .map(|o| format!("- {}: {}", o.role, o.verdict))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let final_verdict: &str = match on_split {
+        OnSplit::Reject => {
+            if all_accept {
+                "accept"
+            } else {
+                "reject"
+            }
+        }
+        OnSplit::Majority => {
+            let accepts = outcomes.iter().filter(|o| o.verdict == "accept").count();
+            let rejects = outcomes.iter().filter(|o| o.verdict != "accept").count();
+            if accepts > rejects {
+                "accept"
+            } else {
+                "reject"
+            }
+        }
+        OnSplit::Human => {
+            if all_accept {
+                "accept"
+            } else {
+                let mut stdout = std::io::stdout();
+                let _ = writeln!(stdout, "Reviewer split:");
+                for o in outcomes {
+                    let _ = writeln!(stdout, "  {}: {}", o.role, o.verdict);
+                }
+                let _ = write!(stdout, "Accept overall? [y/N] ");
+                let _ = stdout.flush();
+                let mut answer = String::new();
+                std::io::stdin()
+                    .read_line(&mut answer)
+                    .map_err(|source| RunError::Io {
+                        path: PathBuf::from("<stdin>"),
+                        source,
+                    })?;
+                let trimmed = answer.trim();
+                if trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
+                    "accept"
+                } else {
+                    "reject"
+                }
+            }
+        }
+    };
+
+    let policy_name = match on_split {
+        OnSplit::Reject => "reject",
+        OnSplit::Human => "human",
+        OnSplit::Majority => "majority",
+    };
+    let body = format!(
+        "verdict: {final_verdict}\non_split: {policy_name}\nreviewers: {}\n\n{summary}\n",
+        outcomes.len()
+    );
+    write_file(combined_path, &body)?;
+    let combined_rel = relative_to_root(repo_root, combined_path.to_path_buf())?;
+    let mut artifacts = vec![combined_rel];
+    for o in outcomes {
+        if let Ok(rel) = relative_to_root(repo_root, o.verdict_path.clone()) {
+            artifacts.push(rel);
+        }
+    }
+
+    match final_verdict {
+        "accept" => Ok(StepExecution::success(artifacts)),
+        _ => Ok(StepExecution::halted(
+            artifacts,
+            format!("assay rejected (on_split: {policy_name})"),
+        )),
+    }
+}
+
 fn unreachable_verdict<T>(step_id: &str) -> Result<T, RunError> {
     Err(RunError::StepFailed {
         id: step_id.to_owned(),
@@ -1911,30 +2120,39 @@ fi
     }
 
     #[tokio::test]
-    async fn parallel_group_in_yaml_rejected_at_config_time() -> TestResult {
+    async fn parallel_group_accepted_in_config() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let bad = r#"  - id: bad
+        let pipe = r#"  - id: specify
     role: drafter
     host: claude
-    command: ok
-    parallel_group: group
+    command: "/speckit.specify {{prompt}}"
+  - id: writeA
+    runner: bash
+    command: "printf a > a.txt"
+    parallel_group: writing
+  - id: writeB
+    runner: bash
+    command: "printf b > b.txt"
+    parallel_group: writing
 "#;
-        let (_dir, runner) = runner(&yaml(bad, &reviewer.path().join("reviewer"))).await?;
-        let error = runner
+        let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        // Validation must accept parallel_group.
+        let outcome = runner
             .run_pipeline(
                 ADD_FEATURE_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
+                    run_id: Some("parallel-group".to_owned()),
                     ..PipelineInput::default()
                 },
             )
-            .await
-            .err()
-            .ok_or("parallel group should error")?;
-
-        assert!(error
-            .to_string()
-            .contains("parallel_group is not supported"));
+            .await?;
+        assert_eq!(outcome.status, RunStatus::Success);
+        assert!(dir.path().join("a.txt").exists());
+        assert!(dir.path().join("b.txt").exists());
+        // Recognize that both grouped steps ran in the same group order.
+        let ids: Vec<_> = outcome.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["specify", "writeA", "writeB"]);
         Ok(())
     }
 
@@ -2576,6 +2794,225 @@ state:
     fn suggested_revisions_extracts_only_block() -> TestResult {
         let text = "## Risks\nfull prompt\n## Suggested revisions\nonly this\n## Verdict\nrevise\n";
         assert_eq!(suggested_revisions(text), Some("only this"));
+        Ok(())
+    }
+
+    fn multi_reviewer_yaml(reviewer_clis: &[(&str, &Path)], on_split: &str) -> String {
+        // Build a config with N reviewer roles, each mapped to its own shell
+        // model. The pipeline runs specify → plan → assay → tasks. The assay
+        // step uses the configured reviewer list and on_split policy.
+        let mut models = String::new();
+        let mut roles = String::from(
+            "  drafter: shell-drafter\n  proposer: shell-drafter\n  reviewer: shell-drafter\n",
+        );
+        let mut reviewer_list = String::new();
+        // drafter model that always accepts (used by specify/plan/tasks bodies are
+        // produced by StaticHost; the model is only used if claude host fallback
+        // is hit, which it isn't in these tests).
+        models.push_str(
+            "  shell-drafter:\n    provider: shell\n    cli: \"/bin/echo\"\n    model: shell-drafter\n",
+        );
+        for (role, cli) in reviewer_clis {
+            let model_name = format!("model-{role}");
+            models.push_str(&format!(
+                "  {model_name}:\n    provider: shell\n    cli: \"{}\"\n    model: {model_name}\n",
+                cli.display()
+            ));
+            roles.push_str(&format!("  {role}: {model_name}\n"));
+            if !reviewer_list.is_empty() {
+                reviewer_list.push_str(", ");
+            }
+            reviewer_list.push_str(role);
+        }
+        format!(
+            r#"
+version: 1
+site:
+  name: test
+  prefix: tst
+models:
+{models}roles:
+{roles}tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [{reviewer_list}]
+    rounds: 1
+    on_split: {on_split}
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+pipeline:
+  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{{{prompt}}}}"
+  - id: plan
+    role: proposer
+    host: claude
+    command: "/speckit.plan"
+  - id: assay
+    runner: derrick
+    rounds: "1"
+    skippable: true
+  - id: tasks
+    role: drafter
+    host: claude
+    command: "/speckit.tasks"
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#
+        )
+    }
+
+    async fn multi_reviewer_runner(yaml: &str) -> TestResult<(TempDir, Runner)> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("derrick.yaml"), yaml)?;
+        std::fs::create_dir_all(dir.path().join(".specify/memory"))?;
+        std::fs::create_dir_all(dir.path().join(".derrick"))?;
+        std::fs::write(
+            dir.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )?;
+        let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
+        let substrate = NativeSubstrate::open(
+            NativeConfig {
+                db_path: dir.path().join(".derrick/derrick.db"),
+                worktree_root: dir.path().join(".derrick/worktrees"),
+            },
+            config.site().clone(),
+        )
+        .await?;
+        let mut hosts = HostRegistry::empty();
+        hosts.register(
+            "claude",
+            Box::new(StaticHost {
+                name: "claude",
+                fail: false,
+            }),
+        );
+        let repo_root = dir.path().to_path_buf();
+        Ok((
+            dir,
+            Runner::new(config, Arc::new(substrate), hosts, repo_root),
+        ))
+    }
+
+    #[tokio::test]
+    async fn multi_reviewer_all_accept() -> TestResult {
+        let accept_a = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let accept_b = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let yaml = multi_reviewer_yaml(
+            &[
+                ("reviewer_a", &accept_a.path().join("reviewer")),
+                ("reviewer_b", &accept_b.path().join("reviewer")),
+            ],
+            "reject",
+        );
+        let (dir, runner) = multi_reviewer_runner(&yaml).await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("multi-accept".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(outcome.status, RunStatus::Success);
+        let assay = outcome
+            .steps
+            .iter()
+            .find(|s| s.id == "assay")
+            .ok_or("assay step should exist")?;
+        assert_eq!(assay.status, StepStatus::Success);
+        let verdict = std::fs::read_to_string(dir.path().join("specs/001-test/assay/verdict.md"))?;
+        assert!(verdict.contains("verdict: accept"), "got: {verdict}");
+        assert!(verdict.contains("reviewer_a: accept"), "got: {verdict}");
+        assert!(verdict.contains("reviewer_b: accept"), "got: {verdict}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_reviewer_on_split_reject() -> TestResult {
+        let accept = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let reject = reviewer_script("#!/bin/sh\nprintf '## Verdict\\nreject\\n'")?;
+        let yaml = multi_reviewer_yaml(
+            &[
+                ("reviewer_a", &accept.path().join("reviewer")),
+                ("reviewer_b", &reject.path().join("reviewer")),
+            ],
+            "reject",
+        );
+        let (dir, runner) = multi_reviewer_runner(&yaml).await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("multi-reject".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(outcome.status, RunStatus::Halted);
+        let assay = outcome
+            .steps
+            .iter()
+            .find(|s| s.id == "assay")
+            .ok_or("assay step should exist")?;
+        assert_eq!(assay.status, StepStatus::Halted);
+        let verdict = std::fs::read_to_string(dir.path().join("specs/001-test/assay/verdict.md"))?;
+        assert!(verdict.contains("verdict: reject"), "got: {verdict}");
+        assert!(verdict.contains("on_split: reject"), "got: {verdict}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_reviewer_on_split_majority() -> TestResult {
+        let a = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let b = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let c = reviewer_script("#!/bin/sh\nprintf '## Verdict\\nreject\\n'")?;
+        let yaml = multi_reviewer_yaml(
+            &[
+                ("reviewer_a", &a.path().join("reviewer")),
+                ("reviewer_b", &b.path().join("reviewer")),
+                ("reviewer_c", &c.path().join("reviewer")),
+            ],
+            "majority",
+        );
+        let (dir, runner) = multi_reviewer_runner(&yaml).await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("multi-majority".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(outcome.status, RunStatus::Success);
+        let verdict = std::fs::read_to_string(dir.path().join("specs/001-test/assay/verdict.md"))?;
+        assert!(verdict.contains("verdict: accept"), "got: {verdict}");
+        assert!(verdict.contains("on_split: majority"), "got: {verdict}");
         Ok(())
     }
 }
