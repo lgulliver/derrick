@@ -62,15 +62,25 @@ case "$prompt" in
   *speckit.specify*)
     printf '{"feature_directory":"specs/001-test"}' > .specify/feature.json
     printf 'spec' > specs/001-test/spec.md
+    printf 'ok'
     ;;
   *speckit.plan*)
     printf 'plan' > specs/001-test/plan.md
+    printf 'ok'
     ;;
   *speckit.tasks*)
     printf 'tasks' > specs/001-test/tasks.md
+    printf 'ok'
+    ;;
+  *Verdict*|*Plan:*)
+    # D37 codex-fallback: assay invokes the claude host instead of codex
+    # in non-TTY contexts. Mirror the codex mock's verdict output.
+    printf '## Verdict\naccept\n'
+    ;;
+  *)
+    printf 'ok'
     ;;
 esac
-printf 'ok'
 "#,
     )?;
     write_executable(

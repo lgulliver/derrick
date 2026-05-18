@@ -720,15 +720,34 @@ impl Default for Copilot {
 }
 
 /// Git and PR stacking configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Git {
     stacking: Stacking,
+    branch_prefix: String,
 }
 
 impl Git {
     /// Returns stacking configuration.
     pub fn stacking(&self) -> &Stacking {
         &self.stacking
+    }
+
+    /// Returns the branch prefix used by Copilot dispatches.
+    ///
+    /// Defaults to `"derrick"`, producing branch names of the form
+    /// `derrick/<batch>/<ticket-id>` (see D19/§8.3). Override via
+    /// `tools.git.branch_prefix` in `derrick.yaml`.
+    pub fn branch_prefix(&self) -> &str {
+        &self.branch_prefix
+    }
+}
+
+impl Default for Git {
+    fn default() -> Self {
+        Self {
+            stacking: Stacking::default(),
+            branch_prefix: "derrick".to_owned(),
+        }
     }
 }
 
@@ -1693,16 +1712,20 @@ impl From<Copilot> for CopilotLayer {
 #[serde(deny_unknown_fields)]
 struct GitLayer {
     stacking: Option<StackingLayer>,
+    branch_prefix: Option<String>,
 }
 
 impl GitLayer {
     fn merge(&mut self, other: Self) {
         merge_nested(&mut self.stacking, other.stacking, StackingLayer::merge);
+        merge_scalar(&mut self.branch_prefix, other.branch_prefix);
     }
 
     fn finalize(self) -> Result<Git, ConfigError> {
+        let defaults = Git::default();
         Ok(Git {
             stacking: self.stacking.unwrap_or_default().finalize()?,
+            branch_prefix: self.branch_prefix.unwrap_or(defaults.branch_prefix),
         })
     }
 }
@@ -1711,6 +1734,7 @@ impl From<Git> for GitLayer {
     fn from(git: Git) -> Self {
         Self {
             stacking: Some(git.stacking.into()),
+            branch_prefix: Some(git.branch_prefix),
         }
     }
 }
@@ -2096,6 +2120,7 @@ state:
             config.tools().git().stacking().backend(),
             StackBackendKind::None
         );
+        assert_eq!(config.tools().git().branch_prefix(), "derrick");
     }
 
     #[test]
@@ -2567,6 +2592,7 @@ tools:
     enabled: true
     agent_identity: custom-hand
   git:
+    branch_prefix: "feature"
     stacking:
       backend: graphite
       branch_pattern: "stack/{{ticket_id}}"
@@ -2660,6 +2686,7 @@ state:
         assert_eq!(config.tools().git().stacking().force_push(), ForcePush::Off);
         assert!(config.tools().git().stacking().auto_pr());
         assert!(config.tools().git().stacking().draft());
+        assert_eq!(config.tools().git().branch_prefix(), "feature");
 
         assert_eq!(draft.id(), "draft");
         assert_eq!(draft.role(), Some("drafter"));

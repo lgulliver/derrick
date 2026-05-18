@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -243,6 +243,14 @@ impl Runner {
                 .hosts
                 .get(host_name)
                 .ok_or_else(|| RunError::Config(format!("host {host_name:?} is not registered")))?;
+            // D36: speckit's /specify command writes into `.specify/features/`.
+            // Headless host invocations cannot answer Write permission prompts
+            // for a directory that does not yet exist, so create the path up
+            // front. Safe to run on every invocation — `create_dir_all` is a
+            // no-op when the directory already exists.
+            if step.id() == "specify" {
+                create_dir_all(&self.repo_root.join(".specify").join("features"))?;
+            }
             let mut request = HostRequest::new(prompt, &self.repo_root);
             if host_name == "copilot" {
                 request.copilot_tools = CopilotToolPermission::AllowAll;
@@ -395,25 +403,63 @@ impl Runner {
                 .join(self.config.guardrails().constitution_path()),
         )?;
 
+        // D37: codex requires a TTY on stdin and aborts in headless contexts
+        // (CI, background subprocesses). When the reviewer resolves to the
+        // codex CLI and we have no TTY, fall back to the `claude` host. If
+        // claude is not registered we emit a warning and skip rather than
+        // erroring, mirroring `--skip assay` behaviour.
+        let codex_fallback = self.detect_codex_fallback(reviewer_role).await?;
+        if codex_fallback {
+            if self.hosts.get("claude").is_none() {
+                tracing::warn!(
+                    step = "assay",
+                    reason = "codex requires TTY; claude host not registered, skipping assay"
+                );
+                return Ok(StepExecution::skipped());
+            }
+            tracing::warn!(
+                step = "assay",
+                reason = "codex requires TTY; falling back to claude reviewer"
+            );
+        }
+
         for round in 1..=rounds {
             let plan = read_to_string(&self.repo_root.join(&feature_dir).join("plan.md"))?;
-            let model = resolve_role(
-                reviewer_role,
-                self.config.roles(),
-                self.config.models(),
-                &AuthStore::from_env(),
-            )
-            .await?;
-            let model_name = model.name().to_owned();
-            let response = model
-                .complete(completion_request(
-                    format!("Task: {}\n\nPlan:\n{plan}", state.prompt),
-                    Some(format!("Constitution:\n{constitution}\n\nSpec:\n{spec}")),
-                    Some(ASSAY_SYSTEM.to_owned()),
-                ))
+            let prompt = format!("Task: {}\n\nPlan:\n{plan}", state.prompt);
+            let cached = format!("Constitution:\n{constitution}\n\nSpec:\n{spec}");
+            let (response_text, model_name) = if codex_fallback {
+                let host = self.hosts.get("claude").ok_or_else(|| {
+                    RunError::Config("host \"claude\" is not registered".to_owned())
+                })?;
+                let full_prompt = format!("{ASSAY_SYSTEM}\n\n{cached}\n\n{prompt}");
+                let host_response = host
+                    .run(HostRequest::new(full_prompt, &self.repo_root))
+                    .await
+                    .map_err(|source| RunError::StepFailed {
+                        id: step.id().to_owned(),
+                        message: source.to_string(),
+                    })?;
+                (host_response.stdout, "claude".to_owned())
+            } else {
+                let model = resolve_role(
+                    reviewer_role,
+                    self.config.roles(),
+                    self.config.models(),
+                    &AuthStore::from_env(),
+                )
                 .await?;
-            append_log(log_path, &response.text)?;
-            let verdict = parse_verdict(&response.text).ok_or_else(|| RunError::StepFailed {
+                let name = model.name().to_owned();
+                let response = model
+                    .complete(completion_request(
+                        prompt,
+                        Some(cached),
+                        Some(ASSAY_SYSTEM.to_owned()),
+                    ))
+                    .await?;
+                (response.text, name)
+            };
+            append_log(log_path, &response_text)?;
+            let verdict = parse_verdict(&response_text).ok_or_else(|| RunError::StepFailed {
                 id: step.id().to_owned(),
                 message: "could not parse verdict from reviewer response".to_owned(),
             })?;
@@ -424,8 +470,7 @@ impl Runner {
                 .join("verdict.md");
             create_dir_all(parent(&verdict_path)?)?;
             let verdict_body = format!(
-                "model: {model_name}\nround: {round}\nverdict: {verdict}\n\n{}",
-                response.text
+                "model: {model_name}\nround: {round}\nverdict: {verdict}\n\n{response_text}"
             );
             write_file(&verdict_path, &verdict_body)?;
             match verdict {
@@ -442,7 +487,7 @@ impl Runner {
                     ));
                 }
                 "revise" if round < rounds => {
-                    let objections = suggested_revisions(&response.text).ok_or_else(|| {
+                    let objections = suggested_revisions(&response_text).ok_or_else(|| {
                         RunError::StepFailed {
                             id: step.id().to_owned(),
                             message: "could not parse suggested revisions from reviewer response"
@@ -462,6 +507,29 @@ impl Runner {
         }
 
         Ok(StepExecution::halted(Vec::new(), "assay halted"))
+    }
+
+    /// Returns true when stdin is not a TTY and the configured reviewer role
+    /// resolves to a codex-family model. Used by `execute_assay` to fall back
+    /// to the `claude` host (D37).
+    async fn detect_codex_fallback(&self, reviewer_role: &str) -> Result<bool, RunError> {
+        if std::io::stdin().is_terminal() {
+            return Ok(false);
+        }
+        // Inspect the role binding without spawning the model: a fallback
+        // decision should not depend on the model's cli being on PATH.
+        let Some(model_name) = self.config.roles().get(reviewer_role) else {
+            return Ok(false);
+        };
+        let Some(model_def) = self.config.models().get(model_name) else {
+            return Ok(false);
+        };
+        let codex_family = model_name.eq_ignore_ascii_case("codex")
+            || model_name.to_ascii_lowercase().starts_with("codex")
+            || model_def
+                .cli()
+                .is_some_and(|cli| cli.split_whitespace().next() == Some("codex"));
+        Ok(codex_family)
     }
 
     async fn replan_from_objections(
@@ -2187,6 +2255,314 @@ fi
             .ok_or("resume should refuse drift")?;
 
         assert!(error.to_string().contains("config has changed"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn specify_step_pre_creates_specify_features_dir() -> TestResult {
+        // D36: the runner must create `.specify/features/` before invoking
+        // the specify host so the host's writes do not block on a permission
+        // prompt the headless subprocess cannot answer.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct ProbeHost {
+            dir_existed_at_invocation: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl HostAdapter for ProbeHost {
+            fn name(&self) -> &str {
+                "claude"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
+                let exists = request.cwd.join(".specify/features").is_dir();
+                self.dir_existed_at_invocation
+                    .store(exists, Ordering::SeqCst);
+                // Still emit the feature.json so downstream steps don't fail.
+                let feature = request.cwd.join("specs/001-test");
+                std::fs::create_dir_all(&feature).map_err(|source| HostError::Io {
+                    host: "claude".to_owned(),
+                    source,
+                })?;
+                std::fs::write(
+                    request.cwd.join(FEATURE_JSON),
+                    r#"{"feature_directory":"specs/001-test"}"#,
+                )
+                .map_err(|source| HostError::Io {
+                    host: "claude".to_owned(),
+                    source,
+                })?;
+                std::fs::write(feature.join("spec.md"), "spec").map_err(|source| {
+                    HostError::Io {
+                        host: "claude".to_owned(),
+                        source,
+                    }
+                })?;
+                Ok(HostResponse {
+                    stdout: "ok\n".to_owned(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    elapsed: Duration::from_millis(1),
+                })
+            }
+        }
+
+        let dir = tempdir()?;
+        // Note: deliberately do NOT create `.specify/features` up front. The
+        // surrounding `.specify/memory/constitution.md` fixture only creates
+        // `.specify/memory/`, so the features subdirectory is absent until
+        // the runner pre-creates it.
+        std::fs::write(
+            dir.path().join("derrick.yaml"),
+            yaml(
+                r#"  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+"#,
+                Path::new("/nonexistent-reviewer"),
+            ),
+        )?;
+        std::fs::create_dir_all(dir.path().join(".specify/memory"))?;
+        std::fs::create_dir_all(dir.path().join(".derrick"))?;
+        std::fs::write(
+            dir.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )?;
+        let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
+        let substrate = NativeSubstrate::open(
+            NativeConfig {
+                db_path: dir.path().join(".derrick/derrick.db"),
+                worktree_root: dir.path().join(".derrick/worktrees"),
+            },
+            config.site().clone(),
+        )
+        .await?;
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut hosts = HostRegistry::empty();
+        hosts.register(
+            "claude",
+            Box::new(ProbeHost {
+                dir_existed_at_invocation: Arc::clone(&flag),
+            }),
+        );
+        let runner = Runner::new(config, Arc::new(substrate), hosts, dir.path().to_path_buf());
+        runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("specify-precreate".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert!(
+            flag.load(Ordering::SeqCst),
+            ".specify/features must exist before the specify host runs"
+        );
+        assert!(dir.path().join(".specify/features").is_dir());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn assay_falls_back_to_claude_when_codex_and_no_tty() -> TestResult {
+        // D37: when stdin is not a TTY and the reviewer role resolves to a
+        // codex-family model, the runner must call the claude host instead
+        // of spawning codex (which would abort with "stdin is not a
+        // terminal").
+        //
+        // Tests run under cargo without a TTY so `IsTerminal` already
+        // returns false for stdin; we only need to point the reviewer role
+        // at a codex-cli model and assert the claude host produced the
+        // verdict.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AssayClaudeHost {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl HostAdapter for AssayClaudeHost {
+            fn name(&self) -> &str {
+                "claude"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
+                // First call is the `/speckit.specify` write. Second is
+                // /speckit.plan. Third is the assay fallback.
+                let count = self.calls.fetch_add(1, Ordering::SeqCst);
+                let feature = request.cwd.join("specs/001-test");
+                std::fs::create_dir_all(feature.join("assay")).map_err(|source| HostError::Io {
+                    host: "claude".to_owned(),
+                    source,
+                })?;
+                if request.prompt.contains("speckit.specify") {
+                    std::fs::write(
+                        request.cwd.join(FEATURE_JSON),
+                        r#"{"feature_directory":"specs/001-test"}"#,
+                    )
+                    .map_err(|source| HostError::Io {
+                        host: "claude".to_owned(),
+                        source,
+                    })?;
+                    std::fs::write(feature.join("spec.md"), "spec").map_err(|source| {
+                        HostError::Io {
+                            host: "claude".to_owned(),
+                            source,
+                        }
+                    })?;
+                } else if request.prompt.contains("speckit.plan") {
+                    std::fs::write(feature.join("plan.md"), "plan").map_err(|source| {
+                        HostError::Io {
+                            host: "claude".to_owned(),
+                            source,
+                        }
+                    })?;
+                } else if request.prompt.contains("speckit.tasks") {
+                    std::fs::write(feature.join("tasks.md"), "tasks").map_err(|source| {
+                        HostError::Io {
+                            host: "claude".to_owned(),
+                            source,
+                        }
+                    })?;
+                }
+                let stdout =
+                    if request.prompt.contains("Verdict") || request.prompt.contains("Plan:") {
+                        // The assay system prompt includes "## Verdict" verbatim;
+                        // recognize the assay call and emit an accept verdict.
+                        "## Verdict\naccept\n".to_owned()
+                    } else {
+                        "ok\n".to_owned()
+                    };
+                let _ = count;
+                Ok(HostResponse {
+                    stdout,
+                    stderr: String::new(),
+                    exit_code: 0,
+                    elapsed: Duration::from_millis(1),
+                })
+            }
+        }
+
+        let dir = tempdir()?;
+        // The `codex` model definition points at a non-existent cli on
+        // purpose: detect_codex_fallback inspects the config, not the
+        // process, so the model is never spawned.
+        let yaml = r#"
+version: 1
+site:
+  name: test
+  prefix: tst
+models:
+  codex:
+    provider: shell
+    cli: "codex exec"
+    model: codex
+roles:
+  drafter: codex
+  proposer: codex
+  reviewer: codex
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: 1
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+pipeline:
+  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+  - id: plan
+    role: proposer
+    host: claude
+    command: "/speckit.plan"
+  - id: assay
+    runner: derrick
+    rounds: "{{tools.assay.rounds}}"
+    skippable: true
+  - id: tasks
+    role: drafter
+    host: claude
+    command: "/speckit.tasks"
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#;
+        std::fs::write(dir.path().join("derrick.yaml"), yaml)?;
+        std::fs::create_dir_all(dir.path().join(".specify/memory"))?;
+        std::fs::create_dir_all(dir.path().join(".derrick"))?;
+        std::fs::write(
+            dir.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )?;
+        let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
+        let substrate = NativeSubstrate::open(
+            NativeConfig {
+                db_path: dir.path().join(".derrick/derrick.db"),
+                worktree_root: dir.path().join(".derrick/worktrees"),
+            },
+            config.site().clone(),
+        )
+        .await?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hosts = HostRegistry::empty();
+        hosts.register(
+            "claude",
+            Box::new(AssayClaudeHost {
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let runner = Runner::new(config, Arc::new(substrate), hosts, dir.path().to_path_buf());
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("codex-fallback".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Success);
+        let assay = outcome
+            .steps
+            .iter()
+            .find(|step| step.id == "assay")
+            .ok_or("assay step should exist")?;
+        assert_eq!(assay.status, StepStatus::Success);
+        // Verdict file recorded the fallback model name.
+        let verdict = std::fs::read_to_string(dir.path().join("specs/001-test/assay/verdict.md"))?;
+        assert!(
+            verdict.contains("model: claude"),
+            "verdict.md should record the claude fallback, got: {verdict}"
+        );
         Ok(())
     }
 

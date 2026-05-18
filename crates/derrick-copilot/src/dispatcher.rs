@@ -19,7 +19,7 @@ use derrick_substrate_native::NativeSubstrate;
 use tokio::time::Instant;
 use tracing::{error, info, instrument, warn};
 
-use crate::branch::{default_branch_name, BranchCreator, BranchError};
+use crate::branch::{branch_name, BranchCreator, BranchError};
 use crate::client::{CopilotDispatchClient, CopilotDispatchError, PrInfo};
 
 /// Runtime configuration for [`CopilotHandDispatcher`]. Sourced from
@@ -37,6 +37,10 @@ pub struct CopilotHandDispatcherConfig {
     /// Stable identity prefix used when minting hand ids. The dispatcher
     /// appends a short random suffix so multiple dispatches do not collide.
     pub agent_identity: String,
+    /// Prefix applied to dispatch branch names. Combined with the ticket
+    /// batch and id to form `<prefix>/<batch>/<ticket-id>`. Sourced from
+    /// `tools.git.branch_prefix`; defaults to `"derrick"`.
+    pub branch_prefix: String,
 }
 
 impl Default for CopilotHandDispatcherConfig {
@@ -46,6 +50,7 @@ impl Default for CopilotHandDispatcherConfig {
             poll_timeout: Duration::from_secs(60 * 10),
             base_branch: "main".to_owned(),
             agent_identity: "derrick-hand".to_owned(),
+            branch_prefix: "derrick".to_owned(),
         }
     }
 }
@@ -117,7 +122,7 @@ impl CopilotHandDispatcher {
             .batch
             .as_ref()
             .map(derrick_substrate::BatchName::as_str);
-        default_branch_name(batch, ticket.id.as_str())
+        branch_name(&self.config.branch_prefix, batch, ticket.id.as_str())
     }
 }
 
@@ -390,6 +395,7 @@ mod tests {
             poll_timeout: Duration::from_millis(200),
             base_branch: "main".to_owned(),
             agent_identity: "copilot-test".to_owned(),
+            branch_prefix: "derrick".to_owned(),
         }
     }
 
@@ -537,6 +543,7 @@ mod tests {
             poll_timeout: Duration::from_millis(80),
             base_branch: "main".to_owned(),
             agent_identity: "copilot-test".to_owned(),
+            branch_prefix: "derrick".to_owned(),
         };
         let dispatcher = CopilotHandDispatcher::new(
             Arc::clone(&substrate),

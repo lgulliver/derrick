@@ -150,11 +150,13 @@ impl BranchCreator for GitBranchCreator {
 }
 
 /// Convenience: return a default branch name following the
-/// `derrick/<batch>/<ticket-id>` pattern (D19/§8.3). `batch` is the batch
-/// name when the ticket is in one, otherwise `"ad-hoc"`.
-pub fn default_branch_name(batch: Option<&str>, ticket_id: &str) -> String {
+/// `<prefix>/<batch>/<ticket-id>` pattern (D19/§8.3). `batch` is the
+/// batch name when the ticket is in one, otherwise `"ad-hoc"`. `prefix`
+/// is sourced from `tools.git.branch_prefix` in `derrick.yaml`
+/// (default `"derrick"`).
+pub fn branch_name(prefix: &str, batch: Option<&str>, ticket_id: &str) -> String {
     let batch = batch.unwrap_or("ad-hoc");
-    format!("derrick/{batch}/{ticket_id}")
+    format!("{prefix}/{batch}/{ticket_id}")
 }
 
 /// Returns the repo root passed to this `GitBranchCreator`. Useful in tests.
@@ -187,15 +189,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn default_branch_name_includes_batch_and_ticket() {
+    #[test]
+    fn branch_name_uses_configured_prefix() {
         assert_eq!(
-            default_branch_name(Some("batch-1"), "drk-001"),
-            "derrick/batch-1/drk-001"
+            branch_name("feature", Some("b1"), "t001"),
+            "feature/b1/t001"
         );
+        assert_eq!(branch_name("ops", None, "t002"), "ops/ad-hoc/t002");
+    }
+
+    #[test]
+    fn branch_name_defaults_to_derrick() {
         assert_eq!(
-            default_branch_name(None, "drk-002"),
-            "derrick/ad-hoc/drk-002"
+            branch_name("derrick", Some("b1"), "t001"),
+            "derrick/b1/t001"
         );
     }
 

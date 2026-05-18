@@ -123,6 +123,7 @@ fn build_dispatcher(
             poll_timeout: config.tools().copilot().poll_timeout(),
             base_branch: "main".to_owned(),
             agent_identity: config.tools().copilot().agent_identity().to_owned(),
+            branch_prefix: config.tools().git().branch_prefix().to_owned(),
         };
         let branch_creator = Arc::new(GitBranchCreator::new(repo_root.to_path_buf()))
             as Arc<dyn derrick_copilot::BranchCreator>;
