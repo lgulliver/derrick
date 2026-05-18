@@ -15,7 +15,7 @@ mod process;
 
 pub mod hosts;
 
-pub use hosts::{ClaudeHost, CodexHost, CopilotHost};
+pub use hosts::{ClaudeHost, CodexHost, CopilotHost, OpencodeHost};
 
 /// One host CLI that derrick can invoke.
 #[async_trait]
@@ -137,12 +137,13 @@ pub struct HostRegistry {
 }
 
 impl HostRegistry {
-    /// Returns a registry pre-populated with claude, codex, and copilot.
+    /// Returns a registry pre-populated with claude, codex, copilot, and opencode.
     pub fn with_defaults() -> Self {
         let mut registry = Self::empty();
         registry.register("claude", Box::new(ClaudeHost::new()));
         registry.register("codex", Box::new(CodexHost::new()));
         registry.register("copilot", Box::new(CopilotHost::new()));
+        registry.register("opencode", Box::new(OpencodeHost::new()));
         registry
     }
 

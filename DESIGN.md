@@ -706,17 +706,17 @@ The same binary may serve both roles via different paths.
 #### Respecting the host's own rules
 
 When derrick invokes a step on a **host** CLI (claude / codex /
-copilot), it deliberately does **not** inject a system prompt,
-override the host's context, or bypass the host's rule loading.
-The contract:
+copilot / opencode), it deliberately does **not** inject a system
+prompt, override the host's context, or bypass the host's rule
+loading. The contract:
 
 - Derrick passes the working directory (the user's repo) and the
   step command. That's it.
 - The host loads its **own** files: `CLAUDE.md`, `AGENTS.md`,
   sub-agents under `.claude/agents/`, skills under
   `.claude/skills/`, plugins, hooks, `.codex/`, `~/.codex/`,
-  `.github/copilot-instructions.md`, etc. Derrick does not touch
-  any of this.
+  `.github/copilot-instructions.md`, `.opencode/agents/`, etc.
+  Derrick does not touch any of this.
 - Sub-agent spawn within a step (e.g. `Agent({subagent_type:
   "Explore"})`) is the host's decision; derrick doesn't see it
   and doesn't intercede.
@@ -1659,10 +1659,11 @@ links back to the section where it lives.
 | D38 | **Each pipeline run gets an isolated git worktree (§9.C.5).** `run_pipeline_from` calls `git worktree add -b derrick/<run-id> .derrick/worktrees/<run-id> HEAD` before the first step and `git worktree remove --force` on completion. The substrate's `reserve_worktree` / `close_worktree` methods are added to the `Substrate` trait so the `Runner` can track the lifecycle via `Arc<dyn Substrate>`. All host-request CWDs and bash `current_dir` use the worktree path; `relative_to_root` and manifest paths continue to use `repo_root`. Degradation: if `git worktree add` fails (no binary, dirty index), setup logs a warning and the run continues in `repo_root` — no crash. | §9.C.5 |
 | D40 | **Token counts and cost estimates are tracked per pipeline step and per run.** `CompletionResponse.tokens_in/out` are threaded through `StepExecution` → `StepRecord` → `ManifestStep` and accumulated into `RunManifest.tokens_in/out`. `RunOutcome.cost_estimate_usd(model_name)` uses a built-in pricing table (`builtin_cost_hint`) seeded with current list prices for Claude Opus/Sonnet/Haiku, GPT-4o/mini, and Gemini 2.5. Host-subprocess steps (claude CLI, copilot CLI) report zero at this layer; their token counts appear separately in `derrick gain` via Claude Code JSONL. `derrick gain --run <id>` shows a per-step breakdown from the manifest; session-level `gain` shows estimated dollar cost alongside token totals. | §9.B / `derrick-models` |
 | D39 | **Adversarial code review fires before every PR, not after.** `derrick ticket code-review <id> --branch <branch> --round N` diffs `origin/<base>...<branch>` (three-dot), passes the diff + ticket requirements to a configured reviewer role, and exits 0 (pass) or 3 (issues found). Hands must call this and get a pass before calling `derrick ticket review`. Auto-remediation is hand-driven: the hand reads `.derrick/reviews/<id>/round-N.md`, fixes, and retries up to `tools.code_review.rounds` times. Beyond that, the hand surfaces the report to the human. Exit code 3 (not 1) lets hands distinguish "fix needed" from infrastructure errors. Disabled by default (`tools.code_review.enabled: false`). | §8.6 / AGENTS.md hand protocol |
+| D41 | **OpenCode is a first-class host.** `derrick-tools` gains an `OpencodeHost` adapter that invokes `opencode run "<prompt>" --dir <cwd> [--dangerously-skip-permissions]`. `derrick-scrub` gains an `opencode` rule set that strips the startup banner, tool-use progress lines, spinner frames, thinking markers, and cost footers. Specialist sub-agents are published under `.opencode/agents/` with opencode frontmatter (`mode: agent`). The `HostRegistry` default set now includes `opencode` alongside `claude`, `codex`, and `copilot`. | §6.5 / `derrick-tools` / `derrick-scrub` |
 
 ### Remaining open questions
 
-None blocking. All v1 design questions resolved (D1–D40).
+None blocking. All v1 design questions resolved (D1–D41).
 
 New questions raised during implementation will be tracked as
 GitHub issues with the `design-question` label, and locked-in

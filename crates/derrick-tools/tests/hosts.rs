@@ -330,10 +330,13 @@ printf 'no-model'
 }
 
 #[test]
-fn registry_with_defaults_has_three_hosts() {
+fn registry_with_defaults_has_four_hosts() {
     let registry = HostRegistry::with_defaults();
 
-    assert_eq!(registry.names(), vec!["claude", "codex", "copilot"]);
+    assert_eq!(
+        registry.names(),
+        vec!["claude", "codex", "copilot", "opencode"]
+    );
 }
 
 #[test]

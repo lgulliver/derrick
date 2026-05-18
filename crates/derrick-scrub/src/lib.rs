@@ -28,6 +28,7 @@ impl Scrubber {
         scrubber.register("claude", rules::claude::rules());
         scrubber.register("codex", rules::codex::rules());
         scrubber.register("copilot", rules::copilot::rules());
+        scrubber.register("opencode", rules::opencode::rules());
         scrubber.register("cargo", rules::cargo::rules());
         scrubber
     }

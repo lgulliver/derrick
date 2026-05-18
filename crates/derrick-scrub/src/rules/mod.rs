@@ -16,3 +16,5 @@ pub mod gh;
 pub mod git;
 /// Rules for `gt`.
 pub mod gt;
+/// Rules for OpenCode.
+pub mod opencode;

@@ -8,7 +8,7 @@
 
 1. [`AGENTS.md`](./AGENTS.md) — operational contract for all agents
    building derrick.
-2. [`DESIGN.md`](./DESIGN.md) — the architecture and the 40
+2. [`DESIGN.md`](./DESIGN.md) — the architecture and the 41
    recorded decisions (§12). This is the source of truth; do not
    contradict it without going through `design-keeper`.
 3. `.claude/agents/<name>.md` — pick your specialist via the
@@ -34,7 +34,7 @@ asks you to make. See AGENTS.md "Orchestration model".
   rules).
 - **Stay in scope**: a bug fix touches the crate that owns the bug.
   Cross-crate refactors go through `rust-architect` first.
-- **Don't relitigate D1–D40.** They're decided. File a
+- **Don't relitigate D1–D41.** They're decided. File a
   `design-question` issue if you genuinely think one is wrong.
 
 The rest is in AGENTS.md. Don't duplicate it here.

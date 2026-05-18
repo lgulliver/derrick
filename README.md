@@ -179,13 +179,15 @@ derrick gain
 
 `anthropic` · `openai` · `gemini` · `bedrock` · `azure-openai` · `ollama` · `copilot-cli`
 
+**Hosts:** `claude` · `codex` · `copilot` · `opencode`
+
 Configured per pipeline step in `derrick.yaml`. Bring your own model on any step.
 
 ---
 
 ## Status
 
-**Active development.** Architecture and 40 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 41 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -217,7 +219,7 @@ What's landed and tested:
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 40 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 41 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 

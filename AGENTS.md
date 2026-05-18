@@ -11,7 +11,7 @@ Derrick is a unified front door over **speckit**, an in-process
 one primary command (`/add-feature`).
 
 The full design is in [`DESIGN.md`](./DESIGN.md). It is the source
-of truth. Forty decisions are recorded in §12 as **D1–D40**;
+of truth. Forty-one decisions are recorded in §12 as **D1–D41**;
 do not re-litigate them without filing a `design-question` issue
 and updating §12 with a new `D` entry.
 
@@ -217,6 +217,7 @@ Stop and ask the human via `derrick mail --human`
 - Claude Code: `.claude/agents/<your-name>.md`
 - Codex: `.codex/agents/<your-name>.md` (also referenced from `.codex/instructions.md`)
 - GitHub Copilot: `.github/agents/<your-name>.md` (also referenced from `.github/copilot-instructions.md`)
+- OpenCode: `.opencode/agents/<your-name>.md`
 
 The body is identical across hosts. Only the frontmatter format
 differs (Claude Code uses YAML; Codex and Copilot use plain
