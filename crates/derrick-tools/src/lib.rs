@@ -43,6 +43,15 @@ pub struct HostRequest {
     pub env: HashMap<String, String>,
     /// Copilot-specific tool permission override.
     pub copilot_tools: CopilotToolPermission,
+    /// Run the host in headless mode — suppress interactive permission prompts.
+    ///
+    /// Pipeline steps always set this to `true`: derrick's pipeline runs without
+    /// a terminal and cannot answer interactive prompts. Host adapters map this
+    /// to their CLI's equivalent flag (`--dangerously-skip-permissions` for
+    /// `claude`; `--yes` / `--no-interactive` for other hosts). Defaults to
+    /// `false` so interactive invocations (e.g. `derrick run` in a developer
+    /// terminal) retain the host's normal confirmation behaviour.
+    pub headless: bool,
 }
 
 impl HostRequest {
@@ -54,6 +63,7 @@ impl HostRequest {
             timeout: Duration::from_secs(600),
             env: HashMap::new(),
             copilot_tools: CopilotToolPermission::Default,
+            headless: false,
         }
     }
 }
