@@ -1574,6 +1574,20 @@ entry). `state.json` is gitignored too. The yaml is committed.
 - Evaluate `@github/copilot-sdk` for in-process Copilot dispatch
   (potential replacement for the `copilot` CLI backend).
 - Optional Slack feedback hook so hand completions ping a channel.
+- **Adversarial code review before PR open** — extend the assay
+  pattern from plans (§7) to code. After a hand finishes writing
+  code in its worktree and before the PR opens, a different-family
+  reviewer (codex / another configured `reviewer` role) reads the
+  diff + the spec + the constitution and produces a structured
+  verdict (`accept | revise | reject`). On `revise` the hand is
+  reopened with the objections; on `reject` the ticket transitions
+  to `Blocked` with the verdict attached. Likely lands as a new
+  step type in `derrick-stack` between "code ready" and "PR open",
+  or as part of T012 foreman's verifier loop. Inherits the
+  multi-reviewer reconciliation logic from §9.C.2 (`on_split`).
+  Fits the D31 verifiability pillar — observing the diff before
+  it crosses the model/PR boundary is the same "earn its place"
+  principle scrub/caveman use for tokens.
 
 ---
 
