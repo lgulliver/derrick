@@ -1,0 +1,987 @@
+//! Foreman loop. See DESIGN.md §8.6 and ticket T012.
+//!
+//! The foreman owns the periodic state-machine maintenance pass for crew
+//! mode: it cleans up abandoned worktrees and hands, verifies `InReview`
+//! tickets against git (D31), reconciles `Ready` tickets whose work merged
+//! externally (D33), unblocks dependency-blocked tickets, and dispatches
+//! `Ready` tickets to a `HandDispatcher`.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use derrick_config::Config;
+use derrick_substrate::{
+    EventKind, EventScope, HandId, InReviewMetadata, Substrate, SubstrateError, Ticket, TicketId,
+};
+use thiserror::Error;
+use tokio::process::Command;
+
+use crate::NativeSubstrate;
+
+/// Lightweight cross-reference against git + GitHub PR state.
+///
+/// Per D33 the verifier trusts git history over PR metadata. The trait
+/// exposes both so the verifier can reconcile the two when they disagree
+/// (e.g. squash-merge or force-push).
+#[async_trait]
+pub trait RepoState: Send + Sync {
+    /// Is `head_sha` present on `target_branch`'s ancestry as of now?
+    async fn target_contains_sha(
+        &self,
+        target_branch: &str,
+        head_sha: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// PR state for `branch`. Used to distinguish "still open" from
+    /// "actively rejected" when `target_contains_sha` is false.
+    async fn pr_status(
+        &self,
+        branch: &str,
+    ) -> Result<PrStatus, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Merge SHA the PR reports, when gh reports merged. The verifier
+    /// still confirms via `target_contains_sha`.
+    async fn pr_merge_sha(
+        &self,
+        branch: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// PR lifecycle state as reported by gh.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PrStatus {
+    /// The PR is open.
+    Open,
+    /// The PR is merged.
+    Merged,
+    /// The PR was closed without merging.
+    ClosedUnmerged,
+    /// gh reports no PR for this branch.
+    NotFound,
+}
+
+/// Production `RepoState` impl that shells out to `git` and `gh`.
+///
+/// Each call spawns a subprocess; the implementation is deliberately
+/// stateless so callers can construct fresh instances per tick.
+pub struct GhRepoState {
+    repo_root: PathBuf,
+}
+
+impl GhRepoState {
+    /// Construct a `GhRepoState` rooted at `repo_root` (the directory
+    /// containing the `.git` folder).
+    pub fn new(repo_root: PathBuf) -> Self {
+        Self { repo_root }
+    }
+}
+
+#[async_trait]
+impl RepoState for GhRepoState {
+    async fn target_contains_sha(
+        &self,
+        target_branch: &str,
+        head_sha: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        // `git merge-base --is-ancestor <sha> <ref>` exits 0 if ancestor.
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_root)
+            .arg("merge-base")
+            .arg("--is-ancestor")
+            .arg(head_sha)
+            .arg(target_branch)
+            .output()
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+        Ok(output.status.success())
+    }
+
+    async fn pr_status(
+        &self,
+        branch: &str,
+    ) -> Result<PrStatus, Box<dyn std::error::Error + Send + Sync>> {
+        let output = Command::new("gh")
+            .arg("pr")
+            .arg("view")
+            .arg(branch)
+            .arg("--json")
+            .arg("state")
+            .arg("-q")
+            .arg(".state")
+            .current_dir(&self.repo_root)
+            .output()
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+        if !output.status.success() {
+            return Ok(PrStatus::NotFound);
+        }
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        match state.as_str() {
+            "OPEN" => Ok(PrStatus::Open),
+            "MERGED" => Ok(PrStatus::Merged),
+            "CLOSED" => Ok(PrStatus::ClosedUnmerged),
+            _ => Ok(PrStatus::NotFound),
+        }
+    }
+
+    async fn pr_merge_sha(
+        &self,
+        branch: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let output = Command::new("gh")
+            .arg("pr")
+            .arg("view")
+            .arg(branch)
+            .arg("--json")
+            .arg("mergeCommit")
+            .arg("-q")
+            .arg(".mergeCommit.oid")
+            .current_dir(&self.repo_root)
+            .output()
+            .await
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if sha.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(sha))
+        }
+    }
+}
+
+/// Result of a successful `HandDispatcher::dispatch` call.
+#[derive(Clone, Debug)]
+pub struct DispatchResult {
+    /// The hand the dispatcher reserved for the ticket.
+    pub hand: HandId,
+    /// `true` when the dispatcher synchronously moved the ticket to
+    /// `InReview` (rare; used by human hands that complete work in-process).
+    pub completed_synchronously: bool,
+}
+
+/// Errors returned by `HandDispatcher::dispatch`.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum DispatchError {
+    /// The dispatcher kind has no implementation in v1; T013 wires up the
+    /// real Copilot adapter.
+    #[error("dispatcher kind {kind} not implemented in v1; see T013")]
+    NotImplemented {
+        /// Dispatcher kind identifier.
+        kind: &'static str,
+    },
+    /// Substrate-side error during dispatch.
+    #[error("substrate error: {0}")]
+    Substrate(#[from] SubstrateError),
+    /// I/O error during dispatch (e.g. spawning a child process).
+    #[error("dispatch io: {0}")]
+    Io(std::io::Error),
+}
+
+/// Trait T013 will implement against. T012 ships two stubs:
+/// [`HumanHandDispatcher`] and [`CopilotStubDispatcher`].
+#[async_trait]
+pub trait HandDispatcher: Send + Sync {
+    /// Identifier for telemetry; matches `derrick.yaml` hand kind
+    /// (`claude` | `copilot` | `human`).
+    fn kind(&self) -> &'static str;
+
+    /// Reserve a hand for `ticket` and start the work. See trait docs in
+    /// T012 for the contract.
+    async fn dispatch(
+        &self,
+        ticket: &Ticket,
+        worktree_root: &Path,
+    ) -> Result<DispatchResult, DispatchError>;
+}
+
+/// Human-hand dispatcher: emits a `Note` event marking the ticket ready
+/// for human work and leaves it `InFlight` until the user runs
+/// `derrick ticket review`.
+pub struct HumanHandDispatcher {
+    substrate: Arc<NativeSubstrate>,
+    hand: HandId,
+}
+
+impl HumanHandDispatcher {
+    /// Construct a human dispatcher pinned to `hand`.
+    pub fn new(substrate: Arc<NativeSubstrate>, hand: HandId) -> Self {
+        Self { substrate, hand }
+    }
+}
+
+#[async_trait]
+impl HandDispatcher for HumanHandDispatcher {
+    fn kind(&self) -> &'static str {
+        "human"
+    }
+
+    async fn dispatch(
+        &self,
+        ticket: &Ticket,
+        _worktree_root: &Path,
+    ) -> Result<DispatchResult, DispatchError> {
+        // Atomically Ready -> InFlight + owner = self.hand.
+        self.substrate
+            .assign_to_hand(&ticket.id, &self.hand)
+            .await?;
+        // Surface the human task in the activity log.
+        self.substrate
+            .record_typed_event(
+                EventScope::Ticket(ticket.id.clone()),
+                EventKind::Note {
+                    body: format!("human hand: ticket {} is ready for work", ticket.id),
+                },
+            )
+            .await?;
+        Ok(DispatchResult {
+            hand: self.hand.clone(),
+            completed_synchronously: false,
+        })
+    }
+}
+
+/// Copilot dispatcher placeholder. Returns `DispatchError::NotImplemented`
+/// pointing at T013.
+pub struct CopilotStubDispatcher;
+
+impl CopilotStubDispatcher {
+    /// Construct the stub. No state needed.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for CopilotStubDispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl HandDispatcher for CopilotStubDispatcher {
+    fn kind(&self) -> &'static str {
+        "copilot"
+    }
+
+    async fn dispatch(
+        &self,
+        _ticket: &Ticket,
+        _worktree_root: &Path,
+    ) -> Result<DispatchResult, DispatchError> {
+        Err(DispatchError::NotImplemented { kind: "copilot" })
+    }
+}
+
+/// Errors returned by `Foreman::tick`.
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum ForemanError {
+    /// Substrate-side error during tick.
+    #[error("substrate error: {0}")]
+    Substrate(#[from] SubstrateError),
+    /// `RepoState` returned an error during a verifier check.
+    #[error("repo state check failed: {0}")]
+    RepoState(Box<dyn std::error::Error + Send + Sync>),
+    /// I/O error during cleanup (e.g. `git worktree remove`).
+    #[error("io error at {path}: {source}")]
+    Io {
+        /// Path the error occurred on.
+        path: PathBuf,
+        /// Source I/O error.
+        source: std::io::Error,
+    },
+}
+
+/// Structured report of what a single `tick` performed. Returned so callers
+/// (tests, CLI `foreman tick`, observability) can audit the pass.
+#[derive(Clone, Debug, Default)]
+pub struct TickReport {
+    /// Cleanup actions taken in step 1.
+    pub cleanup_actions: Vec<CleanupAction>,
+    /// Verifier outcomes from step 2 and 3.
+    pub verifier_actions: Vec<VerifierAction>,
+    /// Tickets unblocked in step 4.
+    pub unblocked: Vec<TicketId>,
+    /// Tickets dispatched in step 5.
+    pub dispatched: Vec<TicketId>,
+}
+
+/// One cleanup action performed during step 1.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum CleanupAction {
+    /// An abandoned worktree row was deleted.
+    PrunedAbandonedWorktree {
+        /// Run id of the pruned worktree.
+        run_id: String,
+    },
+    /// A ticket owned by a stale hand was released to `Ready`.
+    RequeuedAbandonedHand {
+        /// Ticket released.
+        ticket: TicketId,
+        /// Hand that had been owning it.
+        hand: HandId,
+    },
+    /// A stale `InReview` ticket was added to the eager verifier queue.
+    TriggeredStaleInReviewCheck {
+        /// Ticket added.
+        ticket: TicketId,
+    },
+}
+
+/// One verifier outcome from step 2 or step 3.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum VerifierAction {
+    /// `InReview` ticket merged: transitioned to `Done`.
+    Merged {
+        /// Ticket transitioned.
+        ticket: TicketId,
+        /// Merge SHA recorded.
+        merge_sha: String,
+    },
+    /// `InReview` ticket landed `Blocked` (D32 — PR closed unmerged).
+    Unmerged {
+        /// Ticket transitioned.
+        ticket: TicketId,
+        /// Human-readable reason.
+        reason: String,
+    },
+    /// Ticket left in place; verifier emitted an escalation event.
+    StuckEscalated {
+        /// Ticket escalated.
+        ticket: TicketId,
+    },
+    /// Re-queued `Ready` ticket reconciled to `Done` from git (D33).
+    ReconciledFromGit {
+        /// Ticket reconciled.
+        ticket: TicketId,
+        /// Merge SHA recorded.
+        merge_sha: String,
+    },
+}
+
+/// Per-tick configuration knobs sourced from `tools.foreman` in
+/// `derrick.yaml`.
+#[derive(Clone, Debug)]
+pub struct ForemanTtls {
+    /// Time between `tick()` iterations when running attached.
+    pub poll_interval: Duration,
+    /// Maximum age of an `InReview` ticket before the verifier eagerly
+    /// re-checks it.
+    pub in_review_ttl: chrono::Duration,
+    /// Maximum gap since a hand's last heartbeat before the cleanup pass
+    /// releases its tickets.
+    pub hand_ttl: chrono::Duration,
+    /// Maximum age of an open worktree row before the cleanup pass prunes
+    /// it.
+    pub worktree_ttl: chrono::Duration,
+}
+
+impl Default for ForemanTtls {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_secs(10),
+            in_review_ttl: chrono::Duration::hours(24),
+            hand_ttl: chrono::Duration::minutes(30),
+            worktree_ttl: chrono::Duration::hours(24),
+        }
+    }
+}
+
+/// The foreman loop. Construct one per process and either call `tick()`
+/// directly (tests, CLI `foreman tick`) or `run_attached()` to enter the
+/// poll loop.
+pub struct Foreman {
+    substrate: Arc<NativeSubstrate>,
+    target_branch: String,
+    repo_state: Box<dyn RepoState>,
+    repo_root: PathBuf,
+    dispatcher: Box<dyn HandDispatcher>,
+    batch_max: u32,
+    ttls: ForemanTtls,
+    exit_when_idle: bool,
+}
+
+impl Foreman {
+    /// Construct a `Foreman` from a substrate, config, repo-state adapter,
+    /// repo root, and dispatcher. TTLs default to the values in
+    /// `ForemanTtls::default`.
+    pub fn new(
+        substrate: Arc<NativeSubstrate>,
+        config: Config,
+        repo_state: Box<dyn RepoState>,
+        repo_root: PathBuf,
+        dispatcher: Box<dyn HandDispatcher>,
+    ) -> Self {
+        let batch_max = config.parallelism().batch_max();
+        Self {
+            substrate,
+            target_branch: "main".to_owned(),
+            repo_state,
+            repo_root,
+            dispatcher,
+            batch_max,
+            ttls: ForemanTtls::default(),
+            exit_when_idle: false,
+        }
+    }
+
+    /// Override TTL configuration.
+    pub fn with_ttls(mut self, ttls: ForemanTtls) -> Self {
+        self.ttls = ttls;
+        self
+    }
+
+    /// Override the target branch (defaults to `"main"`).
+    pub fn with_target_branch(mut self, branch: impl Into<String>) -> Self {
+        self.target_branch = branch.into();
+        self
+    }
+
+    /// Set the `exit_when_idle` flag. When `true`, `run_attached` returns
+    /// after the first tick that produced no actions.
+    pub fn with_exit_when_idle(mut self, exit: bool) -> Self {
+        self.exit_when_idle = exit;
+        self
+    }
+
+    /// Override the dispatch parallelism cap. Defaults to
+    /// `config.parallelism().batch_max()`.
+    pub fn with_batch_max(mut self, batch_max: u32) -> Self {
+        self.batch_max = batch_max;
+        self
+    }
+
+    /// Run a single tick. Public so tests and the CLI can drive it
+    /// deterministically.
+    pub async fn tick(&self) -> Result<TickReport, ForemanError> {
+        let mut report = TickReport::default();
+
+        // Step 1: cleanup pass.
+        self.cleanup_pass(&mut report).await?;
+
+        // Step 2: verifier pass over all InReview tickets.
+        let inreview = self.substrate.list_inreview_ticket_ids().await?;
+        for ticket_id in inreview {
+            self.verify_in_review_ticket(&ticket_id, &mut report)
+                .await?;
+        }
+
+        // Step 3: D33 pre-dispatch reconciliation.
+        let ready_with_history = self
+            .substrate
+            .list_ready_tickets_with_inreview_history()
+            .await?;
+        for ticket in ready_with_history {
+            self.reconcile_ready_ticket(&ticket, &mut report).await?;
+        }
+
+        // Step 4: unblock dependency-blocked tickets whose predecessors
+        // are all terminal.
+        self.unblock_dependencies(&mut report).await?;
+
+        // Step 5: dispatch up to batch_max - inflight tickets.
+        self.dispatch_ready(&mut report).await?;
+
+        Ok(report)
+    }
+
+    /// Run `tick()` in a foreground loop until shutdown signal or
+    /// `exit_when_idle` becomes true and a tick produced no actions.
+    pub async fn run_attached(&self) -> Result<(), ForemanError> {
+        let mut sigterm = signal_stream_or_err(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigint = signal_stream_or_err(tokio::signal::unix::SignalKind::interrupt())?;
+        loop {
+            let report = self.tick().await?;
+            if self.exit_when_idle && report_is_idle(&report) {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(self.ttls.poll_interval) => {}
+                _ = sigterm.recv() => return Ok(()),
+                _ = sigint.recv() => return Ok(()),
+            }
+        }
+    }
+
+    async fn cleanup_pass(&self, report: &mut TickReport) -> Result<(), ForemanError> {
+        let now = Utc::now();
+
+        // 1a: prune abandoned worktrees past TTL.
+        let worktree_threshold = now - self.ttls.worktree_ttl;
+        let stale_worktrees = self
+            .substrate
+            .list_stale_open_worktrees(worktree_threshold)
+            .await?;
+        for record in stale_worktrees {
+            // Try to remove the on-disk worktree; swallow not-found errors
+            // but propagate genuine I/O failures.
+            let _ = Command::new("git")
+                .arg("-C")
+                .arg(&self.repo_root)
+                .arg("worktree")
+                .arg("remove")
+                .arg("--force")
+                .arg(&record.path)
+                .output()
+                .await
+                .map_err(|source| ForemanError::Io {
+                    path: record.path.clone(),
+                    source,
+                })?;
+            self.substrate.delete_worktree_row(&record.run_id).await?;
+            self.substrate
+                .record_typed_event(
+                    EventScope::Worktree {
+                        run_id: record.run_id.clone(),
+                    },
+                    EventKind::WorktreeAbandoned {
+                        run_id: record.run_id.clone(),
+                        reason: "cleanup pass: worktree past TTL".to_owned(),
+                    },
+                )
+                .await?;
+            report
+                .cleanup_actions
+                .push(CleanupAction::PrunedAbandonedWorktree {
+                    run_id: record.run_id,
+                });
+        }
+
+        // 1b: walk .derrick/.adopt-stage-* directories past TTL.
+        self.cleanup_adopt_stage_dirs(report, worktree_threshold)
+            .await?;
+
+        // 1c: release tickets owned by stale hands.
+        let hand_threshold = now - self.ttls.hand_ttl;
+        let stale_hands = self.substrate.list_stale_hands(hand_threshold).await?;
+        for hand in stale_hands {
+            let inflight = self.substrate.list_inflight_tickets_owned_by(&hand).await?;
+            for ticket_id in inflight {
+                let reason = format!(
+                    "hand abandoned: last seen before {}",
+                    hand_threshold.to_rfc3339()
+                );
+                self.substrate.release_from_hand(&ticket_id, reason).await?;
+                self.substrate
+                    .record_typed_event(
+                        EventScope::Hand(hand.clone()),
+                        EventKind::HandAbandoned {
+                            previous_owner_of: ticket_id.clone(),
+                        },
+                    )
+                    .await?;
+                report
+                    .cleanup_actions
+                    .push(CleanupAction::RequeuedAbandonedHand {
+                        ticket: ticket_id,
+                        hand: hand.clone(),
+                    });
+            }
+        }
+
+        // 1d: list stale InReview tickets (so the verifier pass can pick
+        // them up this tick rather than waiting another poll cycle).
+        let inreview_threshold = now - self.ttls.in_review_ttl;
+        let stale_inreview = self
+            .substrate
+            .list_stale_inreview_tickets(inreview_threshold)
+            .await?;
+        for ticket_id in stale_inreview {
+            report
+                .cleanup_actions
+                .push(CleanupAction::TriggeredStaleInReviewCheck { ticket: ticket_id });
+        }
+
+        Ok(())
+    }
+
+    async fn cleanup_adopt_stage_dirs(
+        &self,
+        _report: &mut TickReport,
+        threshold: chrono::DateTime<Utc>,
+    ) -> Result<(), ForemanError> {
+        let derrick_dir = self.repo_root.join(".derrick");
+        let entries = match std::fs::read_dir(&derrick_dir) {
+            Ok(iter) => iter,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(ForemanError::Io {
+                    path: derrick_dir,
+                    source,
+                });
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|source| ForemanError::Io {
+                path: derrick_dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(".adopt-stage-") {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(source) => {
+                    return Err(ForemanError::Io {
+                        path: path.clone(),
+                        source,
+                    });
+                }
+            };
+            if !metadata.is_dir() {
+                continue;
+            }
+            let modified = match metadata.modified() {
+                Ok(time) => time,
+                Err(source) => {
+                    return Err(ForemanError::Io {
+                        path: path.clone(),
+                        source,
+                    });
+                }
+            };
+            let modified: chrono::DateTime<Utc> = modified.into();
+            if modified >= threshold {
+                continue;
+            }
+            if let Err(source) = std::fs::remove_dir_all(&path) {
+                return Err(ForemanError::Io {
+                    path: path.clone(),
+                    source,
+                });
+            }
+            self.substrate
+                .record_typed_event(
+                    EventScope::Site,
+                    EventKind::Note {
+                        body: format!("removed stale adopt stage dir: {}", path.display()),
+                    },
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn verify_in_review_ticket(
+        &self,
+        id: &TicketId,
+        report: &mut TickReport,
+    ) -> Result<(), ForemanError> {
+        let Some(metadata) = self.substrate.most_recent_in_review_metadata(id).await? else {
+            // No InReview event recorded — leave it alone; this is the
+            // pre-D33 case where a ticket landed in InReview without
+            // metadata. The eager-verifier escalation below covers TTL.
+            return Ok(());
+        };
+        let InReviewMetadata {
+            branch,
+            pr_url,
+            head_sha,
+            ..
+        } = metadata;
+
+        // Fast-forward path: head SHA on target.
+        if self
+            .repo_state
+            .target_contains_sha(&self.target_branch, &head_sha)
+            .await
+            .map_err(ForemanError::RepoState)?
+        {
+            let merge_sha = if pr_url.is_some() {
+                self.repo_state
+                    .pr_merge_sha(&branch)
+                    .await
+                    .map_err(ForemanError::RepoState)?
+                    .unwrap_or_else(|| head_sha.clone())
+            } else {
+                head_sha.clone()
+            };
+            self.substrate
+                .verify_ticket_merged(id, head_sha, merge_sha.clone())
+                .await?;
+            report.verifier_actions.push(VerifierAction::Merged {
+                ticket: id.clone(),
+                merge_sha,
+            });
+            return Ok(());
+        }
+
+        // PR-driven paths: consult gh.
+        let status = self
+            .repo_state
+            .pr_status(&branch)
+            .await
+            .map_err(ForemanError::RepoState)?;
+        match status {
+            PrStatus::Merged => {
+                // Squash/rebase: head_sha not on target, but PR reports
+                // merged. Confirm the merge commit lives on target.
+                let merge_sha = self
+                    .repo_state
+                    .pr_merge_sha(&branch)
+                    .await
+                    .map_err(ForemanError::RepoState)?;
+                if let Some(sha) = merge_sha {
+                    let on_target = self
+                        .repo_state
+                        .target_contains_sha(&self.target_branch, &sha)
+                        .await
+                        .map_err(ForemanError::RepoState)?;
+                    if on_target {
+                        self.substrate
+                            .verify_ticket_merged(id, head_sha, sha.clone())
+                            .await?;
+                        report.verifier_actions.push(VerifierAction::Merged {
+                            ticket: id.clone(),
+                            merge_sha: sha,
+                        });
+                        return Ok(());
+                    }
+                }
+                // gh says merged but target doesn't have the SHA. Escalate
+                // and leave the ticket InReview (D33 prefers loud over
+                // silent).
+                self.substrate
+                    .record_typed_event(
+                        EventScope::Ticket(id.clone()),
+                        EventKind::EscalationStuckInReview {
+                            ticket: id.clone(),
+                            branch: branch.clone(),
+                        },
+                    )
+                    .await?;
+                report
+                    .verifier_actions
+                    .push(VerifierAction::StuckEscalated { ticket: id.clone() });
+            }
+            PrStatus::ClosedUnmerged => {
+                self.substrate
+                    .verify_ticket_unmerged(id, branch.clone(), pr_url.clone())
+                    .await?;
+                report.verifier_actions.push(VerifierAction::Unmerged {
+                    ticket: id.clone(),
+                    reason: format!("pr closed unmerged: {branch}"),
+                });
+            }
+            PrStatus::NotFound => {
+                // If past the TTL, escalate.
+                let ticket = self.substrate.get_ticket(id).await?.ok_or_else(|| {
+                    SubstrateError::NotFound {
+                        kind: "ticket",
+                        id: id.to_string(),
+                    }
+                })?;
+                let threshold = Utc::now() - self.ttls.in_review_ttl;
+                if ticket.updated_at < threshold {
+                    self.substrate
+                        .record_typed_event(
+                            EventScope::Ticket(id.clone()),
+                            EventKind::EscalationStuckInReview {
+                                ticket: id.clone(),
+                                branch: branch.clone(),
+                            },
+                        )
+                        .await?;
+                    report
+                        .verifier_actions
+                        .push(VerifierAction::StuckEscalated { ticket: id.clone() });
+                }
+            }
+            PrStatus::Open => {
+                // Leave alone; rechecked next tick.
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_ready_ticket(
+        &self,
+        ticket: &Ticket,
+        report: &mut TickReport,
+    ) -> Result<(), ForemanError> {
+        let Some(metadata) = self
+            .substrate
+            .most_recent_in_review_metadata(&ticket.id)
+            .await?
+        else {
+            return Ok(());
+        };
+        let InReviewMetadata {
+            branch,
+            pr_url,
+            head_sha,
+            ..
+        } = metadata;
+
+        // Fast-forward path.
+        if self
+            .repo_state
+            .target_contains_sha(&self.target_branch, &head_sha)
+            .await
+            .map_err(ForemanError::RepoState)?
+        {
+            let merge_sha = if pr_url.is_some() {
+                self.repo_state
+                    .pr_merge_sha(&branch)
+                    .await
+                    .map_err(ForemanError::RepoState)?
+                    .unwrap_or_else(|| head_sha.clone())
+            } else {
+                head_sha.clone()
+            };
+            self.substrate
+                .reconcile_ticket_done_from_git(&ticket.id, head_sha, merge_sha.clone())
+                .await?;
+            report
+                .verifier_actions
+                .push(VerifierAction::ReconciledFromGit {
+                    ticket: ticket.id.clone(),
+                    merge_sha,
+                });
+            return Ok(());
+        }
+
+        // Squash-merge path.
+        let status = self
+            .repo_state
+            .pr_status(&branch)
+            .await
+            .map_err(ForemanError::RepoState)?;
+        if status != PrStatus::Merged {
+            return Ok(());
+        }
+        let Some(sha) = self
+            .repo_state
+            .pr_merge_sha(&branch)
+            .await
+            .map_err(ForemanError::RepoState)?
+        else {
+            return Ok(());
+        };
+        let on_target = self
+            .repo_state
+            .target_contains_sha(&self.target_branch, &sha)
+            .await
+            .map_err(ForemanError::RepoState)?;
+        if !on_target {
+            return Ok(());
+        }
+        self.substrate
+            .reconcile_ticket_done_from_git(&ticket.id, head_sha, sha.clone())
+            .await?;
+        report
+            .verifier_actions
+            .push(VerifierAction::ReconciledFromGit {
+                ticket: ticket.id.clone(),
+                merge_sha: sha,
+            });
+        Ok(())
+    }
+
+    async fn unblock_dependencies(&self, report: &mut TickReport) -> Result<(), ForemanError> {
+        let candidates = self.substrate.list_dependency_blocked_ticket_ids().await?;
+        for ticket_id in candidates {
+            let predecessors = self.substrate.blocks_predecessors(&ticket_id).await?;
+            let mut all_terminal = true;
+            for predecessor in &predecessors {
+                let pred = self.substrate.get_ticket(predecessor).await?;
+                let Some(pred) = pred else {
+                    all_terminal = false;
+                    break;
+                };
+                if !pred.state.is_terminal() {
+                    all_terminal = false;
+                    break;
+                }
+            }
+            if !all_terminal {
+                continue;
+            }
+            // Skip the vacuous-predecessor case: if there are no recorded
+            // `blocks` predecessors, the dependency block is malformed
+            // — leave it for human triage instead of silently unblocking.
+            if predecessors.is_empty() {
+                continue;
+            }
+            self.substrate.unblock_ticket(&ticket_id).await?;
+            report.unblocked.push(ticket_id);
+        }
+        Ok(())
+    }
+
+    async fn dispatch_ready(&self, report: &mut TickReport) -> Result<(), ForemanError> {
+        let inflight = self.substrate.count_inflight_tickets().await?;
+        let cap = u64::from(self.batch_max);
+        if inflight >= cap {
+            return Ok(());
+        }
+        let mut budget = cap - inflight;
+        let ready = self.substrate.list_ready_tickets_ordered().await?;
+        for ticket in ready {
+            if budget == 0 {
+                break;
+            }
+            match self.dispatcher.dispatch(&ticket, &self.repo_root).await {
+                Ok(_) => {
+                    report.dispatched.push(ticket.id.clone());
+                    budget -= 1;
+                }
+                Err(DispatchError::NotImplemented { kind }) => {
+                    // Surface the T013 pointer as an event; don't fail the tick.
+                    self.substrate
+                        .record_typed_event(
+                            EventScope::Ticket(ticket.id.clone()),
+                            EventKind::Note {
+                                body: format!(
+                                    "dispatcher kind {kind} not implemented in v1; see T013"
+                                ),
+                            },
+                        )
+                        .await?;
+                }
+                Err(DispatchError::Substrate(error)) => return Err(error.into()),
+                Err(DispatchError::Io(source)) => {
+                    return Err(ForemanError::Io {
+                        path: self.repo_root.clone(),
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn report_is_idle(report: &TickReport) -> bool {
+    report.cleanup_actions.is_empty()
+        && report.verifier_actions.is_empty()
+        && report.unblocked.is_empty()
+        && report.dispatched.is_empty()
+}
+
+fn signal_stream_or_err(
+    kind: tokio::signal::unix::SignalKind,
+) -> Result<tokio::signal::unix::Signal, ForemanError> {
+    tokio::signal::unix::signal(kind).map_err(|source| ForemanError::Io {
+        path: PathBuf::from("<signal>"),
+        source,
+    })
+}
+
+#[cfg(test)]
+mod tests;

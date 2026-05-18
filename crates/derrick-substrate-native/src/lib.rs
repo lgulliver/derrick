@@ -7,17 +7,19 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use derrick_config::Site;
 use derrick_substrate::{
-    Batch, BatchName, Event, EventKind, ForemanMode, ForemanStatus, Hand, HandId, HandKind, Link,
-    LinkKind, NewEvent, NewTicket, Substrate, SubstrateError, Ticket, TicketFilter, TicketId,
-    TicketState,
+    Batch, BatchName, BlockReason, Event, EventId, EventKind, EventScope, ForemanMode,
+    ForemanStatus, Hand, HandId, HandKind, InReviewMetadata, Link, LinkKind, ManualDoneAttestation,
+    NewEvent, NewTicket, Substrate, SubstrateError, Ticket, TicketFilter, TicketId, TicketState,
+    TypedEvent,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use tokio::task;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const READER_POOL_SIZE: usize = 4;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_initial.sql");
+const MIGRATION_0002: &str = include_str!("../migrations/0002_state_machine_integrity.sql");
 
 /// Configuration for opening the native substrate.
 #[derive(Clone, Debug)]
@@ -29,10 +31,6 @@ pub struct NativeConfig {
 }
 
 /// SQLite-backed substrate implementation.
-///
-/// Foreman mode is v1-derived from persisted pid only: no pid reports
-/// `Stopped`, and any pid reports `Detached`. `Attached` has no native write
-/// path until the T008 foreman loop extends the schema.
 #[derive(Clone)]
 pub struct NativeSubstrate {
     site: Site,
@@ -119,11 +117,15 @@ impl NativeSubstrate {
                     params![run_id, branch, path_for_db.to_string_lossy(), now],
                 )
                 .map_err(conflict_or_sql)?;
-            insert_event(
+            insert_typed_event_raw(
                 connection,
-                EventKind::Note,
-                None,
-                &format!("WorktreeReserved {run_id}"),
+                &EventScope::Worktree {
+                    run_id: run_id.clone(),
+                },
+                &EventKind::WorktreeReserved {
+                    run_id: run_id.clone(),
+                    branch: branch.clone(),
+                },
             )?;
             Ok(path)
         })
@@ -135,11 +137,14 @@ impl NativeSubstrate {
         let run_id = run_id.to_owned();
         self.run_write(move |connection| {
             ensure_worktree_exists(connection, &run_id)?;
-            insert_event(
+            insert_typed_event_raw(
                 connection,
-                EventKind::Note,
-                None,
-                &format!("WorktreeFinalized {run_id}"),
+                &EventScope::Worktree {
+                    run_id: run_id.clone(),
+                },
+                &EventKind::WorktreeFinalized {
+                    run_id: run_id.clone(),
+                },
             )?;
             Ok(())
         })
@@ -154,11 +159,15 @@ impl NativeSubstrate {
                 .execute("DELETE FROM worktrees WHERE run_id = ?1", params![run_id])
                 .map_err(sql_error)?;
             if changed == 1 {
-                insert_event(
+                insert_typed_event_raw(
                     connection,
-                    EventKind::Note,
-                    None,
-                    &format!("WorktreeRolledBack {run_id}"),
+                    &EventScope::Worktree {
+                        run_id: run_id.clone(),
+                    },
+                    &EventKind::WorktreeAbandoned {
+                        run_id: run_id.clone(),
+                        reason: "rollback".to_owned(),
+                    },
                 )?;
             }
             Ok(())
@@ -178,11 +187,14 @@ impl NativeSubstrate {
                 )
                 .map_err(sql_error)?;
             if changed == 1 {
-                insert_event(
+                insert_typed_event_raw(
                     connection,
-                    EventKind::Note,
-                    None,
-                    &format!("WorktreeClosed {run_id}"),
+                    &EventScope::Worktree {
+                        run_id: run_id.clone(),
+                    },
+                    &EventKind::WorktreeFinalized {
+                        run_id: run_id.clone(),
+                    },
                 )?;
             }
             Ok(())
@@ -212,6 +224,268 @@ impl NativeSubstrate {
             Ok(rows)
         })
         .await
+    }
+
+    /// Delete a worktree row outright. Used by the foreman cleanup pass after
+    /// it has pruned the on-disk directory.
+    pub(crate) async fn delete_worktree_row(&self, run_id: &str) -> Result<(), SubstrateError> {
+        let run_id = run_id.to_owned();
+        self.run_write(move |connection| {
+            connection
+                .execute("DELETE FROM worktrees WHERE run_id = ?1", params![run_id])
+                .map_err(sql_error)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Open worktree rows whose `created_at` is older than `threshold`.
+    pub(crate) async fn list_stale_open_worktrees(
+        &self,
+        threshold: DateTime<Utc>,
+    ) -> Result<Vec<WorktreeRecord>, SubstrateError> {
+        let threshold_text = format_time(threshold);
+        self.run_read(move |connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT run_id, branch, path, created_at, closed_at FROM worktrees
+                     WHERE closed_at IS NULL AND created_at < ?1
+                     ORDER BY created_at, run_id",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map(params![threshold_text], worktree_from_row)
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// Hand ids whose `last_seen` predates `threshold` (or who have never
+    /// reported a heartbeat).
+    pub(crate) async fn list_stale_hands(
+        &self,
+        threshold: DateTime<Utc>,
+    ) -> Result<Vec<HandId>, SubstrateError> {
+        let threshold_text = format_time(threshold);
+        self.run_read(move |connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id FROM hands
+                     WHERE last_seen IS NULL OR last_seen < ?1
+                     ORDER BY id",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map(params![threshold_text], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            rows.into_iter().map(HandId::new).collect()
+        })
+        .await
+    }
+
+    /// Tickets currently `InFlight` owned by the given hand.
+    pub(crate) async fn list_inflight_tickets_owned_by(
+        &self,
+        hand: &HandId,
+    ) -> Result<Vec<TicketId>, SubstrateError> {
+        let hand = hand.clone();
+        self.run_read(move |connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id FROM tickets WHERE state = 'in_flight' AND owner = ?1
+                     ORDER BY created_at, id",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map(params![hand.as_str()], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            rows.into_iter().map(TicketId::new).collect()
+        })
+        .await
+    }
+
+    /// `InReview` tickets whose `updated_at` predates `threshold`.
+    pub(crate) async fn list_stale_inreview_tickets(
+        &self,
+        threshold: DateTime<Utc>,
+    ) -> Result<Vec<TicketId>, SubstrateError> {
+        let threshold_text = format_time(threshold);
+        self.run_read(move |connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id FROM tickets
+                     WHERE state = 'in_review' AND updated_at < ?1
+                     ORDER BY updated_at, id",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map(params![threshold_text], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            rows.into_iter().map(TicketId::new).collect()
+        })
+        .await
+    }
+
+    /// All ticket ids currently in `InReview`.
+    pub(crate) async fn list_inreview_ticket_ids(&self) -> Result<Vec<TicketId>, SubstrateError> {
+        self.run_read(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id FROM tickets WHERE state = 'in_review'
+                     ORDER BY updated_at, id",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            rows.into_iter().map(TicketId::new).collect()
+        })
+        .await
+    }
+
+    /// Count tickets currently `InFlight`.
+    pub(crate) async fn count_inflight_tickets(&self) -> Result<u64, SubstrateError> {
+        self.run_read(|connection| {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM tickets WHERE state = 'in_flight'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(sql_error)?;
+            Ok(u64::try_from(count).unwrap_or(0))
+        })
+        .await
+    }
+
+    /// Ready tickets ordered by ordinal (NULL last), then created_at, then id.
+    pub(crate) async fn list_ready_tickets_ordered(&self) -> Result<Vec<Ticket>, SubstrateError> {
+        self.run_read(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id FROM tickets WHERE state = 'ready'
+                     ORDER BY ordinal IS NULL, ordinal, created_at, id",
+                )
+                .map_err(sql_error)?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            ids.into_iter()
+                .map(|id| TicketId::new(id).and_then(|id| select_ticket(connection, &id)))
+                .collect()
+        })
+        .await
+    }
+
+    /// Blocked tickets whose `block_reason` discriminator is `dependency`.
+    pub(crate) async fn list_dependency_blocked_ticket_ids(
+        &self,
+    ) -> Result<Vec<TicketId>, SubstrateError> {
+        self.run_read(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id FROM tickets
+                     WHERE state = 'blocked' AND block_reason = 'dependency'
+                     ORDER BY id",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            rows.into_iter().map(TicketId::new).collect()
+        })
+        .await
+    }
+
+    /// Ready tickets that have at least one prior
+    /// `TicketTransitionedToInReview` event in their history.
+    pub(crate) async fn list_ready_tickets_with_inreview_history(
+        &self,
+    ) -> Result<Vec<Ticket>, SubstrateError> {
+        self.run_read(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT DISTINCT t.id
+                     FROM tickets t
+                     INNER JOIN events e ON e.ticket = t.id
+                     WHERE t.state = 'ready'
+                       AND e.kind = 'ticket_transitioned_to_in_review'
+                     ORDER BY t.id",
+                )
+                .map_err(sql_error)?;
+            let ids = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            ids.into_iter()
+                .map(|id| TicketId::new(id).and_then(|id| select_ticket(connection, &id)))
+                .collect()
+        })
+        .await
+    }
+
+    /// Most-recent `TicketTransitionedToInReview` metadata for `id`, if any.
+    pub(crate) async fn most_recent_in_review_metadata(
+        &self,
+        id: &TicketId,
+    ) -> Result<Option<InReviewMetadata>, SubstrateError> {
+        let id = id.clone();
+        self.run_read(move |connection| {
+            let row: Option<String> = connection
+                .query_row(
+                    "SELECT body FROM events
+                     WHERE ticket = ?1
+                       AND kind = 'ticket_transitioned_to_in_review'
+                     ORDER BY rowid DESC LIMIT 1",
+                    params![id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(sql_error)?;
+            let Some(body) = row else { return Ok(None) };
+            let kind: EventKind = serde_json::from_str(&body).map_err(json_error)?;
+            match kind {
+                EventKind::TicketTransitionedToInReview {
+                    branch,
+                    pr_url,
+                    pr_number,
+                    head_sha,
+                } => Ok(Some(InReviewMetadata {
+                    branch,
+                    pr_url,
+                    pr_number,
+                    head_sha,
+                })),
+                _ => Ok(None),
+            }
+        })
+        .await
+    }
+
+    /// `blocks`-link predecessors for `id` (tickets `id` is blocked by).
+    pub(crate) async fn blocks_predecessors(
+        &self,
+        id: &TicketId,
+    ) -> Result<Vec<TicketId>, SubstrateError> {
+        let id = id.clone();
+        self.run_read(move |connection| select_outgoing_blocks_predecessors(connection, &id))
+            .await
     }
 
     async fn run_read<F, R>(&self, operation: F) -> Result<R, SubstrateError>
@@ -320,8 +594,9 @@ impl Substrate for NativeSubstrate {
             transaction
                 .execute(
                     "INSERT INTO tickets
-                     (id, batch, ordinal, title, body, state, owner, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'ready', NULL, ?6, ?6)",
+                     (id, batch, ordinal, title, body, state, owner, merge_sha,
+                      block_reason, block_reason_detail, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'ready', NULL, NULL, NULL, NULL, ?6, ?6)",
                     params![
                         ticket.id.as_str(),
                         ticket.batch.as_ref().map(BatchName::as_str),
@@ -340,7 +615,13 @@ impl Substrate for NativeSubstrate {
                     )
                     .map_err(sql_error)?;
             }
-            insert_event(&transaction, EventKind::TicketCreated, Some(&ticket.id), "")?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(ticket.id.clone()),
+                &EventKind::TicketCreated {
+                    initial_state: TicketState::Ready,
+                },
+            )?;
             let persisted = select_ticket(&transaction, &ticket.id)?;
             transaction.commit().map_err(sql_error)?;
             Ok(persisted)
@@ -368,39 +649,521 @@ impl Substrate for NativeSubstrate {
         &self,
         id: &TicketId,
         state: TicketState,
-        reason: Option<String>,
+        _reason: Option<String>,
+    ) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_read(move |connection| {
+            let current = select_ticket(connection, &id)?;
+            if current.state == state {
+                return Ok(current);
+            }
+            Err(set_ticket_state_redirect(state))
+        })
+        .await
+    }
+
+    async fn assign_to_hand(&self, id: &TicketId, hand: &HandId) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        let hand = hand.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state != TicketState::Ready {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!("assign_to_hand requires Ready; ticket is {}", current.state),
+                });
+            }
+            ensure_hand_exists(&transaction, &hand)?;
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'in_flight', owner = ?1, updated_at = ?2
+                     WHERE id = ?3",
+                    params![hand.as_str(), now_text(), id.as_str()],
+                )
+                .map_err(conflict_or_sql)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: TicketState::Ready,
+                    to: TicketState::InFlight,
+                    reason: None,
+                },
+            )?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketAssigned { hand: hand.clone() },
+            )?;
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
+    async fn release_from_hand(
+        &self,
+        id: &TicketId,
+        reason: String,
     ) -> Result<Ticket, SubstrateError> {
         let id = id.clone();
         self.run_write(move |connection| {
             let transaction = connection.transaction().map_err(sql_error)?;
-            let batch: Option<String> = transaction
-                .query_row(
-                    "SELECT batch FROM tickets WHERE id = ?1",
-                    params![id.as_str()],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(sql_error)?
-                .ok_or_else(|| SubstrateError::NotFound {
-                    kind: "ticket",
-                    id: id.to_string(),
-                })?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state.is_terminal() {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "release_from_hand refused: ticket is terminal ({})",
+                        current.state
+                    ),
+                });
+            }
             transaction
                 .execute(
-                    "UPDATE tickets SET state = ?1, updated_at = ?2 WHERE id = ?3",
-                    params![state.to_string(), now_text(), id.as_str()],
+                    "UPDATE tickets SET state = 'ready', owner = NULL, updated_at = ?1
+                     WHERE id = ?2",
+                    params![now_text(), id.as_str()],
                 )
                 .map_err(sql_error)?;
-            insert_event(
+            insert_typed_event_raw(
                 &transaction,
-                EventKind::TicketStateChanged,
-                Some(&id),
-                reason.as_deref().unwrap_or_default(),
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: current.state,
+                    to: TicketState::Ready,
+                    reason: Some(reason.clone()),
+                },
             )?;
-            if state.is_terminal() {
-                if let Some(batch_name) = batch {
-                    maybe_auto_close_batch(&transaction, &batch_name)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketUnassigned {
+                    reason: reason.clone(),
+                },
+            )?;
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
+    async fn transition_to_in_review(
+        &self,
+        id: &TicketId,
+        review: InReviewMetadata,
+    ) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state != TicketState::InFlight {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "transition_to_in_review requires InFlight; ticket is {}",
+                        current.state
+                    ),
+                });
+            }
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'in_review', updated_at = ?1 WHERE id = ?2",
+                    params![now_text(), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketTransitionedToInReview {
+                    branch: review.branch.clone(),
+                    pr_url: review.pr_url.clone(),
+                    pr_number: review.pr_number,
+                    head_sha: review.head_sha.clone(),
+                },
+            )?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: TicketState::InFlight,
+                    to: TicketState::InReview,
+                    reason: None,
+                },
+            )?;
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
+    async fn verify_ticket_merged(
+        &self,
+        id: &TicketId,
+        head_sha: String,
+        merge_sha: String,
+    ) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state != TicketState::InReview {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "verify_ticket_merged requires InReview; ticket is {}",
+                        current.state
+                    ),
+                });
+            }
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'done', merge_sha = ?1, updated_at = ?2
+                     WHERE id = ?3",
+                    params![merge_sha, now_text(), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketVerifiedMerged {
+                    head_sha: head_sha.clone(),
+                    merge_sha: merge_sha.clone(),
+                },
+            )?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: TicketState::InReview,
+                    to: TicketState::Done,
+                    reason: None,
+                },
+            )?;
+            if let Some(batch) = current.batch.as_ref() {
+                maybe_auto_close_batch(&transaction, batch.as_str())?;
+            }
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
+    async fn verify_ticket_unmerged(
+        &self,
+        id: &TicketId,
+        branch: String,
+        pr_url: Option<String>,
+    ) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state != TicketState::InReview {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "verify_ticket_unmerged requires InReview; ticket is {}",
+                        current.state
+                    ),
+                });
+            }
+            let reason = BlockReason::PrClosedUnmerged {
+                branch: branch.clone(),
+                pr_url: pr_url.clone(),
+            };
+            let detail = serde_json::to_string(&reason).map_err(json_error)?;
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'blocked', block_reason = 'pr_closed_unmerged',
+                     block_reason_detail = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![detail, now_text(), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketVerifiedUnmerged {
+                    reason: format!("pr closed unmerged: {branch}"),
+                },
+            )?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: TicketState::InReview,
+                    to: TicketState::Blocked,
+                    reason: Some("pr_closed_unmerged".to_owned()),
+                },
+            )?;
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
+    async fn block_ticket(
+        &self,
+        id: &TicketId,
+        reason: BlockReason,
+    ) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state.is_terminal() {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "block_ticket refused: ticket is terminal ({})",
+                        current.state
+                    ),
+                });
+            }
+            let discriminator = block_reason_discriminator(&reason);
+            let detail = serde_json::to_string(&reason).map_err(json_error)?;
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'blocked', block_reason = ?1,
+                     block_reason_detail = ?2, updated_at = ?3 WHERE id = ?4",
+                    params![discriminator, detail, now_text(), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: current.state,
+                    to: TicketState::Blocked,
+                    reason: Some(discriminator.to_owned()),
+                },
+            )?;
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
+    async fn unblock_ticket(&self, id: &TicketId) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state != TicketState::Blocked {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "unblock_ticket requires Blocked; ticket is {}",
+                        current.state
+                    ),
+                });
+            }
+            let reason = current
+                .block_reason
+                .as_ref()
+                .ok_or_else(|| SubstrateError::Invalid {
+                    field: "block_reason".to_owned(),
+                    message: "Blocked ticket missing block_reason".to_owned(),
+                })?;
+            if !matches!(reason, BlockReason::Dependency { .. }) {
+                return Err(SubstrateError::Invalid {
+                    field: "block_reason".to_owned(),
+                    message: "unblock_ticket only valid for Dependency; use human_reopen_blocked"
+                        .to_owned(),
+                });
+            }
+            // Re-verify predecessors inside the same transaction.
+            let predecessors = select_outgoing_blocks_predecessors(&transaction, &id)?;
+            for predecessor in &predecessors {
+                let pred = select_ticket(&transaction, predecessor)?;
+                if !pred.state.is_terminal() {
+                    return Err(SubstrateError::Invalid {
+                        field: "predecessor".to_owned(),
+                        message: format!(
+                            "predecessor {} is not terminal (state {})",
+                            predecessor, pred.state
+                        ),
+                    });
                 }
+            }
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'ready', block_reason = NULL,
+                     block_reason_detail = NULL, updated_at = ?1 WHERE id = ?2",
+                    params![now_text(), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: TicketState::Blocked,
+                    to: TicketState::Ready,
+                    reason: Some("dependency cleared".to_owned()),
+                },
+            )?;
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
+    async fn human_reopen_blocked(
+        &self,
+        id: &TicketId,
+        note: String,
+    ) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state != TicketState::Blocked {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "human_reopen_blocked requires Blocked; ticket is {}",
+                        current.state
+                    ),
+                });
+            }
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'ready', block_reason = NULL,
+                     block_reason_detail = NULL, updated_at = ?1 WHERE id = ?2",
+                    params![now_text(), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: TicketState::Blocked,
+                    to: TicketState::Ready,
+                    reason: Some(format!("human reopened: {note}")),
+                },
+            )?;
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
+    async fn reconcile_ticket_done_from_git(
+        &self,
+        id: &TicketId,
+        head_sha: String,
+        merge_sha: String,
+    ) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state != TicketState::Ready {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "reconcile_ticket_done_from_git requires Ready; ticket is {}",
+                        current.state
+                    ),
+                });
+            }
+            // Verify at least one prior TicketTransitionedToInReview event
+            // exists for this ticket (D33).
+            let has_history = ticket_has_in_review_event(&transaction, &id)?;
+            if !has_history {
+                return Err(SubstrateError::Invalid {
+                    field: "history".to_owned(),
+                    message:
+                        "reconcile_ticket_done_from_git requires a prior TicketTransitionedToInReview event (D33)"
+                            .to_owned(),
+                });
+            }
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'done', merge_sha = ?1, updated_at = ?2
+                     WHERE id = ?3",
+                    params![merge_sha, now_text(), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketVerifiedMerged {
+                    head_sha: head_sha.clone(),
+                    merge_sha: merge_sha.clone(),
+                },
+            )?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: TicketState::Ready,
+                    to: TicketState::Done,
+                    reason: Some("reconciled from git".to_owned()),
+                },
+            )?;
+            if let Some(batch) = current.batch.as_ref() {
+                maybe_auto_close_batch(&transaction, batch.as_str())?;
+            }
+            let ticket = select_ticket(&transaction, &id)?;
+            transaction.commit().map_err(sql_error)?;
+            Ok(ticket)
+        })
+        .await
+    }
+
+    async fn mark_ticket_done_manually(
+        &self,
+        id: &TicketId,
+        attestation: ManualDoneAttestation,
+    ) -> Result<Ticket, SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            let transaction = connection.transaction().map_err(sql_error)?;
+            let current = select_ticket(&transaction, &id)?;
+            if current.state.is_terminal() {
+                return Err(SubstrateError::Invalid {
+                    field: "state".to_owned(),
+                    message: format!(
+                        "mark_ticket_done_manually refused: ticket already terminal ({})",
+                        current.state
+                    ),
+                });
+            }
+            transaction
+                .execute(
+                    "UPDATE tickets SET state = 'done', updated_at = ?1 WHERE id = ?2",
+                    params![now_text(), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketMarkedDoneManually {
+                    claimant: attestation.claimant.clone(),
+                    note: attestation.note.clone(),
+                },
+            )?;
+            insert_typed_event_raw(
+                &transaction,
+                &EventScope::Ticket(id.clone()),
+                &EventKind::TicketStateChanged {
+                    from: current.state,
+                    to: TicketState::Done,
+                    reason: Some(format!("manual: {}", attestation.claimant)),
+                },
+            )?;
+            if let Some(batch) = current.batch.as_ref() {
+                maybe_auto_close_batch(&transaction, batch.as_str())?;
             }
             let ticket = select_ticket(&transaction, &id)?;
             transaction.commit().map_err(sql_error)?;
@@ -429,7 +1192,20 @@ impl Substrate for NativeSubstrate {
                     id: id.to_string(),
                 });
             }
-            insert_event(&transaction, EventKind::TicketAssigned, Some(&id), "")?;
+            match &owner {
+                Some(hand) => insert_typed_event_raw(
+                    &transaction,
+                    &EventScope::Ticket(id.clone()),
+                    &EventKind::TicketAssigned { hand: hand.clone() },
+                )?,
+                None => insert_typed_event_raw(
+                    &transaction,
+                    &EventScope::Ticket(id.clone()),
+                    &EventKind::TicketUnassigned {
+                        reason: "cleared".to_owned(),
+                    },
+                )?,
+            };
             let ticket = select_ticket(&transaction, &id)?;
             transaction.commit().map_err(sql_error)?;
             Ok(ticket)
@@ -448,11 +1224,12 @@ impl Substrate for NativeSubstrate {
                     params![id.as_str(), label],
                 )
                 .map_err(sql_error)?;
-            insert_event(
+            insert_typed_event_raw(
                 connection,
-                EventKind::Note,
-                Some(&id),
-                &format!("LabelAdded {label}"),
+                &EventScope::Ticket(id.clone()),
+                &EventKind::Note {
+                    body: format!("LabelAdded {label}"),
+                },
             )?;
             Ok(())
         })
@@ -470,11 +1247,12 @@ impl Substrate for NativeSubstrate {
                     params![id.as_str(), label],
                 )
                 .map_err(sql_error)?;
-            insert_event(
+            insert_typed_event_raw(
                 connection,
-                EventKind::Note,
-                Some(&id),
-                &format!("LabelRemoved {label}"),
+                &EventScope::Ticket(id.clone()),
+                &EventKind::Note {
+                    body: format!("LabelRemoved {label}"),
+                },
             )?;
             Ok(())
         })
@@ -496,11 +1274,12 @@ impl Substrate for NativeSubstrate {
                     params![from.as_str(), to.as_str(), kind.to_string()],
                 )
                 .map_err(conflict_or_sql)?;
-            insert_event(
+            insert_typed_event_raw(
                 connection,
-                EventKind::Note,
-                Some(&from),
-                &format!("LinkCreated {} {}", kind, to.as_str()),
+                &EventScope::Ticket(from.clone()),
+                &EventKind::Note {
+                    body: format!("LinkCreated {} {}", kind, to.as_str()),
+                },
             )?;
             Ok(())
         })
@@ -522,11 +1301,12 @@ impl Substrate for NativeSubstrate {
                     params![from.as_str(), to.as_str(), kind.to_string()],
                 )
                 .map_err(sql_error)?;
-            insert_event(
+            insert_typed_event_raw(
                 connection,
-                EventKind::Note,
-                Some(&from),
-                &format!("LinkRemoved {} {}", kind, to.as_str()),
+                &EventScope::Ticket(from.clone()),
+                &EventKind::Note {
+                    body: format!("LinkRemoved {} {}", kind, to.as_str()),
+                },
             )?;
             Ok(())
         })
@@ -566,7 +1346,11 @@ impl Substrate for NativeSubstrate {
                     params![name.as_str(), now],
                 )
                 .map_err(conflict_or_sql)?;
-            insert_event(connection, EventKind::BatchCreated, None, name.as_str())?;
+            insert_typed_event_raw(
+                connection,
+                &EventScope::Batch(name.clone()),
+                &EventKind::BatchCreated,
+            )?;
             select_batch(connection, &name)
         })
         .await
@@ -617,11 +1401,14 @@ impl Substrate for NativeSubstrate {
                     params![now_text(), name.as_str()],
                 )
                 .map_err(sql_error)?;
-            insert_event(
+            let open_ticket_ids = open_ids
+                .into_iter()
+                .map(TicketId::new)
+                .collect::<Result<Vec<_>, _>>()?;
+            insert_typed_event_raw(
                 &transaction,
-                EventKind::BatchClosed,
-                None,
-                &serde_json::to_string(&open_ids).map_err(json_error)?,
+                &EventScope::Batch(name.clone()),
+                &EventKind::BatchClosed { open_ticket_ids },
             )?;
             let batch = select_batch(&transaction, &name)?;
             transaction.commit().map_err(sql_error)?;
@@ -666,7 +1453,11 @@ impl Substrate for NativeSubstrate {
                     ],
                 )
                 .map_err(sql_error)?;
-            insert_event(connection, EventKind::Note, None, &format!("HandRegistered {}", hand.id))?;
+            insert_typed_event_raw(
+                connection,
+                &EventScope::Hand(hand.id.clone()),
+                &EventKind::HandRegistered,
+            )?;
             Ok(())
         })
         .await
@@ -702,26 +1493,63 @@ impl Substrate for NativeSubstrate {
                     id: id.to_string(),
                 });
             }
-            insert_event(
+            insert_typed_event_raw(
                 connection,
-                EventKind::Note,
-                None,
-                &format!("HandHeartbeat {id}"),
+                &EventScope::Hand(id.clone()),
+                &EventKind::HandHeartbeat,
             )?;
             Ok(())
         })
         .await
     }
 
+    async fn hand_heartbeat(&self, id: &HandId) -> Result<(), SubstrateError> {
+        Substrate::heartbeat(self, id).await
+    }
+
     async fn record_event(&self, event: NewEvent) -> Result<Event, SubstrateError> {
         self.run_write(move |connection| {
-            let id = insert_event(
-                connection,
-                event.kind,
-                event.ticket.as_ref(),
-                event.body.as_str(),
-            )?;
-            select_event(connection, id)
+            let scope = match event.ticket.as_ref() {
+                Some(t) => EventScope::Ticket(t.clone()),
+                None => EventScope::Site,
+            };
+            // Legacy path: write as a Note holding the body verbatim and use
+            // the supplied kind discriminator.
+            let kind = EventKind::Note {
+                body: event.body.clone(),
+            };
+            let _rowid = insert_typed_event_with_kind(connection, &scope, &kind, &event.kind)?;
+            // Re-fetch as legacy Event shape.
+            let row: (Vec<u8>, String, String, Option<String>, String) = connection
+                .query_row(
+                    "SELECT id, at, kind, ticket, body FROM events
+                     ORDER BY rowid DESC LIMIT 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .map_err(sql_error)?;
+            let id = Uuid::from_slice(&row.0).map_err(|e| SubstrateError::Backend(Box::new(e)))?;
+            let at = parse_required_time(&row.1)?;
+            let kind = decode_event_body(&row.2, &row.4)?;
+            let ticket = match row.3 {
+                Some(t) => Some(TicketId::new(t)?),
+                None => None,
+            };
+            Ok(Event {
+                id,
+                at,
+                kind,
+                ticket,
+                body: row.4,
+            })
         })
         .await
     }
@@ -741,12 +1569,12 @@ impl Substrate for NativeSubstrate {
                 .prepare(
                     "SELECT id, at, kind, ticket, body FROM events
                      WHERE (?1 IS NULL OR at > ?1)
-                     ORDER BY at DESC, id DESC
+                     ORDER BY at DESC, rowid DESC
                      LIMIT ?2",
                 )
                 .map_err(sql_error)?;
             let events = statement
-                .query_map(params![since_text, capped_limit], event_from_row)
+                .query_map(params![since_text, capped_limit], legacy_event_from_row)
                 .map_err(sql_error)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(sql_error)?;
@@ -755,60 +1583,173 @@ impl Substrate for NativeSubstrate {
         .await
     }
 
-    async fn foreman_status(&self) -> Result<ForemanStatus, SubstrateError> {
+    async fn record_typed_event(
+        &self,
+        scope: EventScope,
+        kind: EventKind,
+    ) -> Result<EventId, SubstrateError> {
+        self.run_write(move |connection| {
+            let rowid = insert_typed_event_raw(connection, &scope, &kind)?;
+            Ok(EventId(rowid))
+        })
+        .await
+    }
+
+    async fn tail_typed_events(
+        &self,
+        since: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<TypedEvent>, SubstrateError> {
         self.run_read(move |connection| {
-            let row: Option<(Option<i64>, Option<String>)> = connection
-                .query_row("SELECT pid, started_at FROM foreman LIMIT 1", [], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .optional()
-                .map_err(sql_error)?;
-            let Some((pid, started_at)) = row else {
-                return Ok(stopped_foreman());
-            };
-            let Some(pid) = pid else {
-                return Ok(stopped_foreman());
-            };
-            let pid = u32::try_from(pid).map_err(|error| SubstrateError::Invalid {
-                field: "foreman.pid".to_owned(),
+            let capped_limit = i64::try_from(limit).map_err(|error| SubstrateError::Invalid {
+                field: "limit".to_owned(),
                 message: error.to_string(),
             })?;
+            let since_text = since.map(format_time);
+            let mut statement = connection
+                .prepare(
+                    "SELECT rowid, at, kind, ticket, body, scope_kind, scope_batch,
+                            scope_hand, scope_run_id
+                     FROM events
+                     WHERE (?1 IS NULL OR at > ?1)
+                     ORDER BY rowid ASC
+                     LIMIT ?2",
+                )
+                .map_err(sql_error)?;
+            let events = statement
+                .query_map(params![since_text, capped_limit], |row| {
+                    typed_event_from_row(row)
+                })
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            // Validate decoding outside SQLite (rusqlite can't propagate
+            // serde_json errors cleanly).
+            events.into_iter().map(decode_typed_event_raw).collect()
+        })
+        .await
+    }
+
+    async fn ticket_events(
+        &self,
+        id: &TicketId,
+        limit: usize,
+    ) -> Result<Vec<TypedEvent>, SubstrateError> {
+        let id = id.clone();
+        self.run_read(move |connection| {
+            let capped_limit = i64::try_from(limit).map_err(|error| SubstrateError::Invalid {
+                field: "limit".to_owned(),
+                message: error.to_string(),
+            })?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT rowid, at, kind, ticket, body, scope_kind, scope_batch,
+                            scope_hand, scope_run_id
+                     FROM events
+                     WHERE ticket = ?1
+                     ORDER BY rowid DESC
+                     LIMIT ?2",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map(params![id.as_str(), capped_limit], |row| {
+                    typed_event_from_row(row)
+                })
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            rows.into_iter().map(decode_typed_event_raw).collect()
+        })
+        .await
+    }
+
+    async fn foreman_status(&self) -> Result<ForemanStatus, SubstrateError> {
+        self.run_read(move |connection| {
+            let row: Option<(Option<i64>, Option<String>, String)> = connection
+                .query_row(
+                    "SELECT pid, started_at, mode FROM foreman LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(sql_error)?;
+            let Some((pid, started_at, mode_text)) = row else {
+                return Ok(stopped_foreman());
+            };
+            let mode = ForemanMode::from_str(&mode_text)?;
+            let pid = match pid {
+                Some(p) => Some(u32::try_from(p).map_err(|error| SubstrateError::Invalid {
+                    field: "foreman.pid".to_owned(),
+                    message: error.to_string(),
+                })?),
+                None => None,
+            };
             Ok(ForemanStatus {
-                pid: Some(pid),
+                pid,
                 started_at: parse_optional_time(started_at)?,
-                mode: ForemanMode::Detached,
+                mode,
             })
         })
         .await
     }
 
     async fn record_foreman_start(&self, pid: u32) -> Result<(), SubstrateError> {
+        Substrate::record_foreman_detached(self, pid).await
+    }
+
+    async fn record_foreman_attached(&self, pid: u32) -> Result<(), SubstrateError> {
+        self.record_foreman_started(pid, ForemanMode::Attached)
+            .await
+    }
+
+    async fn record_foreman_detached(&self, pid: u32) -> Result<(), SubstrateError> {
+        self.record_foreman_started(pid, ForemanMode::Detached)
+            .await
+    }
+
+    async fn record_foreman_stop(&self) -> Result<(), SubstrateError> {
+        Substrate::record_foreman_stopped(self).await
+    }
+
+    async fn record_foreman_stopped(&self) -> Result<(), SubstrateError> {
         let site_name = self.site.name().to_owned();
         self.run_write(move |connection| {
             connection
                 .execute(
-                    "INSERT INTO foreman (site, pid, started_at) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(site) DO UPDATE SET pid = excluded.pid, started_at = excluded.started_at",
-                    params![site_name, i64::from(pid), now_text()],
+                    "INSERT INTO foreman (site, pid, started_at, mode) VALUES (?1, NULL, NULL, 'stopped')
+                     ON CONFLICT(site) DO UPDATE SET pid = NULL, started_at = NULL, mode = 'stopped'",
+                    params![site_name],
                 )
                 .map_err(sql_error)?;
-            insert_event(connection, EventKind::ForemanStarted, None, &pid.to_string())?;
+            insert_typed_event_raw(connection, &EventScope::Site, &EventKind::ForemanStopped)?;
             Ok(())
         })
         .await
     }
+}
 
-    async fn record_foreman_stop(&self) -> Result<(), SubstrateError> {
+impl NativeSubstrate {
+    async fn record_foreman_started(
+        &self,
+        pid: u32,
+        mode: ForemanMode,
+    ) -> Result<(), SubstrateError> {
         let site_name = self.site.name().to_owned();
+        let mode_str = mode.to_string();
         self.run_write(move |connection| {
             connection
                 .execute(
-                    "INSERT INTO foreman (site, pid, started_at) VALUES (?1, NULL, NULL)
-                     ON CONFLICT(site) DO UPDATE SET pid = NULL, started_at = NULL",
-                    params![site_name],
+                    "INSERT INTO foreman (site, pid, started_at, mode) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(site) DO UPDATE SET pid = excluded.pid,
+                       started_at = excluded.started_at, mode = excluded.mode",
+                    params![site_name, i64::from(pid), now_text(), mode_str],
                 )
                 .map_err(sql_error)?;
-            insert_event(connection, EventKind::ForemanStopped, None, "")?;
+            insert_typed_event_raw(
+                connection,
+                &EventScope::Site,
+                &EventKind::ForemanStarted { mode, pid },
+            )?;
             Ok(())
         })
         .await
@@ -929,6 +1870,53 @@ fn migrate(connection: &mut Connection) -> Result<(), SubstrateError> {
             .execute_batch(MIGRATION_0001)
             .map_err(sql_error)?;
     }
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    if version < 2 {
+        run_migration_0002(connection)?;
+    }
+    Ok(())
+}
+
+fn run_migration_0002(connection: &mut Connection) -> Result<(), SubstrateError> {
+    // PRAGMA foreign_keys = OFF must run OUTSIDE any transaction. SQLite
+    // silently ignores the toggle inside a txn (it's read at BEGIN).
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(sql_error)?;
+
+    let migration_result = (|| -> Result<(), SubstrateError> {
+        let transaction = connection.transaction().map_err(sql_error)?;
+        transaction
+            .execute_batch(MIGRATION_0002)
+            .map_err(sql_error)?;
+        let mut statement = transaction
+            .prepare("PRAGMA foreign_key_check;")
+            .map_err(sql_error)?;
+        let violations: Vec<(String, i64, String, i64)> = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)?;
+        drop(statement);
+        if !violations.is_empty() {
+            return Err(SubstrateError::Invalid {
+                field: "migration_0002".to_owned(),
+                message: format!("foreign_key_check violations: {violations:?}"),
+            });
+        }
+        transaction.commit().map_err(sql_error)?;
+        Ok(())
+    })();
+
+    // Re-enable FKs regardless of success — leaving them off would silently
+    // disable downstream integrity checks.
+    let restore = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration_result?;
+    restore.map_err(sql_error)?;
     Ok(())
 }
 
@@ -992,10 +1980,92 @@ fn maybe_auto_close_batch(
             )
             .map_err(sql_error)?;
         if changed == 1 {
-            insert_event(transaction, EventKind::BatchClosed, None, "")?;
+            let batch = BatchName::new(batch_name)?;
+            insert_typed_event_raw(
+                transaction,
+                &EventScope::Batch(batch),
+                &EventKind::BatchClosed {
+                    open_ticket_ids: vec![],
+                },
+            )?;
         }
     }
     Ok(())
+}
+
+fn set_ticket_state_redirect(target: TicketState) -> SubstrateError {
+    let pointer = match target {
+        TicketState::InFlight => "use assign_to_hand",
+        TicketState::InReview => "use transition_to_in_review",
+        TicketState::Blocked => "use block_ticket",
+        TicketState::Done => "use verify_ticket_merged or mark_ticket_done_manually",
+        TicketState::Rejected => "use reject_ticket (future API)",
+        TicketState::Ready => "use release_from_hand or unblock_ticket",
+        _ => "see DESIGN.md §8.6 D31 for the typed state machine",
+    };
+    SubstrateError::Invalid {
+        field: "ticket_state".to_owned(),
+        message: format!("set_ticket_state refused for target {target} (D31): {pointer}"),
+    }
+}
+
+fn block_reason_discriminator(reason: &BlockReason) -> &'static str {
+    match reason {
+        BlockReason::Dependency { .. } => "dependency",
+        BlockReason::PrClosedUnmerged { .. } => "pr_closed_unmerged",
+        BlockReason::RestackConflict { .. } => "restack_conflict",
+        BlockReason::Human { .. } => "human",
+        _ => "human",
+    }
+}
+
+fn select_outgoing_blocks_predecessors(
+    connection: &Connection,
+    id: &TicketId,
+) -> Result<Vec<TicketId>, SubstrateError> {
+    let mut statement = connection
+        .prepare("SELECT to_ticket FROM links WHERE from_ticket = ?1 AND kind = 'blocks'")
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![id.as_str()], |row| row.get::<_, String>(0))
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    rows.into_iter().map(TicketId::new).collect()
+}
+
+fn ticket_has_in_review_event(
+    connection: &Connection,
+    id: &TicketId,
+) -> Result<bool, SubstrateError> {
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM events
+             WHERE ticket = ?1 AND kind = 'ticket_transitioned_to_in_review'",
+            params![id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    Ok(count > 0)
+}
+
+fn ensure_hand_exists(connection: &Connection, id: &HandId) -> Result<(), SubstrateError> {
+    let exists: Option<i64> = connection
+        .query_row(
+            "SELECT 1 FROM hands WHERE id = ?1",
+            params![id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sql_error)?;
+    if exists.is_some() {
+        Ok(())
+    } else {
+        Err(SubstrateError::NotFound {
+            kind: "hand",
+            id: id.to_string(),
+        })
+    }
 }
 
 fn select_ticket_ids(
@@ -1041,7 +2111,8 @@ fn select_optional_ticket(
 ) -> Result<Option<Ticket>, SubstrateError> {
     let row = connection
         .query_row(
-            "SELECT id, batch, ordinal, title, body, state, owner, created_at, updated_at
+            "SELECT id, batch, ordinal, title, body, state, owner, merge_sha,
+                    block_reason_detail, created_at, updated_at
              FROM tickets WHERE id = ?1",
             params![id.as_str()],
             ticket_base_from_row,
@@ -1147,36 +2218,49 @@ fn open_ticket_ids_in_batch(
     Ok(ids)
 }
 
-fn insert_event(
+fn insert_typed_event_raw(
     connection: &Connection,
-    kind: EventKind,
-    ticket: Option<&TicketId>,
-    body: &str,
-) -> Result<Uuid, SubstrateError> {
+    scope: &EventScope,
+    kind: &EventKind,
+) -> Result<i64, SubstrateError> {
+    insert_typed_event_with_kind(connection, scope, kind, kind.discriminator())
+}
+
+fn insert_typed_event_with_kind(
+    connection: &Connection,
+    scope: &EventScope,
+    kind: &EventKind,
+    kind_discriminator: &str,
+) -> Result<i64, SubstrateError> {
     let id = Uuid::new_v4();
+    let body = serde_json::to_string(kind).map_err(json_error)?;
+    let (scope_kind, ticket, scope_batch, scope_hand, scope_run_id) = match scope {
+        EventScope::Ticket(t) => ("ticket", Some(t.as_str().to_owned()), None, None, None),
+        EventScope::Batch(b) => ("batch", None, Some(b.as_str().to_owned()), None, None),
+        EventScope::Hand(h) => ("hand", None, None, Some(h.as_str().to_owned()), None),
+        EventScope::Worktree { run_id } => ("worktree", None, None, None, Some(run_id.clone())),
+        EventScope::Site => ("site", None, None, None, None),
+        _ => ("site", None, None, None, None),
+    };
     connection
         .execute(
-            "INSERT INTO events (id, at, kind, ticket, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO events
+             (id, at, kind, ticket, body, scope_kind, scope_batch, scope_hand, scope_run_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id.as_bytes().as_slice(),
                 now_text(),
-                kind.to_string(),
-                ticket.map(TicketId::as_str),
-                body
+                kind_discriminator,
+                ticket,
+                body,
+                scope_kind,
+                scope_batch,
+                scope_hand,
+                scope_run_id,
             ],
         )
         .map_err(sql_error)?;
-    Ok(id)
-}
-
-fn select_event(connection: &Connection, id: Uuid) -> Result<Event, SubstrateError> {
-    connection
-        .query_row(
-            "SELECT id, at, kind, ticket, body FROM events WHERE id = ?1",
-            params![id.as_bytes().as_slice()],
-            event_from_row,
-        )
-        .map_err(sql_error)
+    Ok(connection.last_insert_rowid())
 }
 
 fn ensure_worktree_exists(connection: &Connection, run_id: &str) -> Result<(), SubstrateError> {
@@ -1204,8 +2288,15 @@ fn ticket_base_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ticket> {
     let ordinal: Option<i64> = row.get(2)?;
     let state: String = row.get(5)?;
     let owner: Option<String> = row.get(6)?;
-    let created_at: String = row.get(7)?;
-    let updated_at: String = row.get(8)?;
+    let merge_sha: Option<String> = row.get(7)?;
+    let block_reason_detail: Option<String> = row.get(8)?;
+    let created_at: String = row.get(9)?;
+    let updated_at: String = row.get(10)?;
+
+    let block_reason = match block_reason_detail {
+        Some(detail) => Some(parse_in_row(detail, |s| serde_json::from_str(&s))?),
+        None => None,
+    };
 
     Ok(Ticket {
         id: parse_in_row(id, TicketId::new)?,
@@ -1216,6 +2307,8 @@ fn ticket_base_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ticket> {
         state: parse_in_row(state, |value| TicketState::from_str(&value))?,
         labels: Vec::new(),
         owner: parse_optional_in_row(owner, HandId::new)?,
+        merge_sha,
+        block_reason,
         created_at: parse_time_in_row(created_at)?,
         updated_at: parse_time_in_row(updated_at)?,
     })
@@ -1254,21 +2347,178 @@ fn hand_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hand> {
     })
 }
 
-fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
+/// Raw event row, decoded into Rust types but with `kind`/`body` still
+/// stringly typed so we can decode via `decode_event_body` outside the
+/// rusqlite mapping closure.
+struct RawTypedEvent {
+    rowid: i64,
+    at: DateTime<Utc>,
+    kind: String,
+    body: String,
+    scope_kind: String,
+    ticket: Option<String>,
+    scope_batch: Option<String>,
+    scope_hand: Option<String>,
+    scope_run_id: Option<String>,
+}
+
+fn typed_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawTypedEvent> {
+    let rowid: i64 = row.get(0)?;
+    let at: String = row.get(1)?;
+    let kind: String = row.get(2)?;
+    let ticket: Option<String> = row.get(3)?;
+    let body: String = row.get(4)?;
+    let scope_kind: String = row.get(5)?;
+    let scope_batch: Option<String> = row.get(6)?;
+    let scope_hand: Option<String> = row.get(7)?;
+    let scope_run_id: Option<String> = row.get(8)?;
+    Ok(RawTypedEvent {
+        rowid,
+        at: parse_time_in_row(at)?,
+        kind,
+        body,
+        scope_kind,
+        ticket,
+        scope_batch,
+        scope_hand,
+        scope_run_id,
+    })
+}
+
+fn decode_typed_event_raw(raw: RawTypedEvent) -> Result<TypedEvent, SubstrateError> {
+    let kind = decode_event_body(&raw.kind, &raw.body)?;
+    let scope = match raw.scope_kind.as_str() {
+        "ticket" => {
+            let t = raw.ticket.ok_or_else(|| SubstrateError::Invalid {
+                field: "scope".to_owned(),
+                message: "ticket-scope event missing ticket column".to_owned(),
+            })?;
+            EventScope::Ticket(TicketId::new(t)?)
+        }
+        "batch" => {
+            let b = raw.scope_batch.ok_or_else(|| SubstrateError::Invalid {
+                field: "scope".to_owned(),
+                message: "batch-scope event missing scope_batch column".to_owned(),
+            })?;
+            EventScope::Batch(BatchName::new(b)?)
+        }
+        "hand" => {
+            let h = raw.scope_hand.ok_or_else(|| SubstrateError::Invalid {
+                field: "scope".to_owned(),
+                message: "hand-scope event missing scope_hand column".to_owned(),
+            })?;
+            EventScope::Hand(HandId::new(h)?)
+        }
+        "worktree" => {
+            let r = raw.scope_run_id.ok_or_else(|| SubstrateError::Invalid {
+                field: "scope".to_owned(),
+                message: "worktree-scope event missing scope_run_id column".to_owned(),
+            })?;
+            EventScope::Worktree { run_id: r }
+        }
+        "site" => EventScope::Site,
+        other => {
+            return Err(SubstrateError::Invalid {
+                field: "scope_kind".to_owned(),
+                message: format!("unknown scope_kind {other}"),
+            });
+        }
+    };
+    Ok(TypedEvent {
+        id: EventId(raw.rowid),
+        scope,
+        kind,
+        at: raw.at,
+    })
+}
+
+/// Legacy reader that decodes a row of the events table into the deprecated
+/// `Event` shape. Used by `tail_events` / `record_event` for the deprecated
+/// API surface.
+fn legacy_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
     let id_bytes: Vec<u8> = row.get(0)?;
     let at: String = row.get(1)?;
     let kind: String = row.get(2)?;
     let ticket: Option<String> = row.get(3)?;
+    let body: String = row.get(4)?;
     let id = Uuid::from_slice(&id_bytes).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(error))
     })?;
+    let decoded = decode_event_body(&kind, &body).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let ticket = match ticket {
+        Some(t) => Some(parse_in_row(t, TicketId::new)?),
+        None => None,
+    };
     Ok(Event {
         id,
         at: parse_time_in_row(at)?,
-        kind: parse_in_row(kind, |value| EventKind::from_str(&value))?,
-        ticket: parse_optional_in_row(ticket, TicketId::new)?,
-        body: row.get(4)?,
+        kind: decoded,
+        ticket,
+        body,
     })
+}
+
+/// Decode an event body using its kind discriminator. Tries the new tagged
+/// JSON shape first; falls back to per-kind legacy reconstruction for rows
+/// written by T007 before the typed-event migration.
+fn decode_event_body(kind: &str, body: &str) -> Result<EventKind, SubstrateError> {
+    // Path 1: new-format tagged JSON round-trips via #[serde(tag = "kind")].
+    if let Ok(parsed) = serde_json::from_str::<EventKind>(body) {
+        return Ok(parsed);
+    }
+    // Path 2: legacy T007 rows. Per-kind reconstruction.
+    match kind {
+        "note" => Ok(EventKind::Note {
+            body: body.to_owned(),
+        }),
+        "ticket_state_changed" => {
+            let value: serde_json::Value = serde_json::from_str(body).map_err(json_error)?;
+            let from: TicketState =
+                serde_json::from_value(value.get("from").cloned().unwrap_or_default())
+                    .map_err(json_error)?;
+            let to: TicketState =
+                serde_json::from_value(value.get("to").cloned().unwrap_or_default())
+                    .map_err(json_error)?;
+            let reason = value
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            Ok(EventKind::TicketStateChanged { from, to, reason })
+        }
+        "ticket_created" => Ok(EventKind::TicketCreated {
+            initial_state: TicketState::Ready,
+        }),
+        "ticket_assigned" => {
+            let hand = HandId::new(body.trim()).map_err(|e| SubstrateError::Invalid {
+                field: "legacy_ticket_assigned".to_owned(),
+                message: e.to_string(),
+            })?;
+            Ok(EventKind::TicketAssigned { hand })
+        }
+        "ticket_unassigned" => Ok(EventKind::TicketUnassigned {
+            reason: body.to_owned(),
+        }),
+        "batch_created" => Ok(EventKind::BatchCreated),
+        "batch_closed" => Ok(EventKind::BatchClosed {
+            open_ticket_ids: vec![],
+        }),
+        "foreman_started" => {
+            let pid = body.trim().parse::<u32>().unwrap_or(0);
+            Ok(EventKind::ForemanStarted {
+                mode: ForemanMode::Detached,
+                pid,
+            })
+        }
+        "foreman_stopped" => Ok(EventKind::ForemanStopped),
+        "hand_registered" => Ok(EventKind::HandRegistered),
+        "hand_heartbeat" => Ok(EventKind::HandHeartbeat),
+        other => Err(SubstrateError::Invalid {
+            field: "event_kind".to_owned(),
+            message: format!("unknown legacy event kind: {other}"),
+        }),
+    }
 }
 
 fn worktree_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
@@ -1317,17 +2567,17 @@ fn parse_optional_time_in_row(value: Option<String>) -> rusqlite::Result<Option<
     value.map(parse_time_in_row).transpose()
 }
 
-fn parse_optional_time(value: Option<String>) -> Result<Option<DateTime<Utc>>, SubstrateError> {
-    value
-        .map(|value| {
-            DateTime::parse_from_rfc3339(&value)
-                .map(|time| time.with_timezone(&Utc))
-                .map_err(|error| SubstrateError::Invalid {
-                    field: "timestamp".to_owned(),
-                    message: error.to_string(),
-                })
+fn parse_required_time(value: &str) -> Result<DateTime<Utc>, SubstrateError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|time| time.with_timezone(&Utc))
+        .map_err(|error| SubstrateError::Invalid {
+            field: "timestamp".to_owned(),
+            message: error.to_string(),
         })
-        .transpose()
+}
+
+fn parse_optional_time(value: Option<String>) -> Result<Option<DateTime<Utc>>, SubstrateError> {
+    value.map(|value| parse_required_time(&value)).transpose()
 }
 
 fn unique_labels(labels: Vec<String>) -> Vec<String> {
@@ -1394,586 +2644,7 @@ fn mutex_error<T>(error: std::sync::PoisonError<T>) -> SubstrateError {
     SubstrateError::Backend(Box::new(std::io::Error::other(error.to_string())))
 }
 
+pub mod foreman;
+
 #[cfg(test)]
-mod tests {
-    use std::num::NonZeroUsize;
-
-    use derrick_config::Config;
-    use derrick_substrate::{HandKind, Substrate};
-    use tempfile::TempDir;
-
-    use super::*;
-
-    fn site() -> Site {
-        Config::defaults().site().clone()
-    }
-
-    fn native_config(tempdir: &TempDir) -> NativeConfig {
-        NativeConfig {
-            db_path: tempdir.path().join("derrick.db"),
-            worktree_root: tempdir.path().join("worktrees"),
-        }
-    }
-
-    async fn open(tempdir: &TempDir) -> Result<NativeSubstrate, SubstrateError> {
-        NativeSubstrate::open(native_config(tempdir), site()).await
-    }
-
-    fn ticket_id(value: &str) -> Result<TicketId, SubstrateError> {
-        TicketId::new(value)
-    }
-
-    fn batch_name(value: &str) -> Result<BatchName, SubstrateError> {
-        BatchName::new(value)
-    }
-
-    fn hand_id(value: &str) -> Result<HandId, SubstrateError> {
-        HandId::new(value)
-    }
-
-    fn new_ticket(value: &str) -> Result<NewTicket, SubstrateError> {
-        NewTicket::new(ticket_id(value)?, None, None, "title", "body", Vec::new())
-    }
-
-    fn new_batched_ticket(
-        value: &str,
-        batch: &str,
-        ordinal: Option<u32>,
-    ) -> Result<NewTicket, SubstrateError> {
-        NewTicket::new(
-            ticket_id(value)?,
-            Some(batch_name(batch)?),
-            ordinal,
-            "title",
-            "body",
-            Vec::new(),
-        )
-    }
-
-    #[tokio::test]
-    async fn site_initialises_from_config() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-
-        assert_eq!(substrate.site().await?, site());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn create_ticket_persists_and_missing_returns_none() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        let ticket = substrate.create_ticket(new_ticket("drk-1")?).await?;
-
-        assert_eq!(ticket.id, ticket_id("drk-1")?);
-        assert!(substrate.get_ticket(&ticket_id("drk-1")?).await?.is_some());
-        assert!(substrate.get_ticket(&ticket_id("drk-2")?).await?.is_none());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn create_ticket_into_closed_batch_returns_conflict() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate.create_batch(batch_name("batch-1")?).await?;
-        substrate.close_batch(&batch_name("batch-1")?).await?;
-
-        let result = substrate
-            .create_ticket(new_batched_ticket("drk-1", "batch-1", Some(1))?)
-            .await;
-
-        assert!(matches!(result, Err(SubstrateError::Conflict { .. })));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn create_ticket_duplicate_id_returns_conflict() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate.create_ticket(new_ticket("drk-1")?).await?;
-
-        let result = substrate.create_ticket(new_ticket("drk-1")?).await;
-
-        assert!(matches!(result, Err(SubstrateError::Conflict { .. })));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn list_tickets_respects_filters_and_limit() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate.create_batch(batch_name("batch-1")?).await?;
-        substrate
-            .register_hand(Hand {
-                id: hand_id("copilot-1")?,
-                kind: HandKind::Copilot,
-                last_seen: None,
-            })
-            .await?;
-        substrate
-            .create_ticket(NewTicket::new(
-                ticket_id("drk-1")?,
-                Some(batch_name("batch-1")?),
-                Some(1),
-                "a",
-                "",
-                vec!["ui".to_owned()],
-            )?)
-            .await?;
-        substrate.create_ticket(new_ticket("drk-2")?).await?;
-        substrate
-            .set_ticket_state(&ticket_id("drk-1")?, TicketState::Blocked, None)
-            .await?;
-        substrate
-            .assign_ticket(&ticket_id("drk-1")?, Some(hand_id("copilot-1")?))
-            .await?;
-
-        let filter = TicketFilter {
-            state: Some(TicketState::Blocked),
-            batch: Some(batch_name("batch-1")?),
-            owner: Some(hand_id("copilot-1")?),
-            label: Some("ui".to_owned()),
-            limit: NonZeroUsize::new(1),
-        };
-        let tickets = substrate.list_tickets(filter).await?;
-        let all = substrate
-            .list_tickets(TicketFilter {
-                limit: None,
-                ..TicketFilter::default()
-            })
-            .await?;
-
-        assert_eq!(tickets.len(), 1);
-        assert_eq!(tickets[0].id, ticket_id("drk-1")?);
-        assert_eq!(all.len(), 2);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn set_ticket_state_writes_event_and_autocloses_last_ticket() -> Result<(), SubstrateError>
-    {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate.create_batch(batch_name("batch-1")?).await?;
-        substrate
-            .create_ticket(new_batched_ticket("drk-1", "batch-1", Some(1))?)
-            .await?;
-
-        substrate
-            .set_ticket_state(
-                &ticket_id("drk-1")?,
-                TicketState::Done,
-                Some("done".to_owned()),
-            )
-            .await?;
-        let batch = substrate.get_batch(&batch_name("batch-1")?).await?;
-        let events = substrate.tail_events(None, 100).await?;
-
-        assert!(batch.and_then(|batch| batch.closed_at).is_some());
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.kind == EventKind::BatchClosed)
-                .count(),
-            1
-        );
-        assert!(events
-            .iter()
-            .any(|event| event.kind == EventKind::TicketStateChanged));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn set_ticket_state_does_not_autoclose_if_others_open() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate.create_batch(batch_name("batch-1")?).await?;
-        substrate
-            .create_ticket(new_batched_ticket("drk-1", "batch-1", Some(1))?)
-            .await?;
-        substrate
-            .create_ticket(new_batched_ticket("drk-2", "batch-1", Some(2))?)
-            .await?;
-
-        substrate
-            .set_ticket_state(&ticket_id("drk-1")?, TicketState::Done, None)
-            .await?;
-        let batch = substrate.get_batch(&batch_name("batch-1")?).await?;
-
-        assert!(batch.and_then(|batch| batch.closed_at).is_none());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn assign_ticket_and_labels_round_trip() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate
-            .register_hand(Hand {
-                id: hand_id("human-1")?,
-                kind: HandKind::Human,
-                last_seen: None,
-            })
-            .await?;
-        substrate.create_ticket(new_ticket("drk-1")?).await?;
-        substrate
-            .assign_ticket(&ticket_id("drk-1")?, Some(hand_id("human-1")?))
-            .await?;
-        substrate.add_label(&ticket_id("drk-1")?, "alpha").await?;
-        substrate.add_label(&ticket_id("drk-1")?, "alpha").await?;
-        substrate.add_label(&ticket_id("drk-1")?, "beta").await?;
-        substrate.remove_label(&ticket_id("drk-1")?, "beta").await?;
-
-        let ticket = substrate
-            .get_ticket(&ticket_id("drk-1")?)
-            .await?
-            .ok_or_else(|| SubstrateError::NotFound {
-                kind: "ticket",
-                id: "drk-1".to_owned(),
-            })?;
-
-        assert_eq!(ticket.owner, Some(hand_id("human-1")?));
-        assert_eq!(ticket.labels, vec!["alpha".to_owned()]);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn link_and_unlink_round_trip() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate.create_ticket(new_ticket("drk-1")?).await?;
-        substrate.create_ticket(new_ticket("drk-2")?).await?;
-
-        substrate
-            .link(&ticket_id("drk-1")?, &ticket_id("drk-2")?, LinkKind::Blocks)
-            .await?;
-        assert_eq!(
-            substrate.outgoing_links(&ticket_id("drk-1")?).await?.len(),
-            1
-        );
-        assert_eq!(
-            substrate.incoming_links(&ticket_id("drk-2")?).await?.len(),
-            1
-        );
-        substrate
-            .unlink(&ticket_id("drk-1")?, &ticket_id("drk-2")?, LinkKind::Blocks)
-            .await?;
-        assert!(substrate
-            .outgoing_links(&ticket_id("drk-1")?)
-            .await?
-            .is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn batch_lifecycle_and_ordering() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate.create_batch(batch_name("batch-1")?).await?;
-        assert!(substrate
-            .get_batch(&batch_name("batch-1")?)
-            .await?
-            .is_some());
-        substrate
-            .create_ticket(new_batched_ticket("drk-2", "batch-1", None)?)
-            .await?;
-        substrate
-            .create_ticket(new_batched_ticket("drk-1", "batch-1", Some(1))?)
-            .await?;
-        let tickets = substrate.tickets_in_batch(&batch_name("batch-1")?).await?;
-
-        assert_eq!(tickets[0].id, ticket_id("drk-1")?);
-        assert_eq!(tickets[1].id, ticket_id("drk-2")?);
-        assert_eq!(substrate.list_batches(false).await?.len(), 1);
-        let first_close = substrate.close_batch(&batch_name("batch-1")?).await?;
-        let second_close = substrate.close_batch(&batch_name("batch-1")?).await?;
-        assert_eq!(first_close.closed_at, second_close.closed_at);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn force_close_batch_lists_open_ticket_ids_in_event_body() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate.create_batch(batch_name("batch-1")?).await?;
-        substrate
-            .create_ticket(new_batched_ticket("drk-1", "batch-1", Some(1))?)
-            .await?;
-
-        substrate.close_batch(&batch_name("batch-1")?).await?;
-        let events = substrate.tail_events(None, 20).await?;
-
-        assert!(events
-            .iter()
-            .any(|event| event.kind == EventKind::BatchClosed && event.body.contains("drk-1")));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn hands_and_heartbeat_round_trip() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate
-            .register_hand(Hand {
-                id: hand_id("claude-1")?,
-                kind: HandKind::Claude,
-                last_seen: None,
-            })
-            .await?;
-        substrate.heartbeat(&hand_id("claude-1")?).await?;
-
-        let hands = substrate.list_hands().await?;
-
-        assert_eq!(hands.len(), 1);
-        assert!(hands[0].last_seen.is_some());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn record_event_and_tail_events_respect_since_limit_order() -> Result<(), SubstrateError>
-    {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        let first = substrate
-            .record_event(NewEvent {
-                kind: EventKind::Note,
-                ticket: None,
-                body: "first".to_owned(),
-            })
-            .await?;
-        let second = substrate
-            .record_event(NewEvent {
-                kind: EventKind::Note,
-                ticket: None,
-                body: "second".to_owned(),
-            })
-            .await?;
-        let events = substrate.tail_events(Some(first.at), 1).await?;
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].id, second.id);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn foreman_status_reports_stopped_and_detached() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-
-        assert_eq!(substrate.foreman_status().await?.mode, ForemanMode::Stopped);
-        substrate.record_foreman_start(123).await?;
-        let running = substrate.foreman_status().await?;
-        assert_eq!(running.pid, Some(123));
-        assert_eq!(running.mode, ForemanMode::Detached);
-        substrate.record_foreman_stop().await?;
-        assert_eq!(substrate.foreman_status().await?.mode, ForemanMode::Stopped);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn worktree_lifecycle_round_trip() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        let path = substrate
-            .reserve_worktree("run-1", "derrick/feature-run-1")
-            .await?;
-        assert_eq!(path, tempdir.path().join("worktrees").join("run-1"));
-        assert!(matches!(
-            substrate
-                .reserve_worktree("run-1", "derrick/other-run-1")
-                .await,
-            Err(SubstrateError::Conflict { .. })
-        ));
-        assert!(matches!(
-            substrate
-                .reserve_worktree("run-2", "derrick/feature-run-1")
-                .await,
-            Err(SubstrateError::Conflict { .. })
-        ));
-        substrate.finalize_worktree("run-1").await?;
-        assert_eq!(substrate.list_worktrees(false).await?.len(), 1);
-        substrate.close_worktree("run-1").await?;
-        assert!(substrate.list_worktrees(false).await?.is_empty());
-        assert_eq!(substrate.list_worktrees(true).await?.len(), 1);
-        substrate
-            .reserve_worktree("run-2", "derrick/feature-run-2")
-            .await?;
-        substrate.rollback_worktree("run-2").await?;
-        substrate.rollback_worktree("run-2").await?;
-        assert_eq!(substrate.list_worktrees(true).await?.len(), 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn open_rejects_mismatched_site_and_multiple_site_rows() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let config = native_config(&tempdir);
-        let substrate = NativeSubstrate::open(config.clone(), site()).await?;
-        substrate.close().await?;
-
-        let mismatched = site();
-        write_site_row_for_test(&config.db_path, "other", "oth", true)?;
-        let result = NativeSubstrate::open(config.clone(), mismatched.clone()).await;
-        assert!(matches!(result, Err(SubstrateError::Invalid { .. })));
-
-        let connection = open_writer_connection(&config.db_path)?;
-        connection
-            .execute(
-                "INSERT INTO site (name, prefix, created_at) VALUES ('second', 'sec', ?1)",
-                params![now_text()],
-            )
-            .map_err(sql_error)?;
-        let result = NativeSubstrate::open(config, mismatched).await;
-        assert!(matches!(result, Err(SubstrateError::Invalid { .. })));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pragmas_set_on_every_connection_and_reader_is_query_only() -> Result<(), SubstrateError>
-    {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-
-        assert!(substrate.writer_foreign_keys_enabled_for_test().await?);
-        assert!(substrate.reader_foreign_keys_enabled_for_test().await?);
-        assert!(matches!(
-            substrate.reader_insert_fails_for_test().await,
-            Err(SubstrateError::Backend(_))
-        ));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn concurrent_terminal_writes_emit_one_batch_closed_event() -> Result<(), SubstrateError>
-    {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = Arc::new(open(&tempdir).await?);
-        substrate.create_batch(batch_name("batch-1")?).await?;
-        substrate
-            .create_ticket(new_batched_ticket("drk-1", "batch-1", Some(1))?)
-            .await?;
-        substrate
-            .create_ticket(new_batched_ticket("drk-2", "batch-1", Some(2))?)
-            .await?;
-
-        let first = Arc::clone(&substrate);
-        let second = Arc::clone(&substrate);
-        let first_task = tokio::spawn(async move {
-            first
-                .set_ticket_state(&ticket_id("drk-1")?, TicketState::Done, None)
-                .await
-        });
-        let second_task = tokio::spawn(async move {
-            second
-                .set_ticket_state(&ticket_id("drk-2")?, TicketState::Done, None)
-                .await
-        });
-        join_ticket(first_task).await?;
-        join_ticket(second_task).await?;
-        let events = substrate.tail_events(None, 100).await?;
-
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| event.kind == EventKind::BatchClosed)
-                .count(),
-            1
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn concurrent_writes_serialise() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = Arc::new(open(&tempdir).await?);
-        let mut tasks = Vec::new();
-        for index in 0..10 {
-            let substrate = Arc::clone(&substrate);
-            tasks.push(tokio::spawn(async move {
-                substrate
-                    .create_ticket(new_ticket(&format!("drk-{index}"))?)
-                    .await
-            }));
-        }
-        for task in tasks {
-            join_ticket(task).await?;
-        }
-
-        let tickets = substrate
-            .list_tickets(TicketFilter {
-                limit: None,
-                ..TicketFilter::default()
-            })
-            .await?;
-        assert_eq!(tickets.len(), 10);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn concurrent_reads_dont_block_on_write_mutex() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let substrate = open(&tempdir).await?;
-        substrate.create_ticket(new_ticket("drk-1")?).await?;
-        let guard = Arc::clone(&substrate.writer).lock_owned().await;
-        let read = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            substrate.get_ticket(&ticket_id("drk-1")?),
-        )
-        .await
-        .map_err(|error| SubstrateError::Backend(Box::new(error)))?;
-        drop(guard);
-
-        assert!(read?.is_some());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn migration_runs_skips_and_refuses_newer_schema() -> Result<(), SubstrateError> {
-        let tempdir = tempfile::tempdir().map_err(io_error)?;
-        let config = native_config(&tempdir);
-        NativeSubstrate::open(config.clone(), site()).await?;
-        NativeSubstrate::open(config.clone(), site()).await?;
-        let connection = open_writer_connection(&config.db_path)?;
-        let version: u32 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(sql_error)?;
-        assert_eq!(version, SCHEMA_VERSION);
-        connection
-            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
-            .map_err(sql_error)?;
-        let result = NativeSubstrate::open(config, site()).await;
-        assert!(matches!(result, Err(SubstrateError::Invalid { .. })));
-        Ok(())
-    }
-
-    fn write_site_row_for_test(
-        db_path: &Path,
-        name: &str,
-        prefix: &str,
-        clear_existing: bool,
-    ) -> Result<(), SubstrateError> {
-        let connection = open_writer_connection(db_path)?;
-        if clear_existing {
-            connection
-                .execute("DELETE FROM site", [])
-                .map_err(sql_error)?;
-        }
-        connection
-            .execute(
-                "INSERT INTO site (name, prefix, created_at) VALUES (?1, ?2, ?3)",
-                params![name, prefix, now_text()],
-            )
-            .map_err(sql_error)?;
-        Ok(())
-    }
-
-    async fn join_ticket(
-        task: tokio::task::JoinHandle<Result<Ticket, SubstrateError>>,
-    ) -> Result<Ticket, SubstrateError> {
-        task.await.map_err(join_error)?
-    }
-
-    fn io_error(error: std::io::Error) -> SubstrateError {
-        SubstrateError::Backend(Box::new(error))
-    }
-}
+mod tests;

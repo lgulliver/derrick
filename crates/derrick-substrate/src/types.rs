@@ -240,6 +240,8 @@ pub enum TicketState {
     Ready,
     /// Currently owned and being worked.
     InFlight,
+    /// Work claimed complete by the hand, awaiting verifier confirmation (D31).
+    InReview,
     /// Waiting on another ticket or external condition.
     Blocked,
     /// Completed successfully.
@@ -250,6 +252,10 @@ pub enum TicketState {
 
 impl TicketState {
     /// Returns `true` when the state closes a ticket.
+    ///
+    /// Only `Done` and `Rejected` are terminal. `InReview` and `Blocked`
+    /// are non-terminal: `Blocked` awaits a human decision (re-open or
+    /// reject) and must not auto-close a batch.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Done | Self::Rejected)
     }
@@ -260,6 +266,7 @@ impl fmt::Display for TicketState {
         formatter.write_str(match self {
             Self::Ready => "ready",
             Self::InFlight => "in_flight",
+            Self::InReview => "in_review",
             Self::Blocked => "blocked",
             Self::Done => "done",
             Self::Rejected => "rejected",
@@ -274,12 +281,45 @@ impl FromStr for TicketState {
         match value {
             "ready" => Ok(Self::Ready),
             "in_flight" => Ok(Self::InFlight),
+            "in_review" => Ok(Self::InReview),
             "blocked" => Ok(Self::Blocked),
             "done" => Ok(Self::Done),
             "rejected" => Ok(Self::Rejected),
             _ => Err(SubstrateError::invalid("ticket_state", "unknown state")),
         }
     }
+}
+
+/// Reason a ticket is `Blocked`. Determines whether the cleanup pass may
+/// auto-unblock it.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BlockReason {
+    /// Blocked on a `blocks`-link predecessor that wasn't terminal at
+    /// dispatch time. Auto-unblocks when the predecessor reaches
+    /// `Done` / `Rejected`.
+    Dependency {
+        /// Predecessor ticket whose terminal state will release this one.
+        predecessor: TicketId,
+    },
+    /// Verifier saw the PR closed without a merge. Requires human action.
+    PrClosedUnmerged {
+        /// Branch the hand pushed.
+        branch: String,
+        /// PR URL, when one was opened.
+        pr_url: Option<String>,
+    },
+    /// Stacking restack conflict (D19). Requires human action to rebase.
+    RestackConflict {
+        /// Recipe identifier that failed to restack.
+        recipe: String,
+    },
+    /// User explicitly blocked via `derrick ticket block`.
+    Human {
+        /// Free-form human note.
+        note: String,
+    },
 }
 
 /// Typed edge between two tickets.
@@ -350,63 +390,166 @@ impl FromStr for HandKind {
     }
 }
 
-/// Kind of event in the activity log.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// Kind of event in the activity log. Carries the full payload so the
+/// current ticket state is a projection of the event log (D31).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum EventKind {
     /// A ticket was created.
-    TicketCreated,
+    TicketCreated {
+        /// Initial lifecycle state.
+        initial_state: TicketState,
+    },
     /// A ticket changed state.
-    TicketStateChanged,
-    /// A ticket owner changed.
-    TicketAssigned,
+    TicketStateChanged {
+        /// Previous state.
+        from: TicketState,
+        /// New state.
+        to: TicketState,
+        /// Optional human-readable reason.
+        reason: Option<String>,
+    },
+    /// A ticket entered `InReview` with the metadata the verifier needs to
+    /// reconcile against git later.
+    TicketTransitionedToInReview {
+        /// Branch the hand pushed.
+        branch: String,
+        /// PR URL if opened.
+        pr_url: Option<String>,
+        /// PR number extracted from the URL.
+        pr_number: Option<u64>,
+        /// Head commit SHA at transition.
+        head_sha: String,
+    },
+    /// The verifier observed a merge for an `InReview` ticket.
+    TicketVerifiedMerged {
+        /// Head SHA on the `InReview` branch at observation.
+        head_sha: String,
+        /// Merge commit on the target branch.
+        merge_sha: String,
+    },
+    /// The verifier observed the PR closed without a merge (D32 — blocks).
+    TicketVerifiedUnmerged {
+        /// Human-readable reason from the verifier.
+        reason: String,
+    },
+    /// A human attested completion via `derrick ticket done` (`solo` mode).
+    TicketMarkedDoneManually {
+        /// Human identity claiming completion.
+        claimant: String,
+        /// Human note recorded alongside the attestation.
+        note: String,
+    },
+    /// A ticket owner was set.
+    TicketAssigned {
+        /// Hand now owning the ticket.
+        hand: HandId,
+    },
+    /// A ticket owner was cleared.
+    TicketUnassigned {
+        /// Reason the hand was released.
+        reason: String,
+    },
     /// A batch was created.
     BatchCreated,
     /// A batch was closed.
-    BatchClosed,
+    BatchClosed {
+        /// Tickets that were still open at force-close (empty on auto-close).
+        open_ticket_ids: Vec<TicketId>,
+    },
     /// The foreman started.
-    ForemanStarted,
-    /// The foreman stopped.
+    ForemanStarted {
+        /// Mode the foreman started in.
+        mode: ForemanMode,
+        /// OS pid of the loop process.
+        pid: u32,
+    },
+    /// The foreman stopped cleanly.
     ForemanStopped,
+    /// A hand was registered.
+    HandRegistered,
+    /// A hand reported a heartbeat.
+    HandHeartbeat,
+    /// A hand was abandoned by the cleanup pass after its TTL expired.
+    HandAbandoned {
+        /// Ticket the hand was previously owning, if any.
+        previous_owner_of: TicketId,
+    },
+    /// A worktree was reserved for a dispatch run.
+    WorktreeReserved {
+        /// Run identifier.
+        run_id: String,
+        /// Branch the worktree was reserved for.
+        branch: String,
+    },
+    /// A worktree was finalised cleanly after the run completed.
+    WorktreeFinalized {
+        /// Run identifier.
+        run_id: String,
+    },
+    /// A worktree was abandoned by the cleanup pass.
+    WorktreeAbandoned {
+        /// Run identifier.
+        run_id: String,
+        /// Reason the worktree was abandoned.
+        reason: String,
+    },
+    /// Operator escalation: ticket stuck in `InReview` past the threshold.
+    EscalationStuckInReview {
+        /// Ticket that is stuck.
+        ticket: TicketId,
+        /// Branch the ticket is on.
+        branch: String,
+    },
     /// A restack conflict was detected.
-    RestackConflict,
+    RestackConflict {
+        /// Ticket whose restack failed.
+        ticket: TicketId,
+        /// Recipe identifier that failed.
+        recipe: String,
+    },
     /// Human-readable note.
-    Note,
+    Note {
+        /// Free-form body.
+        body: String,
+    },
+}
+
+/// Snake-case discriminator strings for `EventKind` variants. Used for the
+/// `kind` column in the events table and for human-readable filters.
+impl EventKind {
+    /// Returns the snake_case discriminator for this event kind.
+    pub fn discriminator(&self) -> &'static str {
+        match self {
+            Self::TicketCreated { .. } => "ticket_created",
+            Self::TicketStateChanged { .. } => "ticket_state_changed",
+            Self::TicketTransitionedToInReview { .. } => "ticket_transitioned_to_in_review",
+            Self::TicketVerifiedMerged { .. } => "ticket_verified_merged",
+            Self::TicketVerifiedUnmerged { .. } => "ticket_verified_unmerged",
+            Self::TicketMarkedDoneManually { .. } => "ticket_marked_done_manually",
+            Self::TicketAssigned { .. } => "ticket_assigned",
+            Self::TicketUnassigned { .. } => "ticket_unassigned",
+            Self::BatchCreated => "batch_created",
+            Self::BatchClosed { .. } => "batch_closed",
+            Self::ForemanStarted { .. } => "foreman_started",
+            Self::ForemanStopped => "foreman_stopped",
+            Self::HandRegistered => "hand_registered",
+            Self::HandHeartbeat => "hand_heartbeat",
+            Self::HandAbandoned { .. } => "hand_abandoned",
+            Self::WorktreeReserved { .. } => "worktree_reserved",
+            Self::WorktreeFinalized { .. } => "worktree_finalized",
+            Self::WorktreeAbandoned { .. } => "worktree_abandoned",
+            Self::EscalationStuckInReview { .. } => "escalation_stuck_in_review",
+            Self::RestackConflict { .. } => "restack_conflict",
+            Self::Note { .. } => "note",
+        }
+    }
 }
 
 impl fmt::Display for EventKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::TicketCreated => "ticket_created",
-            Self::TicketStateChanged => "ticket_state_changed",
-            Self::TicketAssigned => "ticket_assigned",
-            Self::BatchCreated => "batch_created",
-            Self::BatchClosed => "batch_closed",
-            Self::ForemanStarted => "foreman_started",
-            Self::ForemanStopped => "foreman_stopped",
-            Self::RestackConflict => "restack_conflict",
-            Self::Note => "note",
-        })
-    }
-}
-
-impl FromStr for EventKind {
-    type Err = SubstrateError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "ticket_created" => Ok(Self::TicketCreated),
-            "ticket_state_changed" => Ok(Self::TicketStateChanged),
-            "ticket_assigned" => Ok(Self::TicketAssigned),
-            "batch_created" => Ok(Self::BatchCreated),
-            "batch_closed" => Ok(Self::BatchClosed),
-            "foreman_started" => Ok(Self::ForemanStarted),
-            "foreman_stopped" => Ok(Self::ForemanStopped),
-            "restack_conflict" => Ok(Self::RestackConflict),
-            "note" => Ok(Self::Note),
-            _ => Err(SubstrateError::invalid("event_kind", "unknown event kind")),
-        }
+        formatter.write_str(self.discriminator())
     }
 }
 
@@ -468,6 +611,11 @@ pub struct Ticket {
     pub labels: Vec<String>,
     /// Hand that owns this ticket.
     pub owner: Option<HandId>,
+    /// Merge commit SHA on the target branch (set only via the verifier path).
+    pub merge_sha: Option<String>,
+    /// Structured reason this ticket is `Blocked`. Set only while
+    /// `state == Blocked`; cleared on transition out.
+    pub block_reason: Option<BlockReason>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
@@ -586,15 +734,85 @@ impl NewTicket {
     }
 }
 
-/// Input for recording an activity event.
+/// Input for recording an activity event (legacy string-bodied surface;
+/// retained for the deprecated `record_event` API).
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct NewEvent {
-    /// Event kind.
-    pub kind: EventKind,
+    /// Event kind discriminator string.
+    pub kind: String,
     /// Ticket associated with the event, when any.
     pub ticket: Option<TicketId>,
     /// Event body.
     pub body: String,
+}
+
+/// Identifier for a persisted typed event.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct EventId(pub i64);
+
+impl fmt::Display for EventId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+/// Scope of an event in the activity log. Exactly one variant identifies
+/// the entity the event pertains to.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum EventScope {
+    /// Scoped to a specific ticket.
+    Ticket(TicketId),
+    /// Scoped to a batch.
+    Batch(BatchName),
+    /// Scoped to a hand.
+    Hand(HandId),
+    /// Scoped to a worktree dispatch run.
+    Worktree {
+        /// Run identifier.
+        run_id: String,
+    },
+    /// Scoped to the site as a whole.
+    Site,
+}
+
+/// A typed event read from the activity log. The `kind` payload carries
+/// the full structured event content (D31).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct TypedEvent {
+    /// Persistent event id.
+    pub id: EventId,
+    /// Event scope.
+    pub scope: EventScope,
+    /// Structured event payload.
+    pub kind: EventKind,
+    /// Event timestamp.
+    pub at: DateTime<Utc>,
+}
+
+/// Attestation captured when a human marks a ticket `Done` manually via
+/// `derrick ticket done` (`solo` mode).
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ManualDoneAttestation {
+    /// Human identity claiming completion.
+    pub claimant: String,
+    /// Free-form note recorded in the event body.
+    pub note: String,
+}
+
+/// Metadata captured when a hand transitions a ticket to `InReview`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct InReviewMetadata {
+    /// Branch the hand pushed (must follow
+    /// `derrick/<batch>/<ticket_id>` when stacking is on).
+    pub branch: String,
+    /// PR URL, when one was opened. `None` means the hand is mid-push.
+    pub pr_url: Option<String>,
+    /// PR number extracted from the URL.
+    pub pr_number: Option<u64>,
+    /// Head commit SHA at the moment of transition.
+    pub head_sha: String,
 }
 
 /// Filters used when listing tickets.
@@ -841,6 +1059,7 @@ mod tests {
     fn serde_round_trip_for_every_enum() {
         assert_enum_serde(TicketState::Ready, "ready");
         assert_enum_serde(TicketState::InFlight, "in_flight");
+        assert_enum_serde(TicketState::InReview, "in_review");
         assert_enum_serde(TicketState::Blocked, "blocked");
         assert_enum_serde(TicketState::Done, "done");
         assert_enum_serde(TicketState::Rejected, "rejected");
@@ -849,18 +1068,34 @@ mod tests {
         assert_enum_serde(HandKind::Claude, "claude");
         assert_enum_serde(HandKind::Copilot, "copilot");
         assert_enum_serde(HandKind::Human, "human");
-        assert_enum_serde(EventKind::TicketCreated, "ticket_created");
-        assert_enum_serde(EventKind::TicketStateChanged, "ticket_state_changed");
-        assert_enum_serde(EventKind::TicketAssigned, "ticket_assigned");
-        assert_enum_serde(EventKind::BatchCreated, "batch_created");
-        assert_enum_serde(EventKind::BatchClosed, "batch_closed");
-        assert_enum_serde(EventKind::ForemanStarted, "foreman_started");
-        assert_enum_serde(EventKind::ForemanStopped, "foreman_stopped");
-        assert_enum_serde(EventKind::RestackConflict, "restack_conflict");
-        assert_enum_serde(EventKind::Note, "note");
         assert_enum_serde(ForemanMode::Detached, "detached");
         assert_enum_serde(ForemanMode::Attached, "attached");
         assert_enum_serde(ForemanMode::Stopped, "stopped");
+    }
+
+    #[test]
+    fn event_kind_serde_round_trips_via_tag() {
+        let kind = EventKind::TicketStateChanged {
+            from: TicketState::Ready,
+            to: TicketState::InFlight,
+            reason: Some("dispatch".to_owned()),
+        };
+        let json = serde_json::to_string(&kind).expect("serialize");
+        assert!(json.contains("\"kind\":\"ticket_state_changed\""));
+        let back: EventKind = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, kind);
+    }
+
+    #[test]
+    fn event_kind_discriminator_matches_snake_case() {
+        assert_eq!(EventKind::BatchCreated.discriminator(), "batch_created");
+        assert_eq!(
+            EventKind::Note {
+                body: "x".to_owned()
+            }
+            .discriminator(),
+            "note"
+        );
     }
 
     fn assert_enum_serde<T>(value: T, expected: &str)
@@ -886,9 +1121,9 @@ mod tests {
         assert_display_from_str(batch_name("batch-1"));
         assert_display_from_str(hand_id("copilot-1"));
         assert_display_from_str(TicketState::InFlight);
+        assert_display_from_str(TicketState::InReview);
         assert_display_from_str(LinkKind::Blocks);
         assert_display_from_str(HandKind::Copilot);
-        assert_display_from_str(EventKind::RestackConflict);
         assert_display_from_str(ForemanMode::Detached);
     }
 
@@ -941,7 +1176,9 @@ mod tests {
         let state = TicketState::Ready;
         let link = LinkKind::Related;
         let hand = HandKind::Human;
-        let event = EventKind::Note;
+        let event = EventKind::Note {
+            body: "hi".to_owned(),
+        };
         let foreman = ForemanMode::Stopped;
 
         assert_eq!(
@@ -967,7 +1204,7 @@ mod tests {
         );
         assert_eq!(
             match event {
-                EventKind::Note => "note",
+                EventKind::Note { .. } => "note",
                 _ => "other",
             },
             "note"

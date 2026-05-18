@@ -4,6 +4,9 @@ use std::process::ExitCode;
 pub(crate) enum CliExitCode {
     Success,
     Failure,
+    /// Refused for a user-facing policy reason (e.g. mode guard); the
+    /// command printed an explanatory message to stderr.
+    Refused,
     DoctorFailures(usize),
 }
 
@@ -12,6 +15,7 @@ impl From<CliExitCode> for ExitCode {
         match code {
             CliExitCode::Success => Self::SUCCESS,
             CliExitCode::Failure => Self::from(1),
+            CliExitCode::Refused => Self::from(2),
             CliExitCode::DoctorFailures(count) => {
                 let capped = u8::try_from(count).unwrap_or(u8::MAX);
                 Self::from(capped)

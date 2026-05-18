@@ -442,6 +442,7 @@ pub struct Tools {
     substrate: Substrate,
     copilot: Copilot,
     git: Git,
+    foreman: Foreman,
 }
 
 impl Tools {
@@ -469,6 +470,11 @@ impl Tools {
     pub fn git(&self) -> &Git {
         &self.git
     }
+
+    /// Returns foreman runtime configuration (T012).
+    pub fn foreman(&self) -> &Foreman {
+        &self.foreman
+    }
 }
 
 impl Default for Tools {
@@ -488,6 +494,62 @@ impl Default for Tools {
                 agent_identity: "derrick-hand".to_owned(),
             },
             git: Git::default(),
+            foreman: Foreman::default(),
+        }
+    }
+}
+
+/// Foreman runtime configuration (T012). Sourced from `tools.foreman` in
+/// `derrick.yaml`; all fields are optional and fall back to compiled-in
+/// defaults documented on [`Foreman`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Foreman {
+    poll_interval: std::time::Duration,
+    in_review_ttl: std::time::Duration,
+    hand_ttl: std::time::Duration,
+    worktree_ttl: std::time::Duration,
+    exit_when_idle: bool,
+}
+
+impl Foreman {
+    /// Time between `tick()` iterations when running attached. Default 10s.
+    pub fn poll_interval(&self) -> std::time::Duration {
+        self.poll_interval
+    }
+
+    /// Maximum age of an `InReview` ticket before the verifier eagerly
+    /// re-checks it. Default 24h.
+    pub fn in_review_ttl(&self) -> std::time::Duration {
+        self.in_review_ttl
+    }
+
+    /// Maximum gap since a hand's last heartbeat before the cleanup pass
+    /// releases its tickets. Default 30m.
+    pub fn hand_ttl(&self) -> std::time::Duration {
+        self.hand_ttl
+    }
+
+    /// Maximum age of an open worktree row before the cleanup pass prunes
+    /// it. Default 24h.
+    pub fn worktree_ttl(&self) -> std::time::Duration {
+        self.worktree_ttl
+    }
+
+    /// When true, `run_attached` returns after the first tick that produced
+    /// no actions. Default `false`.
+    pub fn exit_when_idle(&self) -> bool {
+        self.exit_when_idle
+    }
+}
+
+impl Default for Foreman {
+    fn default() -> Self {
+        Self {
+            poll_interval: std::time::Duration::from_secs(10),
+            in_review_ttl: std::time::Duration::from_secs(60 * 60 * 24),
+            hand_ttl: std::time::Duration::from_secs(60 * 30),
+            worktree_ttl: std::time::Duration::from_secs(60 * 60 * 24),
+            exit_when_idle: false,
         }
     }
 }
@@ -1353,6 +1415,7 @@ struct ToolsLayer {
     substrate: Option<SubstrateLayer>,
     copilot: Option<CopilotLayer>,
     git: Option<GitLayer>,
+    foreman: Option<ToolsForemanLayer>,
 }
 
 impl ToolsLayer {
@@ -1362,6 +1425,7 @@ impl ToolsLayer {
         merge_nested(&mut self.substrate, other.substrate, SubstrateLayer::merge);
         merge_nested(&mut self.copilot, other.copilot, CopilotLayer::merge);
         merge_nested(&mut self.git, other.git, GitLayer::merge);
+        merge_nested(&mut self.foreman, other.foreman, ToolsForemanLayer::merge);
     }
 
     fn finalize(self) -> Result<Tools, ConfigError> {
@@ -1371,6 +1435,7 @@ impl ToolsLayer {
             substrate: required(self.substrate, "tools.substrate")?.finalize()?,
             copilot: self.copilot.unwrap_or_default().finalize()?,
             git: self.git.unwrap_or_default().finalize()?,
+            foreman: self.foreman.unwrap_or_default().finalize(),
         })
     }
 }
@@ -1383,6 +1448,54 @@ impl From<Tools> for ToolsLayer {
             substrate: Some(tools.substrate.into()),
             copilot: Some(tools.copilot.into()),
             git: Some(tools.git.into()),
+            foreman: Some(tools.foreman.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolsForemanLayer {
+    #[serde(default, with = "humantime_serde")]
+    poll_interval: Option<std::time::Duration>,
+    #[serde(default, with = "humantime_serde")]
+    in_review_ttl: Option<std::time::Duration>,
+    #[serde(default, with = "humantime_serde")]
+    hand_ttl: Option<std::time::Duration>,
+    #[serde(default, with = "humantime_serde")]
+    worktree_ttl: Option<std::time::Duration>,
+    exit_when_idle: Option<bool>,
+}
+
+impl ToolsForemanLayer {
+    fn merge(&mut self, other: Self) {
+        merge_scalar(&mut self.poll_interval, other.poll_interval);
+        merge_scalar(&mut self.in_review_ttl, other.in_review_ttl);
+        merge_scalar(&mut self.hand_ttl, other.hand_ttl);
+        merge_scalar(&mut self.worktree_ttl, other.worktree_ttl);
+        merge_scalar(&mut self.exit_when_idle, other.exit_when_idle);
+    }
+
+    fn finalize(self) -> Foreman {
+        let defaults = Foreman::default();
+        Foreman {
+            poll_interval: self.poll_interval.unwrap_or(defaults.poll_interval),
+            in_review_ttl: self.in_review_ttl.unwrap_or(defaults.in_review_ttl),
+            hand_ttl: self.hand_ttl.unwrap_or(defaults.hand_ttl),
+            worktree_ttl: self.worktree_ttl.unwrap_or(defaults.worktree_ttl),
+            exit_when_idle: self.exit_when_idle.unwrap_or(defaults.exit_when_idle),
+        }
+    }
+}
+
+impl From<Foreman> for ToolsForemanLayer {
+    fn from(foreman: Foreman) -> Self {
+        Self {
+            poll_interval: Some(foreman.poll_interval),
+            in_review_ttl: Some(foreman.in_review_ttl),
+            hand_ttl: Some(foreman.hand_ttl),
+            worktree_ttl: Some(foreman.worktree_ttl),
+            exit_when_idle: Some(foreman.exit_when_idle),
         }
     }
 }
