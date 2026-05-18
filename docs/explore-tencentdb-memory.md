@@ -1,8 +1,8 @@
 # Exploration: TencentDB-Agent-Memory for Derrick
 
-**Branch:** `claude/explore-tencentdb-memory-OXd0y`  
-**Date:** 2026-05-18  
-**Repo:** https://github.com/Tencent/TencentDB-Agent-Memory  
+**Branch:** `claude/explore-tencentdb-memory-OXd0y`
+**Date:** 2026-05-18
+**Repo:** https://github.com/Tencent/TencentDB-Agent-Memory
 
 ---
 
