@@ -73,7 +73,7 @@ resolve_stable() {
 
 # ── resolve latest nightly version ────────────────────────────────────────────
 resolve_nightly() {
-  curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=20" \
+  curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=100" \
     | grep '"tag_name"' \
     | sed 's/.*"tag_name": *"\(.*\)".*/\1/' \
     | grep '^nightly-' \

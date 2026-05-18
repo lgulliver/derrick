@@ -94,15 +94,40 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+
+      - name: Compute nightly tag
+        id: tag
+        run: |
+          BASE="nightly-$(date +'%Y%m%d')"
+          EXISTING=$(gh release list --limit 100 \
+            --json tagName --jq '.[].tagName' 2>/dev/null \
+            | grep "^${BASE}" || true)
+          TAG="$BASE"
+          if [ -n "$EXISTING" ]; then
+            # Extract suffix numbers from existing builds (skip bare base tag)
+            MAX=$(echo "$EXISTING" \
+              | sed -n "s/^${BASE}\.\([0-9][0-9]*\)$/\1/p" \
+              | sort -n \
+              | tail -1)
+            if [ -z "$MAX" ]; then
+              TAG="${BASE}.1"
+            else
+              TAG="${BASE}.$((MAX + 1))"
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Create GitHub release
         run: |
-          TAG="nightly-$(date +'%Y%m%d')"
+          TAG="${{ steps.tag.outputs.tag }}"
           TARGET="$(git rev-parse HEAD)"
           gh release create "$TAG" \
             --prerelease \
             --generate-notes \
             --target "$TARGET" \
-            --title "Nightly build $(date +'%Y-%m-%d')" \
+            --title "Nightly build $TAG" \
             derrick-linux-x86_64 \
             derrick-linux-x86_64.sha256 \
             derrick-macos-arm64 \
