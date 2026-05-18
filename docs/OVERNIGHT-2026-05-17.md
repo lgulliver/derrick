@@ -16,6 +16,8 @@ User left around 23:30 with the instruction:
 | T006 | `derrick-models` BYOM trait + shell provider | 2 | 7m 12s | 90.55% | — |
 | T007 | `derrick-substrate-native` SQLite-backed CRUD | 3 | 10m 48s | 93.08% | 92.29% |
 | T008 | `derrick-cli` minimal (init/status/doctor/run-stub) | 4 | 10m 59s | 80.56% | 90%+ |
+| T009 | `derrick-tools` host CLI adapters | 2 | 12m 50s | 92.86% | — |
+| T010 | `derrick-flow` pipeline orchestrator (final dogfooding-bar item) | 4 | 12m 57s | 82.26% | — |
 
 All shipped under conventional commits, all CI runs green
 (matrix: ubuntu-latest + macos-latest, plus rustfmt, clippy
@@ -83,15 +85,18 @@ Per AGENTS.md, the bar is `T001` + `T002` + `T007` + a minimal
 | `derrick-cli` minimal (T008) | ✅ |
 | `derrick-flow` minimal (T009) | ⏳ NOT drafted yet |
 
-**Three of four bar items shipped overnight.** T009 was left
-intentionally — it requires host invocation (shelling to
-`claude`/`codex`) which entangles with a yet-to-be-built
-`derrick-tools` host-adapter crate, and the spec needed
-fresh-morning thinking rather than a rushed overnight draft
-that would burn codex assay rounds on a botched first pass.
+**All four bar items shipped.** T009 (derrick-tools) and
+T010 (derrick-flow) landed on the second overnight stretch
+after the user picked option A (split derrick-flow + derrick-
+tools) and option A (dogfood on first real artifacts) in the
+morning review.
 
-End-to-end smoke test of the assembled platform-so-far is
-already working:
+End-to-end smoke verified against the built binary with
+mocked claude/codex hosts: `derrick run add-feature` walks
+the full spec→clarify→plan→checkpoint→assay→analyze→tasks
+pipeline, writes a complete run manifest with config-hash
+and skip flags, lands real spec.md / plan.md / tasks.md on
+disk. The pipeline orchestrator is live.
 
 ```
 $ derrick init                                  # exits 1, T011 pointer (correct)
