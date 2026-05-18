@@ -326,6 +326,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "derrick-claude"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "derrick-config",
+ "derrick-substrate",
+ "derrick-substrate-native",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "derrick-cli"
 version = "0.0.0"
 dependencies = [
@@ -336,6 +352,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "derrick-adopt",
+ "derrick-claude",
  "derrick-config",
  "derrick-copilot",
  "derrick-flow",

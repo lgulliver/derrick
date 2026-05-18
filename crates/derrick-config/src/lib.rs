@@ -441,6 +441,7 @@ pub struct Tools {
     assay: Assay,
     substrate: Substrate,
     copilot: Copilot,
+    claude: Claude,
     git: Git,
     foreman: Foreman,
 }
@@ -464,6 +465,11 @@ impl Tools {
     /// Returns Copilot dispatch configuration.
     pub fn copilot(&self) -> &Copilot {
         &self.copilot
+    }
+
+    /// Returns Claude Code dispatch configuration (T015).
+    pub fn claude(&self) -> &Claude {
+        &self.claude
     }
 
     /// Returns git configuration.
@@ -490,6 +496,7 @@ impl Default for Tools {
                 mode: SubstrateMode::Solo,
             },
             copilot: Copilot::default(),
+            claude: Claude::default(),
             git: Git::default(),
             foreman: Foreman::default(),
         }
@@ -715,6 +722,64 @@ impl Default for Copilot {
             agent_identity: "derrick-hand".to_owned(),
             poll_interval: std::time::Duration::from_secs(30),
             poll_timeout: std::time::Duration::from_secs(60 * 10),
+        }
+    }
+}
+
+/// Claude Code hand dispatch configuration (T015).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Claude {
+    enabled: bool,
+    agent_identity: String,
+    auto_dispatch: bool,
+    poll_interval: std::time::Duration,
+    poll_timeout: std::time::Duration,
+    queue_dir: String,
+}
+
+impl Claude {
+    /// Returns whether Claude Code dispatch is enabled.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Returns the identity used for Claude hands.
+    pub fn agent_identity(&self) -> &str {
+        &self.agent_identity
+    }
+
+    /// When true, spawn `claude --print` autonomously. Default false; an
+    /// operator must invoke the queue file manually.
+    pub fn auto_dispatch(&self) -> bool {
+        self.auto_dispatch
+    }
+
+    /// Interval between heartbeats while a dispatched ticket runs. Default 60s.
+    pub fn poll_interval(&self) -> std::time::Duration {
+        self.poll_interval
+    }
+
+    /// Timeout before releasing an unresponsive Claude hand. Default 60 minutes.
+    pub fn poll_timeout(&self) -> std::time::Duration {
+        self.poll_timeout
+    }
+
+    /// Directory (relative to repo root) where queue files are written.
+    /// Default `.derrick/queue`.
+    pub fn queue_dir(&self) -> &str {
+        &self.queue_dir
+    }
+}
+
+impl Default for Claude {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            agent_identity: "derrick-claude-hand".to_owned(),
+            auto_dispatch: false,
+            poll_interval: std::time::Duration::from_secs(60),
+            poll_timeout: std::time::Duration::from_secs(60 * 60),
+            queue_dir: ".derrick/queue".to_owned(),
         }
     }
 }
@@ -1454,6 +1519,7 @@ struct ToolsLayer {
     assay: Option<AssayLayer>,
     substrate: Option<SubstrateLayer>,
     copilot: Option<CopilotLayer>,
+    claude: Option<ClaudeLayer>,
     git: Option<GitLayer>,
     foreman: Option<ToolsForemanLayer>,
 }
@@ -1464,6 +1530,7 @@ impl ToolsLayer {
         merge_nested(&mut self.assay, other.assay, AssayLayer::merge);
         merge_nested(&mut self.substrate, other.substrate, SubstrateLayer::merge);
         merge_nested(&mut self.copilot, other.copilot, CopilotLayer::merge);
+        merge_nested(&mut self.claude, other.claude, ClaudeLayer::merge);
         merge_nested(&mut self.git, other.git, GitLayer::merge);
         merge_nested(&mut self.foreman, other.foreman, ToolsForemanLayer::merge);
     }
@@ -1474,6 +1541,7 @@ impl ToolsLayer {
             assay: self.assay.unwrap_or_default().finalize()?,
             substrate: required(self.substrate, "tools.substrate")?.finalize()?,
             copilot: self.copilot.unwrap_or_default().finalize()?,
+            claude: self.claude.unwrap_or_default().finalize(),
             git: self.git.unwrap_or_default().finalize()?,
             foreman: self.foreman.unwrap_or_default().finalize(),
         })
@@ -1487,6 +1555,7 @@ impl From<Tools> for ToolsLayer {
             assay: Some(tools.assay.into()),
             substrate: Some(tools.substrate.into()),
             copilot: Some(tools.copilot.into()),
+            claude: Some(tools.claude.into()),
             git: Some(tools.git.into()),
             foreman: Some(tools.foreman.into()),
         }
@@ -1704,6 +1773,55 @@ impl From<Copilot> for CopilotLayer {
             agent_identity: Some(copilot.agent_identity),
             poll_interval: Some(copilot.poll_interval),
             poll_timeout: Some(copilot.poll_timeout),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaudeLayer {
+    enabled: Option<bool>,
+    agent_identity: Option<String>,
+    auto_dispatch: Option<bool>,
+    #[serde(default, with = "humantime_serde")]
+    poll_interval: Option<std::time::Duration>,
+    #[serde(default, with = "humantime_serde")]
+    poll_timeout: Option<std::time::Duration>,
+    queue_dir: Option<String>,
+}
+
+impl ClaudeLayer {
+    fn merge(&mut self, other: Self) {
+        merge_scalar(&mut self.enabled, other.enabled);
+        merge_scalar(&mut self.agent_identity, other.agent_identity);
+        merge_scalar(&mut self.auto_dispatch, other.auto_dispatch);
+        merge_scalar(&mut self.poll_interval, other.poll_interval);
+        merge_scalar(&mut self.poll_timeout, other.poll_timeout);
+        merge_scalar(&mut self.queue_dir, other.queue_dir);
+    }
+
+    fn finalize(self) -> Claude {
+        let defaults = Claude::default();
+        Claude {
+            enabled: self.enabled.unwrap_or(defaults.enabled),
+            agent_identity: self.agent_identity.unwrap_or(defaults.agent_identity),
+            auto_dispatch: self.auto_dispatch.unwrap_or(defaults.auto_dispatch),
+            poll_interval: self.poll_interval.unwrap_or(defaults.poll_interval),
+            poll_timeout: self.poll_timeout.unwrap_or(defaults.poll_timeout),
+            queue_dir: self.queue_dir.unwrap_or(defaults.queue_dir),
+        }
+    }
+}
+
+impl From<Claude> for ClaudeLayer {
+    fn from(claude: Claude) -> Self {
+        Self {
+            enabled: Some(claude.enabled),
+            agent_identity: Some(claude.agent_identity),
+            auto_dispatch: Some(claude.auto_dispatch),
+            poll_interval: Some(claude.poll_interval),
+            poll_timeout: Some(claude.poll_timeout),
+            queue_dir: Some(claude.queue_dir),
         }
     }
 }

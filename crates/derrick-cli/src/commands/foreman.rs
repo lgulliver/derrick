@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use derrick_claude::{ClaudeHandDispatcher, ClaudeHandDispatcherConfig};
 use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
 use derrick_copilot::{
     CopilotHandDispatcher, CopilotHandDispatcherConfig, GhCopilotClient, GitBranchCreator,
@@ -13,7 +14,9 @@ use derrick_stack::{GraphiteStackBackend, NativeStackBackend, NoneStackBackend, 
 use derrick_substrate::Substrate;
 #[allow(deprecated)]
 use derrick_substrate_native::foreman::CopilotStubDispatcher;
-use derrick_substrate_native::foreman::{Foreman, ForemanTtls, GhRepoState, HandDispatcher};
+use derrick_substrate_native::foreman::{
+    Foreman, ForemanTtls, GhRepoState, HandDispatcher, MultiDispatcher,
+};
 use derrick_substrate_native::NativeSubstrate;
 
 use crate::commands::{
@@ -128,7 +131,20 @@ fn build_dispatcher(
     config: &Config,
     substrate: &Arc<NativeSubstrate>,
 ) -> Box<dyn HandDispatcher> {
-    if config.tools().copilot().enabled() {
+    let copilot_enabled = config.tools().copilot().enabled();
+    let claude_enabled = config.tools().claude().enabled();
+    // Default to copilot when enabled, otherwise claude; falls back to the
+    // copilot stub below when neither is on.
+    let default_kind = if copilot_enabled {
+        "copilot"
+    } else if claude_enabled {
+        "claude"
+    } else {
+        "copilot"
+    };
+    let mut multi = MultiDispatcher::new(default_kind);
+
+    if copilot_enabled {
         let copilot_config = CopilotHandDispatcherConfig {
             poll_interval: config.tools().copilot().poll_interval(),
             poll_timeout: config.tools().copilot().poll_timeout(),
@@ -140,20 +156,41 @@ fn build_dispatcher(
             as Arc<dyn derrick_copilot::BranchCreator>;
         let client = Arc::new(GhCopilotClient::new(repo_root.to_path_buf()))
             as Arc<dyn derrick_copilot::CopilotDispatchClient>;
-        Box::new(CopilotHandDispatcher::new(
+        multi = multi.register(Box::new(CopilotHandDispatcher::new(
             Arc::clone(substrate),
             branch_creator,
             client,
             copilot_config,
-        ))
-    } else {
-        // tools.copilot.enabled = false: keep the stub in place so the
-        // foreman can still tick on non-copilot workloads (e.g. human
-        // mode). The stub returns NotImplemented, which the foreman
-        // surfaces as an event without failing the tick.
+        )));
+    }
+
+    if claude_enabled {
+        let claude_cfg = config.tools().claude();
+        let dispatcher_config = ClaudeHandDispatcherConfig {
+            auto_dispatch: claude_cfg.auto_dispatch(),
+            poll_interval: claude_cfg.poll_interval(),
+            poll_timeout: claude_cfg.poll_timeout(),
+            agent_identity: claude_cfg.agent_identity().to_owned(),
+            branch_prefix: config.tools().git().branch_prefix().to_owned(),
+            queue_dir: repo_root.join(claude_cfg.queue_dir()),
+            base_branch: "main".to_owned(),
+        };
+        multi = multi.register(Box::new(ClaudeHandDispatcher::new(
+            Arc::clone(substrate),
+            dispatcher_config,
+        )));
+    }
+
+    if multi.is_empty() {
+        // No dispatchers enabled: keep the stub in place so the foreman can
+        // still tick on non-copilot workloads (e.g. human mode). The stub
+        // returns NotImplemented, which the foreman surfaces as an event
+        // without failing the tick.
         #[allow(deprecated)]
         let stub = CopilotStubDispatcher;
         Box::new(stub)
+    } else {
+        Box::new(multi)
     }
 }
 

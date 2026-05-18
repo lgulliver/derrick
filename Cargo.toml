@@ -9,6 +9,7 @@ members = [
     "crates/derrick-scrub",
     "crates/derrick-caveman",
     "crates/derrick-copilot",
+    "crates/derrick-claude",
     "crates/derrick-models",
     "crates/derrick-adopt",
     "crates/derrick-substrate",

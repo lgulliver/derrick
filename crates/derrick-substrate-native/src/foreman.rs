@@ -295,6 +295,76 @@ impl HandDispatcher for CopilotStubDispatcher {
     }
 }
 
+/// Dispatcher façade that routes each ticket to one of several registered
+/// dispatchers based on a `kind:<name>` label. Used by crew mode when both
+/// Copilot and Claude hands are enabled (T015).
+///
+/// Selection rule: if a ticket carries a label `kind:<name>` where `<name>`
+/// matches a registered dispatcher's [`HandDispatcher::kind`], that
+/// dispatcher is used. Otherwise the dispatcher registered with the
+/// constructor's `default_kind` is used. If no dispatcher matches the
+/// default kind the first registered dispatcher is used.
+pub struct MultiDispatcher {
+    dispatchers: Vec<Box<dyn HandDispatcher>>,
+    default_kind: &'static str,
+}
+
+impl MultiDispatcher {
+    /// Construct a new `MultiDispatcher` whose fallback dispatcher is
+    /// identified by `default_kind`.
+    pub fn new(default_kind: &'static str) -> Self {
+        Self {
+            dispatchers: Vec::new(),
+            default_kind,
+        }
+    }
+
+    /// Register a dispatcher. Order is not meaningful except as the
+    /// last-resort fallback when no other selector matches.
+    #[must_use]
+    pub fn register(mut self, dispatcher: Box<dyn HandDispatcher>) -> Self {
+        self.dispatchers.push(dispatcher);
+        self
+    }
+
+    /// Returns `true` when no dispatchers have been registered.
+    pub fn is_empty(&self) -> bool {
+        self.dispatchers.is_empty()
+    }
+
+    fn select(&self, ticket: &Ticket) -> Option<&dyn HandDispatcher> {
+        for label in &ticket.labels {
+            if let Some(name) = label.strip_prefix("kind:") {
+                if let Some(d) = self.dispatchers.iter().find(|d| d.kind() == name) {
+                    return Some(d.as_ref());
+                }
+            }
+        }
+        if let Some(d) = self
+            .dispatchers
+            .iter()
+            .find(|d| d.kind() == self.default_kind)
+        {
+            return Some(d.as_ref());
+        }
+        self.dispatchers.first().map(std::convert::AsRef::as_ref)
+    }
+}
+
+#[async_trait]
+impl HandDispatcher for MultiDispatcher {
+    fn kind(&self) -> &'static str {
+        "multi"
+    }
+
+    async fn dispatch(&self, ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
+        match self.select(ctx.ticket) {
+            Some(dispatcher) => dispatcher.dispatch(ctx).await,
+            None => Err(DispatchError::NotImplemented { kind: "multi" }),
+        }
+    }
+}
+
 /// Errors returned by `Foreman::tick`.
 #[derive(Error, Debug)]
 #[non_exhaustive]
