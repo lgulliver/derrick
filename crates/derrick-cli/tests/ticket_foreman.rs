@@ -241,12 +241,12 @@ async fn cli_foreman_start_detached_writes_pid_and_exits() -> TestResult {
     derrick()?
         .current_dir(dir.path())
         .args(["foreman", "start", "--detached"])
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
         .assert()
         .success();
 
-    // Wait briefly for the pid file to appear.
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // Wait briefly for the pid file to appear (generous for coverage builds).
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline && !pid_path.exists() {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -261,7 +261,7 @@ async fn cli_foreman_start_detached_writes_pid_and_exits() -> TestResult {
     derrick()?
         .current_dir(dir.path())
         .args(["foreman", "stop"])
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
         .assert()
         .success();
     Ok(())
@@ -275,12 +275,12 @@ async fn cli_foreman_stop_signals_and_cleans_pid() -> TestResult {
     derrick()?
         .current_dir(dir.path())
         .args(["foreman", "start", "--detached"])
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
         .assert()
         .success();
 
-    // Wait for pid file.
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // Wait for pid file (generous for coverage builds).
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline && !pid_path.exists() {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -290,14 +290,14 @@ async fn cli_foreman_stop_signals_and_cleans_pid() -> TestResult {
     derrick()?
         .current_dir(dir.path())
         .args(["foreman", "stop"])
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
         .assert()
         .success();
 
     assert!(!pid_path.exists(), "pid file should be removed");
 
     // Process should be gone within a moment.
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline && unsafe { libc::kill(pid, 0) } == 0 {
         std::thread::sleep(Duration::from_millis(50));
     }

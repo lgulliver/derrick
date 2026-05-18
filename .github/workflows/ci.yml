@@ -83,9 +83,8 @@ jobs:
           #   commands/uninstall.rs          — user confirmation prompt + FS deletion
           EXCLUDE='event_loop\.rs|derrick-tui/src/tabs\.rs|derrick-observe/src|commands/(observe|stack|uninstall)\.rs'
           cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info \
-            --ignore-filename-regex "$EXCLUDE"
-          cargo llvm-cov report --fail-under-lines 80 \
-            --ignore-filename-regex "$EXCLUDE"
+            --ignore-filename-regex "$EXCLUDE" \
+            --fail-under-lines 80
       - uses: actions/upload-artifact@v4
         if: always()
         with:
