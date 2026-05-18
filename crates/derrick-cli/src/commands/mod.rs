@@ -2,12 +2,15 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::output::OutputFormat;
 
+pub(crate) mod caveman;
 pub(crate) mod completions;
 pub(crate) mod doctor;
 pub(crate) mod foreman;
+pub(crate) mod gain;
 pub(crate) mod init;
 pub(crate) mod observe;
 pub(crate) mod run;
+pub(crate) mod scrub;
 pub(crate) mod stack;
 pub(crate) mod status;
 pub(crate) mod ticket;
@@ -32,6 +35,42 @@ pub(crate) enum Command {
     Stack(StackArgs),
     Observe(ObserveArgs),
     Uninstall(UninstallArgs),
+    Scrub(ScrubArgs),
+    Caveman(CavemanArgs),
+    Gain(GainArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ScrubArgs {
+    /// The tool name to apply rules for (e.g. git, gh, claude, cargo).
+    pub(crate) tool: String,
+    /// Print scrub statistics to stderr after processing.
+    #[arg(long)]
+    pub(crate) stats: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CavemanArgs {
+    /// Compression intensity.
+    #[arg(long, value_enum, default_value_t = CavemanIntensity::Lite)]
+    pub(crate) intensity: CavemanIntensity,
+    /// Print compression statistics to stderr after processing.
+    #[arg(long)]
+    pub(crate) stats: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum CavemanIntensity {
+    Lite,
+    Full,
+    Ultra,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct GainArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
 }
 
 #[derive(Debug, Args)]

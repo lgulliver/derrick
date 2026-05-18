@@ -56,6 +56,18 @@ async fn dispatch(cli: Cli) -> Result<exit_code::CliExitCode, CliError> {
         Command::Stack(args) => commands::stack::execute(args).await,
         Command::Observe(args) => commands::observe::execute(args).await,
         Command::Uninstall(args) => commands::uninstall::execute(args).await,
+        Command::Scrub(args) => commands::scrub::run(args)
+            .await
+            .map(|()| exit_code::CliExitCode::Success)
+            .map_err(|error| message(error.to_string())),
+        Command::Caveman(args) => commands::caveman::run(args)
+            .await
+            .map(|()| exit_code::CliExitCode::Success)
+            .map_err(|error| message(error.to_string())),
+        Command::Gain(args) => commands::gain::run(args)
+            .await
+            .map(|()| exit_code::CliExitCode::Success)
+            .map_err(|error| message(error.to_string())),
     }
 }
 

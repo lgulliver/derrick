@@ -14,6 +14,8 @@ clap_complete = { workspace = true }
 crossterm = { workspace = true }
 derrick-config = { path = "../derrick-config" }
 derrick-adopt = { path = "../derrick-adopt" }
+derrick-scrub = { path = "../derrick-scrub" }
+derrick-caveman = { path = "../derrick-caveman" }
 derrick-claude = { path = "../derrick-claude" }
 derrick-copilot = { path = "../derrick-copilot" }
 derrick-flow = { path = "../derrick-flow" }
