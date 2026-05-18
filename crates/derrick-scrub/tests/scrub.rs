@@ -227,7 +227,7 @@ fn cargo_compile_progress_keeps_first_kind() {
             "cargo",
             b"   Compiling alpha v0.1.0\n   Compiling beta v0.1.0\nok\n"
         ),
-        b"   Compiling alpha v0.1.0\nok\n"
+        b"Compiling: 2 crates\nok\n"
     );
 }
 

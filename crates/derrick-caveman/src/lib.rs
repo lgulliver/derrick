@@ -588,6 +588,12 @@ fn substitute_phrases(input: &str, intensity: Intensity) -> String {
         if let Some(regex) = extensive_regex() {
             output = regex.replace_all(&output, "big").into_owned();
         }
+        if let Some(regex) = in_order_to_regex() {
+            output = regex.replace_all(&output, "to ").into_owned();
+        }
+        if let Some(regex) = verbose_prefix_regex() {
+            output = regex.replace_all(&output, "").into_owned();
+        }
     }
     if intensity == Intensity::Ultra {
         if let Some(regex) = causal_regex() {
@@ -610,6 +616,21 @@ fn should_drop_word(word: &str, intensity: Intensity) -> bool {
             | "probably"
             | "perhaps"
             | "likely"
+            | "moreover"
+            | "furthermore"
+            | "additionally"
+            | "essentially"
+            | "obviously"
+            | "clearly"
+            | "indeed"
+            | "typically"
+            | "generally"
+            | "necessarily"
+            | "subsequently"
+            | "consequently"
+            | "accordingly"
+            | "therefore"
+            | "thus"
     );
     if filler {
         return true;
@@ -625,18 +646,25 @@ fn should_drop_word(word: &str, intensity: Intensity) -> bool {
 }
 
 fn rewrite_word(word: &str, intensity: Intensity) -> String {
-    if intensity != Intensity::Ultra {
+    if intensity == Intensity::Lite {
         return word.to_owned();
     }
 
     match word.to_ascii_lowercase().as_str() {
-        "database" | "databases" => "DB".to_owned(),
-        "authentication" | "authenticate" | "authorization" => "auth".to_owned(),
-        "configuration" | "configure" => "config".to_owned(),
-        "request" | "requests" => "req".to_owned(),
-        "response" | "responses" => "res".to_owned(),
-        "function" | "functions" => "fn".to_owned(),
-        "implementation" | "implementations" => "impl".to_owned(),
+        // Full and Ultra rewrites
+        "however" => "but".to_owned(),
+        "nevertheless" | "nonetheless" => "still".to_owned(),
+        "additionally" => "also".to_owned(),
+        // Ultra-only rewrites
+        "database" | "databases" if intensity == Intensity::Ultra => "DB".to_owned(),
+        "authentication" | "authenticate" | "authorization" if intensity == Intensity::Ultra => {
+            "auth".to_owned()
+        }
+        "configuration" | "configure" if intensity == Intensity::Ultra => "config".to_owned(),
+        "request" | "requests" if intensity == Intensity::Ultra => "req".to_owned(),
+        "response" | "responses" if intensity == Intensity::Ultra => "res".to_owned(),
+        "function" | "functions" if intensity == Intensity::Ultra => "fn".to_owned(),
+        "implementation" | "implementations" if intensity == Intensity::Ultra => "impl".to_owned(),
         _ => word.to_owned(),
     }
 }
@@ -875,7 +903,12 @@ fn word_regex() -> Option<&'static Regex> {
 fn phrase_regex() -> Option<&'static Regex> {
     static REGEX: OnceLock<Option<Regex>> = OnceLock::new();
     REGEX
-        .get_or_init(|| Regex::new(r"(?i)\b(?:sure|certainly|of course|happy to)\b[!,. ]*").ok())
+        .get_or_init(|| {
+            Regex::new(
+                r"(?i)\b(?:i would (?:like to|be (?:happy|glad|pleased) to)(?:\s+let you know that)?|i would like to|let you know that|it is (?:important|worth|necessary)\s+to\s+note\s+that|it should be noted that|please note that|as (?:mentioned|noted|discussed) (?:previously|above|earlier|before)|at this point in time|go ahead and|due to the fact that|in the event that|for the (?:purpose|purposes) of|with (?:regard|regards|respect) to|in (?:terms|light) of|in the context of|in close proximity to|make (?:sure|certain) (?:to|that)|it (?:is|was) worth noting that|as you can (?:see|tell)|needless to say|you (?:should|may|might|can) (?:need to|want to|consider|try to)|you (?:should|may|might) (?:also )?(?:just )?|the (?:best|right|correct) way to|sure|certainly|of course|happy to)\b[!,. ]*",
+            )
+            .ok()
+        })
         .as_ref()
 }
 
@@ -897,5 +930,24 @@ fn causal_regex() -> Option<&'static Regex> {
     static REGEX: OnceLock<Option<Regex>> = OnceLock::new();
     REGEX
         .get_or_init(|| Regex::new(r"(?i)\s+(?:because|therefore|so)\s+").ok())
+        .as_ref()
+}
+
+fn in_order_to_regex() -> Option<&'static Regex> {
+    static REGEX: OnceLock<Option<Regex>> = OnceLock::new();
+    REGEX
+        .get_or_init(|| Regex::new(r"(?i)\bin order to\b\s*").ok())
+        .as_ref()
+}
+
+fn verbose_prefix_regex() -> Option<&'static Regex> {
+    static REGEX: OnceLock<Option<Regex>> = OnceLock::new();
+    REGEX
+        .get_or_init(|| {
+            Regex::new(
+                r"(?i)\b(?:in addition(?:ally)?|as a result|it is clear that|it is obvious that|one (?:should|must|can) note that)\b[,.]?\s*",
+            )
+            .ok()
+        })
         .as_ref()
 }
