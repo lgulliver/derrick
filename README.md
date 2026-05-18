@@ -211,7 +211,7 @@ What's landed and tested:
 - ✅ `marketplace.json` — Claude Code plugin discovery
 - 🔜 Homebrew tap (v1.1)
 - ✅ Per-session token telemetry in `derrick gain` — `derrick gain --run <id>` for per-step breakdown
-- 🔜 True parallel fan-out for multi-reviewer assay
+- ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 
 431 tests passing across 17 crates.
 
