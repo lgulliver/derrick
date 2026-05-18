@@ -1,0 +1,128 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "derrick caveman --intensity lite",
+            "description": "derrick:caveman",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick caveman --intensity lite",
+            "description": "derrick:caveman",
+            "type": "command"
+          }
+        ],
+        "matcher": "Read"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick caveman --intensity lite",
+            "description": "derrick:caveman",
+            "type": "command"
+          }
+        ],
+        "matcher": "Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick caveman --intensity lite",
+            "description": "derrick:caveman",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick caveman --intensity lite",
+            "description": "derrick:caveman",
+            "type": "command"
+          }
+        ],
+        "matcher": "Glob"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick caveman --intensity lite",
+            "description": "derrick:caveman",
+            "type": "command"
+          }
+        ],
+        "matcher": "Grep"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "derrick scrub --tool bash",
+            "description": "derrick:scrub",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick scrub --tool read",
+            "description": "derrick:scrub",
+            "type": "command"
+          }
+        ],
+        "matcher": "Read"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick scrub --tool write",
+            "description": "derrick:scrub",
+            "type": "command"
+          }
+        ],
+        "matcher": "Write"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick scrub --tool edit",
+            "description": "derrick:scrub",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick scrub --tool glob",
+            "description": "derrick:scrub",
+            "type": "command"
+          }
+        ],
+        "matcher": "Glob"
+      },
+      {
+        "hooks": [
+          {
+            "command": "derrick scrub --tool grep",
+            "description": "derrick:scrub",
+            "type": "command"
+          }
+        ],
+        "matcher": "Grep"
+      }
+    ]
+  }
+}
