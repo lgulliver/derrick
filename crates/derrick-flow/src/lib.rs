@@ -131,6 +131,22 @@ impl Runner {
         create_dir_all(&run_dir)?;
         write_manifest(&self.manifest_path(&run_id), &manifest)?;
 
+        // §9.C.5 — reserve + create a git worktree for this run. We degrade
+        // gracefully: if `git worktree add` fails (e.g. dirty index, missing
+        // git binary, no `.git` in repo_root for tests) we log and continue
+        // using the repo root as the working directory.
+        let worktree_branch = format!("derrick/{run_id}");
+        if let Err(err) = self
+            .setup_worktree(&run_id, &worktree_branch, &mut state)
+            .await
+        {
+            tracing::warn!(
+                run_id = %run_id,
+                error = %err,
+                "worktree setup failed; continuing in repo root"
+            );
+        }
+
         let start_index = manifest.steps.len();
         let mut outcome_status = RunStatus::Success;
         // Walk the pipeline tail, batching consecutive steps that share a
@@ -219,12 +235,89 @@ impl Runner {
         manifest.feature_dir = state.feature_dir.clone();
         write_manifest(&self.manifest_path(&run_id), &manifest)?;
 
+        // §9.C.5 — tear down the worktree regardless of outcome.
+        if let Some(path) = state.worktree_path.clone() {
+            self.teardown_worktree(&run_id, &path).await;
+        }
+
         Ok(RunOutcome {
             run_id,
             status: outcome_status,
             feature_dir: state.feature_dir.map(|path| self.repo_root.join(path)),
             steps: manifest.steps.into_iter().map(StepRecord::from).collect(),
         })
+    }
+
+    fn working_dir<'a>(&'a self, state: &'a ExecutionState) -> &'a Path {
+        state
+            .worktree_path
+            .as_deref()
+            .unwrap_or(self.repo_root.as_path())
+    }
+
+    async fn setup_worktree(
+        &self,
+        run_id: &str,
+        branch: &str,
+        state: &mut ExecutionState,
+    ) -> Result<(), RunError> {
+        let path = self
+            .substrate
+            .reserve_worktree(run_id, branch)
+            .await
+            .map_err(RunError::Substrate)?;
+
+        let result = Command::new("git")
+            .args(["worktree", "add", "-b", branch])
+            .arg(&path)
+            .arg("HEAD")
+            .current_dir(&self.repo_root)
+            .kill_on_drop(true)
+            .output()
+            .await;
+
+        match result {
+            Ok(output) if output.status.success() => {
+                state.worktree_path = Some(path);
+                Ok(())
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let reason = stderr.trim().to_owned();
+                let _ = self
+                    .substrate
+                    .record_typed_event(
+                        derrick_substrate::EventScope::Worktree {
+                            run_id: run_id.to_owned(),
+                        },
+                        derrick_substrate::EventKind::WorktreeAbandoned {
+                            run_id: run_id.to_owned(),
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await;
+                Err(RunError::Config(format!(
+                    "git worktree add failed: {reason}"
+                )))
+            }
+            Err(source) => Err(RunError::Io {
+                path: path.clone(),
+                source,
+            }),
+        }
+    }
+
+    async fn teardown_worktree(&self, run_id: &str, path: &Path) {
+        // Close the DB row (emits WorktreeFinalized).
+        let _ = self.substrate.close_worktree(run_id).await;
+        // Remove the on-disk worktree.
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(path)
+            .current_dir(&self.repo_root)
+            .kill_on_drop(true)
+            .output()
+            .await;
     }
 
     async fn execute_step(
@@ -299,9 +392,9 @@ impl Runner {
             // front. Safe to run on every invocation — `create_dir_all` is a
             // no-op when the directory already exists.
             if step.id() == "specify" {
-                create_dir_all(&self.repo_root.join(".specify").join("features"))?;
+                create_dir_all(&self.working_dir(state).join(".specify").join("features"))?;
             }
-            let mut request = HostRequest::new(prompt, &self.repo_root);
+            let mut request = HostRequest::new(prompt, self.working_dir(state));
             // Pipeline steps run without a terminal — tell the host to suppress
             // interactive permission prompts. See D36 and HostRequest::headless.
             request.headless = true;
@@ -317,7 +410,7 @@ impl Runner {
                 })?;
             write_log(log_path, &response.stdout, &response.stderr)?;
             if step.id() == "specify" {
-                state.feature_dir = Some(read_feature_dir(&self.repo_root)?);
+                state.feature_dir = Some(read_feature_dir(self.working_dir(state))?);
             }
             Ok(StepExecution::success(
                 self.detect_artifacts(step.id(), state),
@@ -407,15 +500,16 @@ impl Runner {
     ) -> Result<StepExecution, RunError> {
         let command = required_step_text(step.command(), step.id(), "command")?;
         let command = render_template(command, &self.template_context(state)?)?;
+        let working_dir = self.working_dir(state).to_path_buf();
         let output = Command::new("bash")
             .arg("-lc")
             .arg(command)
-            .current_dir(&self.repo_root)
+            .current_dir(&working_dir)
             .kill_on_drop(true)
             .output()
             .await
             .map_err(|source| RunError::Io {
-                path: self.repo_root.clone(),
+                path: working_dir,
                 source,
             })?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -450,7 +544,7 @@ impl Runner {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| fallback_role.clone());
-            let reviewer_dir = self.repo_root.join(&feature_dir).join("assay");
+            let reviewer_dir = self.working_dir(state).join(&feature_dir).join("assay");
             let outcome = match self
                 .run_reviewer_rounds(step, state, log_path, &reviewer_role, &reviewer_dir)
                 .await?
@@ -482,7 +576,7 @@ impl Runner {
         let mut outcomes: Vec<ReviewerOutcome> = Vec::with_capacity(reviewers.len());
         for reviewer_role in &reviewers {
             let reviewer_dir = self
-                .repo_root
+                .working_dir(state)
                 .join(&feature_dir)
                 .join("assay")
                 .join(reviewer_role);
@@ -497,7 +591,7 @@ impl Runner {
         }
 
         let combined_path = self
-            .repo_root
+            .working_dir(state)
             .join(&feature_dir)
             .join("assay")
             .join("verdict.md");
@@ -517,10 +611,10 @@ impl Runner {
             .clone()
             .ok_or_else(|| RunError::Config("assay requires feature_dir".to_owned()))?;
         let rounds = self.assay_rounds(step, state)?;
-        let spec = read_to_string(&self.repo_root.join(&feature_dir).join("spec.md"))?;
+        let spec = read_to_string(&self.working_dir(state).join(&feature_dir).join("spec.md"))?;
         let constitution = read_to_string(
             &self
-                .repo_root
+                .working_dir(state)
                 .join(self.config.guardrails().constitution_path()),
         )?;
 
@@ -550,7 +644,7 @@ impl Runner {
         create_dir_all(parent(&verdict_path)?)?;
 
         for round in 1..=rounds {
-            let plan = read_to_string(&self.repo_root.join(&feature_dir).join("plan.md"))?;
+            let plan = read_to_string(&self.working_dir(state).join(&feature_dir).join("plan.md"))?;
             let prompt = format!("Task: {}\n\nPlan:\n{plan}", state.prompt);
             let cached = format!("Constitution:\n{constitution}\n\nSpec:\n{spec}");
             let (response_text, model_name) = if codex_fallback {
@@ -561,7 +655,7 @@ impl Runner {
                 let host_response = host
                     .run(HostRequest {
                         headless: true,
-                        ..HostRequest::new(full_prompt, &self.repo_root)
+                        ..HostRequest::new(full_prompt, self.working_dir(state))
                     })
                     .await
                     .map_err(|source| RunError::StepFailed {
@@ -678,7 +772,7 @@ impl Runner {
             "The reviewer raised the following objections. Produce a delta to plan.md that addresses each. Do not rewrite the plan from scratch.\n\n{objections}"
         );
         let response = host
-            .run(HostRequest::new(prompt, &self.repo_root))
+            .run(HostRequest::new(prompt, self.working_dir(state)))
             .await
             .map_err(|source| RunError::StepFailed {
                 id: "plan".to_owned(),
@@ -689,7 +783,7 @@ impl Runner {
                 .feature_dir
                 .as_ref()
                 .ok_or_else(|| RunError::Config("replan requires feature_dir".to_owned()))?;
-            let plan_path = self.repo_root.join(feature_dir).join("plan.md");
+            let plan_path = self.working_dir(state).join(feature_dir).join("plan.md");
             append_log(&plan_path, &response.stdout)?;
         }
         Ok(())
@@ -723,7 +817,7 @@ impl Runner {
         }
         candidates
             .into_iter()
-            .filter(|path| self.repo_root.join(path).exists())
+            .filter(|path| self.working_dir(state).join(path).exists())
             .collect()
     }
 
@@ -1031,6 +1125,7 @@ struct ExecutionState {
     run_id: String,
     run_dir: PathBuf,
     feature_dir: Option<PathBuf>,
+    worktree_path: Option<PathBuf>,
 }
 
 impl ExecutionState {
@@ -1040,6 +1135,7 @@ impl ExecutionState {
             run_id,
             run_dir,
             feature_dir: None,
+            worktree_path: None,
         }
     }
 }

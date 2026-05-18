@@ -1738,6 +1738,18 @@ impl Substrate for NativeSubstrate {
         })
         .await
     }
+
+    async fn reserve_worktree(
+        &self,
+        run_id: &str,
+        branch: &str,
+    ) -> Result<PathBuf, SubstrateError> {
+        NativeSubstrate::reserve_worktree(self, run_id, branch).await
+    }
+
+    async fn close_worktree(&self, run_id: &str) -> Result<(), SubstrateError> {
+        NativeSubstrate::close_worktree(self, run_id).await
+    }
 }
 
 impl NativeSubstrate {

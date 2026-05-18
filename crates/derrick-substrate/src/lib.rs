@@ -278,4 +278,14 @@ pub trait Substrate: Send + Sync {
     /// Records that the foreman stopped cleanly. Writes `mode = stopped`,
     /// clears `pid`, emits `EventKind::ForemanStopped`.
     async fn record_foreman_stopped(&self) -> Result<(), SubstrateError>;
+
+    /// Reserve a worktree slot for a pipeline run and return its planned path.
+    async fn reserve_worktree(
+        &self,
+        run_id: &str,
+        branch: &str,
+    ) -> Result<std::path::PathBuf, SubstrateError>;
+
+    /// Mark a worktree closed after the run completed (success or failure).
+    async fn close_worktree(&self, run_id: &str) -> Result<(), SubstrateError>;
 }
