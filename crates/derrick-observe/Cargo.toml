@@ -7,3 +7,18 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+derrick-tui = { path = "../derrick-tui" }
+derrick-substrate = { path = "../derrick-substrate" }
+derrick-substrate-native = { path = "../derrick-substrate-native" }
+derrick-config = { path = "../derrick-config" }
+derrick-stack = { path = "../derrick-stack" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

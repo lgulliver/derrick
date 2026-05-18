@@ -252,6 +252,9 @@ impl Runner {
                 create_dir_all(&self.repo_root.join(".specify").join("features"))?;
             }
             let mut request = HostRequest::new(prompt, &self.repo_root);
+            // Pipeline steps run without a terminal — tell the host to suppress
+            // interactive permission prompts. See D36 and HostRequest::headless.
+            request.headless = true;
             if host_name == "copilot" {
                 request.copilot_tools = CopilotToolPermission::AllowAll;
             }
@@ -433,7 +436,10 @@ impl Runner {
                 })?;
                 let full_prompt = format!("{ASSAY_SYSTEM}\n\n{cached}\n\n{prompt}");
                 let host_response = host
-                    .run(HostRequest::new(full_prompt, &self.repo_root))
+                    .run(HostRequest {
+                        headless: true,
+                        ..HostRequest::new(full_prompt, &self.repo_root)
+                    })
                     .await
                     .map_err(|source| RunError::StepFailed {
                         id: step.id().to_owned(),

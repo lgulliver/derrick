@@ -56,7 +56,12 @@ fn mock_flow_path(dir: &Path) -> TestResult<PathBuf> {
     write_executable(
         &bin_dir.join("claude"),
         r#"#!/bin/sh
-prompt="$2"
+# Accept both `--print <prompt>` and `--print --dangerously-skip-permissions <prompt>`
+if [ "$2" = "--dangerously-skip-permissions" ]; then
+  prompt="$3"
+else
+  prompt="$2"
+fi
 /bin/mkdir -p specs/001-test .specify
 case "$prompt" in
   *speckit.specify*)

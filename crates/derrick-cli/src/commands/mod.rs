@@ -6,10 +6,12 @@ pub(crate) mod completions;
 pub(crate) mod doctor;
 pub(crate) mod foreman;
 pub(crate) mod init;
+pub(crate) mod observe;
 pub(crate) mod run;
 pub(crate) mod stack;
 pub(crate) mod status;
 pub(crate) mod ticket;
+pub(crate) mod uninstall;
 
 #[derive(Debug, Parser)]
 #[command(name = "derrick", version, about = "Derrick orchestration CLI")]
@@ -28,6 +30,31 @@ pub(crate) enum Command {
     Ticket(TicketArgs),
     Foreman(ForemanArgs),
     Stack(StackArgs),
+    Observe(ObserveArgs),
+    Uninstall(UninstallArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UninstallArgs {
+    /// Skip the confirmation prompt and proceed immediately.
+    #[arg(long)]
+    pub(crate) yes: bool,
+    /// Remove all files without asking, including the state database.
+    #[arg(long = "purge")]
+    pub(crate) purge: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ObserveArgs {
+    /// Initial tab: overview, tickets, stack, activity, tokens, memory.
+    #[arg(long)]
+    pub(crate) tab: Option<String>,
+    /// Optional site name selector (reserved for multi-site v1.1).
+    #[arg(long)]
+    pub(crate) site: Option<String>,
+    /// Accepted as a no-op in v1; the TUI is already read-only.
+    #[arg(long = "read-only")]
+    pub(crate) read_only: bool,
 }
 
 #[derive(Debug, Args)]
@@ -54,6 +81,12 @@ pub(crate) struct InitArgs {
     pub(crate) constitution_stub: bool,
     #[arg(long, conflicts_with = "constitution_stub")]
     pub(crate) constitution_from_docs: bool,
+    /// Write VS Code task definitions to `.vscode/tasks.json` (opt-in).
+    #[arg(long)]
+    pub(crate) vscode: bool,
+    /// Write JetBrains run configurations to `.idea/runConfigurations/` (opt-in).
+    #[arg(long)]
+    pub(crate) jetbrains: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

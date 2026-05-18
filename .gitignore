@@ -16,6 +16,9 @@
 # Editor / IDE
 .idea/
 .vscode/
+# But track the templates — these are shipped with derrick, not user IDE state
+!templates/.idea/
+!templates/.vscode/
 *.swp
 *.swo
 

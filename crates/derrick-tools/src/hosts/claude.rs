@@ -47,9 +47,16 @@ impl HostAdapter for ClaudeHost {
     }
 
     async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
+        let mut args = vec![OsString::from("--print")];
+        if request.headless {
+            // Suppress interactive permission prompts when running without a
+            // terminal. Pipeline steps always set `HostRequest::headless = true`.
+            args.push(OsString::from("--dangerously-skip-permissions"));
+        }
+        args.push(OsString::from(&request.prompt));
         let spec = CommandSpec {
             binary: self.binary.clone(),
-            args: vec![OsString::from("--print"), OsString::from(&request.prompt)],
+            args,
         };
         run_host(NAME, spec, request).await
     }
