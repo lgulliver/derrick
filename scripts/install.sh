@@ -18,7 +18,7 @@ else
   RED=''; GREEN=''; YELLOW=''; BOLD=''; RESET=''
 fi
 
-info()  { echo -e "${BOLD}[derrick]${RESET} $*"; }
+info()  { echo -e "${BOLD}[derrick]${RESET} $*" >&2; }
 ok()    { echo -e "${GREEN}[derrick]${RESET} $*"; }
 warn()  { echo -e "${YELLOW}[derrick]${RESET} $*"; }
 die()   { echo -e "${RED}[derrick] error:${RESET} $*" >&2; exit 1; }
