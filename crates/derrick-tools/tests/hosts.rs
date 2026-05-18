@@ -610,6 +610,12 @@ async fn not_found_returns_typed_error_with_host_name() -> TestResult {
 
 #[tokio::test]
 async fn spawn_io_error_surfaces_typed_error() -> TestResult {
+    // Triggers an Io-classified spawn failure cross-platform by giving the
+    // binary mode 0 (no execute, no read). Linux + macOS both return
+    // PermissionDenied here, distinct from NotFound. An earlier attempt
+    // used a regular file as cwd to provoke NotADirectory but macOS's
+    // posix_spawn classifies that as NotFound instead, so the test was
+    // non-portable.
     let _guard = process_lock().await;
     let dir = tempdir()?;
     let path = dir.path().join("claude");
@@ -619,21 +625,18 @@ async fn spawn_io_error_surfaces_typed_error() -> TestResult {
         use std::os::unix::fs::PermissionsExt;
 
         let mut permissions = fs::metadata(&path)?.permissions();
-        permissions.set_mode(0o755);
+        permissions.set_mode(0o000);
         fs::set_permissions(&path, permissions)?;
     }
     let adapter = ClaudeHost::with_binary(path);
-    let not_a_directory = dir.path().join("not-a-directory");
-    fs::write(&not_a_directory, "not a directory")?;
-    let mut req = request(dir.path());
-    req.cwd = not_a_directory;
+    let req = request(dir.path());
 
     let error = adapter.run(req).await;
 
     match error {
         Err(HostError::Io { host, source }) => {
             assert_eq!(host, "claude");
-            assert_eq!(source.kind(), std::io::ErrorKind::NotADirectory);
+            assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
         }
         other => return Err(format!("unexpected error: {other:?}").into()),
     }
