@@ -5,7 +5,6 @@
 //! Copilot assignment, substrate hand registration, and asynchronous PR
 //! polling. See `T013` for the full design.
 
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +13,9 @@ use chrono::Utc;
 use derrick_substrate::{
     EventKind, EventScope, Hand, HandId, HandKind, InReviewMetadata, Substrate, Ticket,
 };
-use derrick_substrate_native::foreman::{DispatchError, DispatchResult, HandDispatcher};
+use derrick_substrate_native::foreman::{
+    DispatchContext, DispatchError, DispatchResult, HandDispatcher,
+};
 use derrick_substrate_native::NativeSubstrate;
 use tokio::time::Instant;
 use tracing::{error, info, instrument, warn};
@@ -132,18 +133,16 @@ impl HandDispatcher for CopilotHandDispatcher {
         "copilot"
     }
 
-    #[instrument(skip(self, _worktree_root), fields(ticket_id = %ticket.id))]
-    async fn dispatch(
-        &self,
-        ticket: &Ticket,
-        _worktree_root: &Path,
-    ) -> Result<DispatchResult, DispatchError> {
+    #[instrument(skip(self, ctx), fields(ticket_id = %ctx.ticket.id))]
+    async fn dispatch(&self, ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
+        let ticket = ctx.ticket;
         let branch = self.target_branch(ticket);
 
         // 1. Ensure the branch exists on the remote so Copilot can target
-        //    it. Branch errors map to DispatchError::Io to fit the trait.
+        //    it. Use the foreman-supplied parent branch so stacked tickets
+        //    are based on their predecessor rather than the global target.
         self.branch_creator
-            .ensure_branch(&branch, &self.config.base_branch)
+            .ensure_branch(&branch, &ctx.parent_branch)
             .await
             .map_err(branch_error_to_dispatch)?;
 
@@ -360,6 +359,14 @@ mod tests {
         )
     }
 
+    fn ctx<'a>(ticket: &'a Ticket, worktree_root: &'a std::path::Path) -> DispatchContext<'a> {
+        DispatchContext {
+            ticket,
+            worktree_root,
+            parent_branch: "main".to_owned(),
+        }
+    }
+
     async fn make_ticket(substrate: &NativeSubstrate, id: &str) -> Ticket {
         let new = NewTicket::new(
             TicketId::new(id).expect("ticket id"),
@@ -415,7 +422,7 @@ mod tests {
         );
 
         let result = dispatcher
-            .dispatch(&ticket, tempdir.path())
+            .dispatch(&ctx(&ticket, tempdir.path()))
             .await
             .expect("dispatch ok");
         assert!(!result.completed_synchronously);
@@ -475,7 +482,7 @@ mod tests {
             fast_config(),
         );
         let result = dispatcher
-            .dispatch(&ticket, tempdir.path())
+            .dispatch(&ctx(&ticket, tempdir.path()))
             .await
             .expect("dispatch");
 
@@ -552,7 +559,7 @@ mod tests {
             cfg,
         );
         dispatcher
-            .dispatch(&ticket, tempdir.path())
+            .dispatch(&ctx(&ticket, tempdir.path()))
             .await
             .expect("dispatch");
 
@@ -596,11 +603,11 @@ mod tests {
         );
 
         dispatcher
-            .dispatch(&ticket1, tempdir.path())
+            .dispatch(&ctx(&ticket1, tempdir.path()))
             .await
             .expect("dispatch 1");
         dispatcher
-            .dispatch(&ticket2, tempdir.path())
+            .dispatch(&ctx(&ticket2, tempdir.path()))
             .await
             .expect("dispatch 2");
 

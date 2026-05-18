@@ -12,12 +12,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use derrick_config::Config;
+use derrick_config::{Config, Stacking};
+use derrick_stack::{NoneStackBackend, RestackOutcome, RestackParams, StackBackend};
 use derrick_substrate::{
-    EventKind, EventScope, HandId, InReviewMetadata, Substrate, SubstrateError, Ticket, TicketId,
+    BlockReason, EventKind, EventScope, HandId, InReviewMetadata, Substrate, SubstrateError,
+    Ticket, TicketId,
 };
 use thiserror::Error;
 use tokio::process::Command;
+use tracing::{info, warn};
 
 use crate::NativeSubstrate;
 
@@ -186,6 +189,20 @@ pub enum DispatchError {
     Io(std::io::Error),
 }
 
+/// Context passed to [`HandDispatcher::dispatch`]. Replaces the previous
+/// two-argument (ticket, worktree_root) call pattern so the foreman can
+/// thread stacking information through without breaking the trait boundary.
+pub struct DispatchContext<'a> {
+    /// Ticket being dispatched.
+    pub ticket: &'a Ticket,
+    /// Worktree root the dispatcher should operate inside.
+    pub worktree_root: &'a Path,
+    /// Parent branch for this ticket's stack position. Equals the foreman's
+    /// `target_branch` (default `"main"`) for roots; otherwise the computed
+    /// branch name of the highest-`ordinal` predecessor.
+    pub parent_branch: String,
+}
+
 /// Trait T013 will implement against. T012 ships two stubs:
 /// [`HumanHandDispatcher`] and [`CopilotStubDispatcher`].
 #[async_trait]
@@ -194,13 +211,9 @@ pub trait HandDispatcher: Send + Sync {
     /// (`claude` | `copilot` | `human`).
     fn kind(&self) -> &'static str;
 
-    /// Reserve a hand for `ticket` and start the work. See trait docs in
+    /// Reserve a hand for `ctx.ticket` and start the work. See trait docs in
     /// T012 for the contract.
-    async fn dispatch(
-        &self,
-        ticket: &Ticket,
-        worktree_root: &Path,
-    ) -> Result<DispatchResult, DispatchError>;
+    async fn dispatch(&self, ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError>;
 }
 
 /// Human-hand dispatcher: emits a `Note` event marking the ticket ready
@@ -224,11 +237,8 @@ impl HandDispatcher for HumanHandDispatcher {
         "human"
     }
 
-    async fn dispatch(
-        &self,
-        ticket: &Ticket,
-        _worktree_root: &Path,
-    ) -> Result<DispatchResult, DispatchError> {
+    async fn dispatch(&self, ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
+        let ticket = ctx.ticket;
         // Atomically Ready -> InFlight + owner = self.hand.
         self.substrate
             .assign_to_hand(&ticket.id, &self.hand)
@@ -280,11 +290,7 @@ impl HandDispatcher for CopilotStubDispatcher {
         "copilot"
     }
 
-    async fn dispatch(
-        &self,
-        _ticket: &Ticket,
-        _worktree_root: &Path,
-    ) -> Result<DispatchResult, DispatchError> {
+    async fn dispatch(&self, _ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
         Err(DispatchError::NotImplemented { kind: "copilot" })
     }
 }
@@ -376,6 +382,21 @@ pub enum VerifierAction {
         /// Merge SHA recorded.
         merge_sha: String,
     },
+    /// Dependent ticket restacked after its parent merged.
+    Restacked {
+        /// Dependent ticket whose branch moved.
+        ticket: TicketId,
+        /// Dependent's branch.
+        branch: String,
+    },
+    /// Restack conflict: dependent ticket was blocked with a recipe for
+    /// human resolution.
+    RestackConflict {
+        /// Dependent ticket transitioned to `Blocked`.
+        ticket: TicketId,
+        /// Human-runnable `git rebase --onto` recipe.
+        recipe: String,
+    },
 }
 
 /// Per-tick configuration knobs sourced from `tools.foreman` in
@@ -418,6 +439,8 @@ pub struct Foreman {
     batch_max: u32,
     ttls: ForemanTtls,
     exit_when_idle: bool,
+    stack_backend: Arc<dyn StackBackend>,
+    stacking_config: Stacking,
 }
 
 impl Foreman {
@@ -432,6 +455,7 @@ impl Foreman {
         dispatcher: Box<dyn HandDispatcher>,
     ) -> Self {
         let batch_max = config.parallelism().batch_max();
+        let stacking_config = config.tools().git().stacking().clone();
         Self {
             substrate,
             target_branch: "main".to_owned(),
@@ -441,7 +465,17 @@ impl Foreman {
             batch_max,
             ttls: ForemanTtls::default(),
             exit_when_idle: false,
+            stack_backend: Arc::new(NoneStackBackend),
+            stacking_config,
         }
+    }
+
+    /// Override the stack backend and stacking config. Callers that want
+    /// auto-restack must opt in by installing a backend that supports it.
+    pub fn with_stack_backend(mut self, backend: Arc<dyn StackBackend>, config: Stacking) -> Self {
+        self.stack_backend = backend;
+        self.stacking_config = config;
+        self
     }
 
     /// Override TTL configuration.
@@ -724,8 +758,10 @@ impl Foreman {
                 .await?;
             report.verifier_actions.push(VerifierAction::Merged {
                 ticket: id.clone(),
-                merge_sha,
+                merge_sha: merge_sha.clone(),
             });
+            self.restack_dependents(id, &branch, &merge_sha, report)
+                .await?;
             return Ok(());
         }
 
@@ -756,8 +792,9 @@ impl Foreman {
                             .await?;
                         report.verifier_actions.push(VerifierAction::Merged {
                             ticket: id.clone(),
-                            merge_sha: sha,
+                            merge_sha: sha.clone(),
                         });
+                        self.restack_dependents(id, &branch, &sha, report).await?;
                         return Ok(());
                     }
                 }
@@ -859,8 +896,10 @@ impl Foreman {
                 .verifier_actions
                 .push(VerifierAction::ReconciledFromGit {
                     ticket: ticket.id.clone(),
-                    merge_sha,
+                    merge_sha: merge_sha.clone(),
                 });
+            self.restack_dependents(&ticket.id, &branch, &merge_sha, report)
+                .await?;
             return Ok(());
         }
 
@@ -896,8 +935,10 @@ impl Foreman {
             .verifier_actions
             .push(VerifierAction::ReconciledFromGit {
                 ticket: ticket.id.clone(),
-                merge_sha: sha,
+                merge_sha: sha.clone(),
             });
+        self.restack_dependents(&ticket.id, &branch, &sha, report)
+            .await?;
         Ok(())
     }
 
@@ -932,6 +973,156 @@ impl Foreman {
         Ok(())
     }
 
+    async fn compute_parent_branch(&self, ticket: &Ticket) -> Result<String, ForemanError> {
+        let predecessors = self.substrate.blocks_predecessors(&ticket.id).await?;
+        if predecessors.is_empty() {
+            return Ok(self.target_branch.clone());
+        }
+        let mut pred_tickets = Vec::with_capacity(predecessors.len());
+        for pred_id in &predecessors {
+            if let Some(pred) = self.substrate.get_ticket(pred_id).await? {
+                pred_tickets.push(pred);
+            }
+        }
+        Ok(derrick_stack::parent_branch_for(
+            &predecessors,
+            &pred_tickets,
+            &self.target_branch,
+            self.stacking_config.branch_pattern(),
+        ))
+    }
+
+    /// After a ticket merges, restack any dependents from the merged
+    /// branch onto `target_branch`. Honours the
+    /// `tools.git.stacking.auto_restack_on_merge` flag and the configured
+    /// stack backend.
+    async fn restack_dependents(
+        &self,
+        merged_ticket_id: &TicketId,
+        merged_branch: &str,
+        merge_sha: &str,
+        report: &mut TickReport,
+    ) -> Result<(), ForemanError> {
+        if !self.stacking_config.auto_restack_on_merge() {
+            return Ok(());
+        }
+        let dependents = self.substrate.blocks_dependents(merged_ticket_id).await?;
+        for dependent_id in dependents {
+            let Some(dependent) = self.substrate.get_ticket(&dependent_id).await? else {
+                continue;
+            };
+            // Only restack dependents whose work is still on a feature
+            // branch (InFlight while a hand is open, InReview while a PR is
+            // live). Terminal or Blocked dependents are left alone.
+            if !matches!(
+                dependent.state,
+                derrick_substrate::TicketState::InFlight | derrick_substrate::TicketState::InReview
+            ) {
+                continue;
+            }
+            let Some(metadata) = self
+                .substrate
+                .most_recent_in_review_metadata(&dependent_id)
+                .await?
+            else {
+                continue;
+            };
+            let dependent_branch = metadata.branch.clone();
+            let params = RestackParams {
+                branch: dependent_branch.clone(),
+                old_parent: merged_branch.to_owned(),
+                new_parent: self.target_branch.clone(),
+                repo_root: self.repo_root.clone(),
+            };
+            let outcome = self.stack_backend.restack(params).await.map_err(|error| {
+                ForemanError::RepoState(Box::new(std::io::Error::other(error.to_string()))
+                    as Box<dyn std::error::Error + Send + Sync>)
+            })?;
+            match outcome {
+                RestackOutcome::Restacked => {
+                    if let Err(error) = self
+                        .stack_backend
+                        .force_push(&dependent_branch, &self.repo_root)
+                        .await
+                    {
+                        warn!(
+                            ticket = %dependent_id,
+                            branch = %dependent_branch,
+                            error = %error,
+                            "force-push after restack failed",
+                        );
+                        self.substrate
+                            .record_typed_event(
+                                EventScope::Ticket(dependent_id.clone()),
+                                EventKind::Note {
+                                    body: format!(
+                                        "restack succeeded but force-push failed: {error}"
+                                    ),
+                                },
+                            )
+                            .await?;
+                        continue;
+                    }
+                    info!(
+                        ticket = %dependent_id,
+                        branch = %dependent_branch,
+                        parent_merge_sha = %merge_sha,
+                        "restacked dependent onto target",
+                    );
+                    self.substrate
+                        .record_typed_event(
+                            EventScope::Ticket(dependent_id.clone()),
+                            EventKind::Note {
+                                body: format!(
+                                    "restacked {dependent_branch} from {merged_branch} onto {target} after merge {merge_sha}",
+                                    target = self.target_branch,
+                                ),
+                            },
+                        )
+                        .await?;
+                    report.verifier_actions.push(VerifierAction::Restacked {
+                        ticket: dependent_id.clone(),
+                        branch: dependent_branch,
+                    });
+                }
+                RestackOutcome::Conflict { recipe } => {
+                    warn!(
+                        ticket = %dependent_id,
+                        branch = %dependent_branch,
+                        recipe = %recipe,
+                        "restack conflict; blocking dependent",
+                    );
+                    self.substrate
+                        .block_ticket(
+                            &dependent_id,
+                            BlockReason::RestackConflict {
+                                recipe: recipe.clone(),
+                            },
+                        )
+                        .await?;
+                    self.substrate
+                        .record_typed_event(
+                            EventScope::Ticket(dependent_id.clone()),
+                            EventKind::Note {
+                                body: format!("restack conflict; resolve manually with: {recipe}"),
+                            },
+                        )
+                        .await?;
+                    report
+                        .verifier_actions
+                        .push(VerifierAction::RestackConflict {
+                            ticket: dependent_id.clone(),
+                            recipe,
+                        });
+                }
+                // RestackOutcome is `#[non_exhaustive]`; treat any future
+                // variants as a no-op until they get explicit handling.
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     async fn dispatch_ready(&self, report: &mut TickReport) -> Result<(), ForemanError> {
         let inflight = self.substrate.count_inflight_tickets().await?;
         let cap = u64::from(self.batch_max);
@@ -944,7 +1135,13 @@ impl Foreman {
             if budget == 0 {
                 break;
             }
-            match self.dispatcher.dispatch(&ticket, &self.repo_root).await {
+            let parent_branch = self.compute_parent_branch(&ticket).await?;
+            let ctx = DispatchContext {
+                ticket: &ticket,
+                worktree_root: &self.repo_root,
+                parent_branch,
+            };
+            match self.dispatcher.dispatch(&ctx).await {
                 Ok(_) => {
                     report.dispatched.push(ticket.id.clone());
                     budget -= 1;

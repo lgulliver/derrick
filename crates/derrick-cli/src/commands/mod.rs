@@ -7,6 +7,7 @@ pub(crate) mod doctor;
 pub(crate) mod foreman;
 pub(crate) mod init;
 pub(crate) mod run;
+pub(crate) mod stack;
 pub(crate) mod status;
 pub(crate) mod ticket;
 
@@ -26,6 +27,7 @@ pub(crate) enum Command {
     Completions(CompletionsArgs),
     Ticket(TicketArgs),
     Foreman(ForemanArgs),
+    Stack(StackArgs),
 }
 
 #[derive(Debug, Args)]
@@ -259,6 +261,38 @@ pub(crate) struct ForemanStopArgs {}
 
 #[derive(Debug, Args)]
 pub(crate) struct ForemanTickArgs {}
+
+// ---------- Stack subcommand group (T014) --------------------------------
+
+#[derive(Debug, Args)]
+pub(crate) struct StackArgs {
+    #[command(subcommand)]
+    pub(crate) command: StackCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum StackCommand {
+    /// Show the current stack: tickets, branches, PRs, restack health.
+    Show,
+    /// Restack open dependent branches.
+    Restack(StackRestackArgs),
+    /// Open PRs for InReview tickets that have no PR yet.
+    Submit(StackSubmitArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct StackRestackArgs {
+    /// Only restack tickets in this batch.
+    #[arg(long)]
+    pub(crate) batch: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct StackSubmitArgs {
+    /// Only submit tickets in this batch.
+    #[arg(long)]
+    pub(crate) batch: Option<String>,
+}
 
 impl From<CompletionShell> for clap_complete::Shell {
     fn from(shell: CompletionShell) -> Self {

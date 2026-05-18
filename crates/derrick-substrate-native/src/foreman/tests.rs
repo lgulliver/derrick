@@ -195,11 +195,8 @@ impl HandDispatcher for RecordingDispatcher {
         self.kind
     }
 
-    async fn dispatch(
-        &self,
-        ticket: &Ticket,
-        _worktree_root: &std::path::Path,
-    ) -> Result<DispatchResult, DispatchError> {
+    async fn dispatch(&self, ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
+        let ticket = ctx.ticket;
         // Transition the ticket to InFlight so subsequent ticks see it as
         // owned (matches the real human dispatcher contract). Tolerate the
         // race where a concurrent tick already moved it out of Ready —
@@ -1003,4 +1000,246 @@ async fn register_hand_simple(substrate: &NativeSubstrate, id: &str) -> HandId {
         .await
         .expect("register hand");
     hand_id
+}
+
+// ---- Stack / restack tests (T014) ----------------------------------------
+
+/// Recording dispatcher that captures the parent_branch from
+/// `DispatchContext` so tests can assert the foreman computed it correctly.
+#[derive(Clone, Default)]
+struct ParentBranchRecorder {
+    last_parent: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl HandDispatcher for ParentBranchRecorder {
+    fn kind(&self) -> &'static str {
+        "test"
+    }
+
+    async fn dispatch(&self, ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
+        *self.last_parent.lock().await = Some(ctx.parent_branch.clone());
+        // Don't actually transition; return NotImplemented so the foreman
+        // surfaces a Note event but the ticket stays in Ready. This lets us
+        // inspect parent_branch in isolation.
+        Err(DispatchError::NotImplemented { kind: "test" })
+    }
+}
+
+/// Fake stack backend that records restack calls and can be programmed to
+/// return `Conflict`.
+#[derive(Clone, Default)]
+struct FakeStackBackend {
+    calls: Arc<Mutex<Vec<derrick_stack::RestackParams>>>,
+    force_conflict: Arc<Mutex<bool>>,
+}
+
+#[async_trait]
+impl derrick_stack::StackBackend for FakeStackBackend {
+    fn kind(&self) -> &'static str {
+        "fake"
+    }
+
+    async fn open_pr(
+        &self,
+        _params: derrick_stack::OpenPrParams,
+    ) -> Result<derrick_stack::PrInfo, derrick_stack::StackError> {
+        Err(derrick_stack::StackError::NotSupported {
+            backend: "fake",
+            reason: "not used in tests",
+        })
+    }
+
+    async fn restack(
+        &self,
+        params: derrick_stack::RestackParams,
+    ) -> Result<derrick_stack::RestackOutcome, derrick_stack::StackError> {
+        let conflict = *self.force_conflict.lock().await;
+        self.calls.lock().await.push(params.clone());
+        if conflict {
+            Ok(derrick_stack::RestackOutcome::Conflict {
+                recipe: format!(
+                    "git rebase --onto {} {} {}",
+                    params.new_parent, params.old_parent, params.branch
+                ),
+            })
+        } else {
+            Ok(derrick_stack::RestackOutcome::Restacked)
+        }
+    }
+
+    async fn force_push(
+        &self,
+        _branch: &str,
+        _repo_root: &std::path::Path,
+    ) -> Result<(), derrick_stack::StackError> {
+        Ok(())
+    }
+}
+
+async fn new_ticket_in_batch(
+    substrate: &NativeSubstrate,
+    id: &str,
+    batch: &str,
+    ordinal: u32,
+) -> Ticket {
+    use derrick_substrate::{BatchName, NewTicket};
+    let batch_name = BatchName::new(batch).expect("batch");
+    // Best-effort batch creation; ignore "already exists" so multiple
+    // tickets can share a batch.
+    let _ = substrate.create_batch(batch_name.clone()).await;
+    let ticket = NewTicket::new(
+        TicketId::new(id).expect("ticket id"),
+        Some(batch_name),
+        Some(ordinal),
+        "title",
+        "body",
+        Vec::new(),
+    )
+    .expect("new ticket");
+    substrate
+        .create_ticket(ticket)
+        .await
+        .expect("create ticket")
+}
+
+#[tokio::test]
+async fn dispatch_uses_parent_branch_from_predecessor() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+    let hand = register_hand_simple(&substrate, "h1").await;
+
+    // A is the predecessor, B depends on A.
+    let a = new_ticket_in_batch(&substrate, "drk-1", "alpha", 1).await;
+    let b = new_ticket_in_batch(&substrate, "drk-2", "alpha", 2).await;
+    // Mark A as Done by sending it through the full path.
+    ticket_to_in_flight(&substrate, &a, &hand).await;
+    ticket_to_in_review(&substrate, &a.id, "derrick/alpha/drk-1", "a-sha", None).await;
+    substrate
+        .verify_ticket_merged(&a.id, "a-sha".to_owned(), "a-sha".to_owned())
+        .await
+        .expect("merge a");
+    // Link B -> A via `blocks`.
+    substrate
+        .link(&b.id, &a.id, LinkKind::Blocks)
+        .await
+        .expect("link");
+
+    let recorder = ParentBranchRecorder::default();
+    let foreman = Foreman::new(
+        substrate.clone(),
+        Config::defaults(),
+        Box::new(MockRepoState::new()),
+        tempdir.path().to_path_buf(),
+        Box::new(recorder.clone()),
+    );
+    let _ = foreman.tick().await.expect("tick");
+
+    let parent = recorder
+        .last_parent
+        .lock()
+        .await
+        .clone()
+        .expect("parent branch recorded");
+    assert_eq!(parent, "derrick/alpha/drk-1");
+}
+
+#[tokio::test]
+async fn restack_dependents_called_after_merge() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+    let hand = register_hand_simple(&substrate, "h1").await;
+
+    let a = new_ticket_in_batch(&substrate, "drk-1", "alpha", 1).await;
+    let b = new_ticket_in_batch(&substrate, "drk-2", "alpha", 2).await;
+
+    // B depends on A. B is already InReview with its own branch.
+    ticket_to_in_flight(&substrate, &a, &hand).await;
+    ticket_to_in_review(&substrate, &a.id, "derrick/alpha/drk-1", "a-sha", None).await;
+    let hand_b = register_hand_simple(&substrate, "h2").await;
+    ticket_to_in_flight(&substrate, &b, &hand_b).await;
+    ticket_to_in_review(&substrate, &b.id, "derrick/alpha/drk-2", "b-sha", None).await;
+    substrate
+        .link(&b.id, &a.id, LinkKind::Blocks)
+        .await
+        .expect("link");
+
+    // A is currently InReview pending merge.
+    let repo = MockRepoState::new();
+    repo.set_contains("main", "a-sha", true).await;
+
+    let fake = FakeStackBackend::default();
+    let stacking_cfg = Config::defaults().tools().git().stacking().clone();
+    let foreman = Foreman::new(
+        substrate.clone(),
+        Config::defaults(),
+        Box::new(repo),
+        tempdir.path().to_path_buf(),
+        no_op_dispatcher(substrate.clone(), hand),
+    )
+    .with_stack_backend(Arc::new(fake.clone()), stacking_cfg);
+    let report = foreman.tick().await.expect("tick");
+
+    let calls = fake.calls.lock().await;
+    assert_eq!(calls.len(), 1, "exactly one dependent restacked");
+    assert_eq!(calls[0].branch, "derrick/alpha/drk-2");
+    assert_eq!(calls[0].old_parent, "derrick/alpha/drk-1");
+    assert_eq!(calls[0].new_parent, "main");
+
+    assert!(report
+        .verifier_actions
+        .iter()
+        .any(|action| matches!(action, VerifierAction::Restacked { .. })));
+}
+
+#[tokio::test]
+async fn restack_conflict_blocks_ticket() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+    let hand = register_hand_simple(&substrate, "h1").await;
+
+    let a = new_ticket_in_batch(&substrate, "drk-1", "alpha", 1).await;
+    let b = new_ticket_in_batch(&substrate, "drk-2", "alpha", 2).await;
+    ticket_to_in_flight(&substrate, &a, &hand).await;
+    ticket_to_in_review(&substrate, &a.id, "derrick/alpha/drk-1", "a-sha", None).await;
+    let hand_b = register_hand_simple(&substrate, "h2").await;
+    ticket_to_in_flight(&substrate, &b, &hand_b).await;
+    ticket_to_in_review(&substrate, &b.id, "derrick/alpha/drk-2", "b-sha", None).await;
+    substrate
+        .link(&b.id, &a.id, LinkKind::Blocks)
+        .await
+        .expect("link");
+
+    let repo = MockRepoState::new();
+    repo.set_contains("main", "a-sha", true).await;
+
+    let fake = FakeStackBackend::default();
+    *fake.force_conflict.lock().await = true;
+    let stacking_cfg = Config::defaults().tools().git().stacking().clone();
+    let foreman = Foreman::new(
+        substrate.clone(),
+        Config::defaults(),
+        Box::new(repo),
+        tempdir.path().to_path_buf(),
+        no_op_dispatcher(substrate.clone(), hand),
+    )
+    .with_stack_backend(Arc::new(fake.clone()), stacking_cfg);
+    let report = foreman.tick().await.expect("tick");
+
+    let after = substrate
+        .get_ticket(&b.id)
+        .await
+        .expect("get")
+        .expect("b present");
+    assert_eq!(after.state, TicketState::Blocked);
+    match after.block_reason {
+        Some(BlockReason::RestackConflict { recipe }) => {
+            assert!(recipe.contains("git rebase --onto"));
+        }
+        other => panic!("expected RestackConflict, got {other:?}"),
+    }
+    assert!(report
+        .verifier_actions
+        .iter()
+        .any(|action| matches!(action, VerifierAction::RestackConflict { .. })));
 }

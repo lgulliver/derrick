@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use derrick_config::{Config, SubstrateBackendKind};
+use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
 use derrick_copilot::{
     CopilotHandDispatcher, CopilotHandDispatcherConfig, GhCopilotClient, GitBranchCreator,
 };
+use derrick_stack::{GraphiteStackBackend, NativeStackBackend, NoneStackBackend, StackBackend};
 use derrick_substrate::Substrate;
 #[allow(deprecated)]
 use derrick_substrate_native::foreman::CopilotStubDispatcher;
@@ -101,6 +102,15 @@ fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstra
             .unwrap_or_else(|_| chrono::Duration::hours(24)),
     };
     let dispatcher: Box<dyn HandDispatcher> = build_dispatcher(repo_root, config, &substrate);
+    let stack_cfg = config.tools().git().stacking().clone();
+    let stack_backend: Arc<dyn StackBackend> = match stack_cfg.backend() {
+        StackBackendKind::Native => Arc::new(NativeStackBackend::new(
+            repo_root.to_path_buf(),
+            stack_cfg.force_push(),
+        )),
+        StackBackendKind::Graphite | StackBackendKind::GitSpice => Arc::new(GraphiteStackBackend),
+        StackBackendKind::None => Arc::new(NoneStackBackend),
+    };
     Foreman::new(
         substrate,
         config.clone(),
@@ -110,6 +120,7 @@ fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstra
     )
     .with_ttls(ttls)
     .with_exit_when_idle(config.tools().foreman().exit_when_idle())
+    .with_stack_backend(stack_backend, stack_cfg)
 }
 
 fn build_dispatcher(

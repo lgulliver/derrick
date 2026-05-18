@@ -441,7 +441,7 @@ impl NativeSubstrate {
     }
 
     /// Most-recent `TicketTransitionedToInReview` metadata for `id`, if any.
-    pub(crate) async fn most_recent_in_review_metadata(
+    pub async fn most_recent_in_review_metadata(
         &self,
         id: &TicketId,
     ) -> Result<Option<InReviewMetadata>, SubstrateError> {
@@ -479,12 +479,24 @@ impl NativeSubstrate {
     }
 
     /// `blocks`-link predecessors for `id` (tickets `id` is blocked by).
-    pub(crate) async fn blocks_predecessors(
+    pub async fn blocks_predecessors(
         &self,
         id: &TicketId,
     ) -> Result<Vec<TicketId>, SubstrateError> {
         let id = id.clone();
         self.run_read(move |connection| select_outgoing_blocks_predecessors(connection, &id))
+            .await
+    }
+
+    /// Returns ticket IDs that depend on `id` (reverse of
+    /// [`Self::blocks_predecessors`]). Used by the foreman's restack pass
+    /// to find dependents of a freshly-merged ticket.
+    pub(crate) async fn blocks_dependents(
+        &self,
+        id: &TicketId,
+    ) -> Result<Vec<TicketId>, SubstrateError> {
+        let id = id.clone();
+        self.run_read(move |connection| select_incoming_blocks_dependents(connection, &id))
             .await
     }
 
@@ -2017,6 +2029,21 @@ fn block_reason_discriminator(reason: &BlockReason) -> &'static str {
         BlockReason::Human { .. } => "human",
         _ => "human",
     }
+}
+
+fn select_incoming_blocks_dependents(
+    connection: &Connection,
+    id: &TicketId,
+) -> Result<Vec<TicketId>, SubstrateError> {
+    let mut statement = connection
+        .prepare("SELECT from_ticket FROM links WHERE to_ticket = ?1 AND kind = 'blocks'")
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map(params![id.as_str()], |row| row.get::<_, String>(0))
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    rows.into_iter().map(TicketId::new).collect()
 }
 
 fn select_outgoing_blocks_predecessors(

@@ -340,6 +340,7 @@ dependencies = [
  "derrick-copilot",
  "derrick-flow",
  "derrick-models",
+ "derrick-stack",
  "derrick-substrate",
  "derrick-substrate-native",
  "derrick-tools",
@@ -444,6 +445,15 @@ dependencies = [
 [[package]]
 name = "derrick-stack"
 version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "derrick-config",
+ "derrick-substrate",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "derrick-substrate"
@@ -467,6 +477,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "derrick-config",
+ "derrick-stack",
  "derrick-substrate",
  "rusqlite",
  "serde_json",

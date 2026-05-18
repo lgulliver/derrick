@@ -53,6 +53,7 @@ async fn dispatch(cli: Cli) -> Result<exit_code::CliExitCode, CliError> {
         }
         Command::Ticket(args) => commands::ticket::execute(args).await,
         Command::Foreman(args) => commands::foreman::execute(args).await,
+        Command::Stack(args) => commands::stack::execute(args).await,
     }
 }
 

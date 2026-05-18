@@ -17,6 +17,7 @@ derrick-adopt = { path = "../derrick-adopt" }
 derrick-copilot = { path = "../derrick-copilot" }
 derrick-flow = { path = "../derrick-flow" }
 derrick-models = { path = "../derrick-models" }
+derrick-stack = { path = "../derrick-stack" }
 derrick-substrate = { path = "../derrick-substrate" }
 derrick-substrate-native = { path = "../derrick-substrate-native" }
 derrick-tools = { path = "../derrick-tools" }
