@@ -292,7 +292,10 @@ impl MemoryStore {
     pub fn append_lesson(&self, lesson: &Lesson) -> Result<(), MemoryError> {
         validate_lesson(lesson)?;
         let tags = extract_tags(&lesson.body)?;
-        let with_tags = Lesson { tags, ..lesson.clone() };
+        let with_tags = Lesson {
+            tags,
+            ..lesson.clone()
+        };
         let line = serde_json::to_string(&with_tags)
             .map_err(|source| invalid_error("lesson", source.to_string()))?;
         append_line(&self.paths.repo_state.join(LESSONS_FILE), &line)
@@ -1572,12 +1575,8 @@ state:
         let (_dir, store) = store_with_host();
         let old = utc(2026, 3, 1);
         let new = utc(2026, 5, 1);
-        store
-            .append_lesson(&lesson(old, "drk-1 old"))
-            .unwrap();
-        store
-            .append_lesson(&lesson(new, "drk-2 new"))
-            .unwrap();
+        store.append_lesson(&lesson(old, "drk-1 old")).unwrap();
+        store.append_lesson(&lesson(new, "drk-2 new")).unwrap();
 
         let index = store.load_lesson_index().unwrap();
         let hits = index.recent(1);
