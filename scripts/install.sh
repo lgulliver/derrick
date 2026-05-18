@@ -66,7 +66,6 @@ resolve_stable() {
     return
   fi
 
-  info "Fetching latest stable release tag…"
   curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
     | grep '"tag_name"' \
     | sed 's/.*"tag_name": *"\(.*\)".*/\1/'
@@ -74,8 +73,6 @@ resolve_stable() {
 
 # ── resolve latest nightly version ────────────────────────────────────────────
 resolve_nightly() {
-  info "Fetching latest nightly release tag…"
-  # List recent releases and pick the first tag prefixed nightly-
   curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=20" \
     | grep '"tag_name"' \
     | sed 's/.*"tag_name": *"\(.*\)".*/\1/' \
@@ -91,10 +88,12 @@ main() {
 
   if [ "$NIGHTLY" = true ]; then
     channel="nightly"
+    info "Fetching latest nightly release tag…"
     version=$(resolve_nightly)
     [ -n "$version" ] || die "No nightly release found. Check https://github.com/${REPO}/releases"
   else
     channel="stable"
+    info "Fetching latest stable release tag…"
     version=$(resolve_stable)
     [ -n "$version" ] || die "Could not determine release version. Set DERRICK_VERSION=vX.Y.Z to override."
   fi

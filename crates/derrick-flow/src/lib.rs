@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -163,6 +164,7 @@ impl Runner {
 
         let start_index = manifest.steps.len();
         let mut outcome_status = RunStatus::Success;
+        eprintln!("pipeline: {pipeline_id} (run {run_id})");
         // Walk the pipeline tail, batching consecutive steps that share a
         // `parallel_group`. Steps with no group run sequentially; grouped
         // steps fan out via tokio::spawn bounded by parallelism.step_max.
@@ -174,6 +176,7 @@ impl Runner {
                 None => {
                     if self.should_skip(step, &input) {
                         let record = self.skipped_record(step);
+                        eprintln!("  {} \u{23ed} skipped", step.id());
                         manifest.tokens_in = manifest
                             .tokens_in
                             .saturating_add(u64::from(record.tokens_in));
@@ -186,7 +189,33 @@ impl Runner {
                         continue;
                     }
 
-                    let record = self.execute_step(step, &mut state).await?;
+                    let record = {
+                        let step_id = step.id().to_owned();
+                        let frames = scanner_frames();
+                        let running = Arc::new(AtomicBool::new(true));
+                        let r2 = running.clone();
+                        let spinner = tokio::task::spawn(async move {
+                            let mut i = 0usize;
+                            while r2.load(Ordering::Relaxed) {
+                                eprint!("\r  {} {}...", step_id, frames[i]);
+                                let _ = std::io::stderr().flush();
+                                tokio::time::sleep(Duration::from_millis(80)).await;
+                                i = (i + 1) % frames.len();
+                            }
+                        });
+
+                        let result = self.execute_step(step, &mut state).await;
+                        running.store(false, Ordering::Relaxed);
+                        let _ = spinner.await;
+                        result?
+                    };
+                    eprint!("\r                                            \r");
+                    match record.status {
+                        StepStatus::Success => eprintln!("  {} \u{2713}", step.id()),
+                        StepStatus::Skipped => eprintln!("  {} \u{23ed}", step.id()),
+                        StepStatus::Halted => eprintln!("  {} \u{26a0} HALTED", step.id()),
+                        StepStatus::Failed => eprintln!("  {} \u{2717} FAILED", step.id()),
+                    }
                     manifest.feature_dir = state.feature_dir.clone();
                     manifest.tokens_in = manifest
                         .tokens_in
@@ -234,12 +263,19 @@ impl Runner {
                         Vec::new();
                     let mut skipped: Vec<StepRecord> = Vec::new();
 
+                    eprintln!(
+                        "  parallel group \"{}\" ({} steps)...",
+                        group_name,
+                        group_steps.len()
+                    );
                     for step in &group_steps {
                         if self.should_skip(step, &input) {
                             let record = self.skipped_record(step);
+                            eprintln!("    {} \u{23ed} skipped", step.id());
                             skipped.push(record);
                             continue;
                         }
+                        eprintln!("    {}...", step.id());
                         let sem = semaphore.clone();
                         let runner = self.clone();
                         let step = step.clone();
@@ -248,7 +284,18 @@ impl Runner {
                             let _permit =
                                 sem.acquire_owned().await.expect("semaphore never closed");
                             let mut st = state_clone;
-                            runner.execute_step(&step, &mut st).await
+                            let record = runner.execute_step(&step, &mut st).await?;
+                            match record.status {
+                                StepStatus::Success => eprintln!("    {} \u{2713}", step.id()),
+                                StepStatus::Skipped => eprintln!("    {} \u{23ed}", step.id()),
+                                StepStatus::Halted => {
+                                    eprintln!("    {} \u{26a0} HALTED", step.id())
+                                }
+                                StepStatus::Failed => {
+                                    eprintln!("    {} \u{2717} FAILED", step.id())
+                                }
+                            }
+                            Ok(record)
                         }));
                     }
 
@@ -1670,6 +1717,24 @@ mod code_review_tests {
         let text = "## verdict\nPASS";
         assert_eq!(extract_verdict_from_review(text), "pass");
     }
+}
+
+fn scanner_frames() -> Vec<String> {
+    // KITT-style scanning LED animation. Width is kept small so it works
+    // on narrow terminals.
+    const WIDTH: usize = 12;
+    let mut frames = Vec::with_capacity(WIDTH * 2 - 2);
+    for i in 0..WIDTH {
+        let mut s = vec![' '; WIDTH];
+        s[i] = '\u{2593}';
+        frames.push(s.into_iter().collect());
+    }
+    for i in (1..WIDTH - 1).rev() {
+        let mut s = vec![' '; WIDTH];
+        s[i] = '\u{2593}';
+        frames.push(s.into_iter().collect());
+    }
+    frames
 }
 
 fn completion_request(
