@@ -338,6 +338,7 @@ pub async fn run_reviewer_rounds(
     create_dir_all(parent(&verdict_path)?)?;
 
     let transcript_path = reviewer_dir.join("debate.md");
+    write_file(&transcript_path, "")?;
 
     let mut tokens_in_total: u32 = 0;
     let mut tokens_out_total: u32 = 0;
@@ -715,9 +716,10 @@ pub fn reconcile_verdicts(
         OnSplit::Human => "human",
         OnSplit::Majority => "majority",
     };
+    let rounds_used = outcomes.iter().map(|o| o.rounds_used).max().unwrap_or(0);
     let body = format!(
-        "verdict: {final_verdict}\non_split: {policy_name}\nreviewers: {}\n\n{summary}\n",
-        outcomes.len()
+        "verdict: {final_verdict}\non_split: {policy_name}\nreviewers: {}\nrounds_used: {rounds_used}\n\n{summary}\n",
+        outcomes.len(),
     );
     crate::io::write_file(combined_path, &body)?;
     let combined_rel = relative_to_root(repo_root, combined_path.to_path_buf())?;
@@ -835,18 +837,55 @@ fn detect_constitution_violations(text: &str) -> Vec<String> {
         let is_violation_line =
             trimmed.starts_with("**") || trimmed.starts_with("- ") || trimmed.starts_with("* ");
         if is_violation_line {
-            let cleaned = trimmed
-                .trim_start_matches(|c: char| c == '*' || c == '-' || c.is_ascii_digit())
-                .trim()
-                .trim_start_matches(". ")
-                .trim();
+            let cleaned = clean_violation_text(trimmed);
             if !cleaned.is_empty() {
-                violations.push(cleaned.to_owned());
+                violations.push(cleaned);
             }
         }
     }
 
     violations
+}
+
+fn clean_violation_text(line: &str) -> String {
+    let mut cleaned = line.trim();
+    if let Some(rest) = cleaned
+        .strip_prefix("- ")
+        .or_else(|| cleaned.strip_prefix("* "))
+    {
+        cleaned = rest.trim_start();
+    }
+    cleaned = strip_markdown_emphasis(cleaned);
+    cleaned = cleaned.trim_start_matches(|c: char| c.is_ascii_digit());
+    cleaned = cleaned.trim_start();
+    if let Some(rest) = cleaned
+        .strip_prefix('.')
+        .or_else(|| cleaned.strip_prefix(')'))
+    {
+        cleaned = rest.trim_start();
+    }
+    strip_markdown_emphasis(cleaned).to_owned()
+}
+
+fn strip_markdown_emphasis(mut s: &str) -> &str {
+    loop {
+        let trimmed = s.trim();
+        let next = if trimmed.starts_with("**") && trimmed.ends_with("**") && trimmed.len() > 4 {
+            Some(&trimmed[2..trimmed.len() - 2])
+        } else if trimmed.starts_with("__") && trimmed.ends_with("__") && trimmed.len() > 4 {
+            Some(&trimmed[2..trimmed.len() - 2])
+        } else if trimmed.starts_with('*') && trimmed.ends_with('*') && trimmed.len() > 2 {
+            Some(&trimmed[1..trimmed.len() - 1])
+        } else if trimmed.starts_with('_') && trimmed.ends_with('_') && trimmed.len() > 2 {
+            Some(&trimmed[1..trimmed.len() - 1])
+        } else {
+            None
+        };
+        match next {
+            Some(inner) => s = inner,
+            None => return trimmed,
+        }
+    }
 }
 
 fn is_markdown_heading(s: &str) -> bool {
@@ -1051,15 +1090,36 @@ accept"#;
 
     #[test]
     fn assay_system_prompt_strict_and_normal() {
-        let strict = format!(
-            "{}\nBe especially harsh — use a lower confidence threshold for flagging issues. Default to revise unless clearly sound.",
-            ASSAY_SYSTEM_BASE
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("derrick.yaml"),
+            "tools:\n  assay:\n    strict: true\n",
+        )
+        .expect("write config");
+        let strict_config = Config::load_layered(tmp.path()).expect("load strict config");
+        assert_eq!(
+            assay_system_prompt(&strict_config),
+            format!(
+                "{}\nBe especially harsh — use a lower confidence threshold for flagging issues. Default to revise unless clearly sound.",
+                ASSAY_SYSTEM_BASE
+            )
         );
-        assert_eq!(strict, format!(
-            "{}\nBe especially harsh — use a lower confidence threshold for flagging issues. Default to revise unless clearly sound.",
-            ASSAY_SYSTEM_BASE
-        ));
-        assert_eq!(ASSAY_SYSTEM_BASE, "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` followed by exactly one of: accept, revise, reject.");
+
+        let normal_tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            normal_tmp.path().join("derrick.yaml"),
+            "tools:\n  assay:\n    strict: false\n",
+        )
+        .expect("write config");
+        let normal_config = Config::load_layered(normal_tmp.path()).expect("load normal config");
+        assert_eq!(
+            assay_system_prompt(&normal_config),
+            ASSAY_SYSTEM_BASE.to_owned()
+        );
+        assert_eq!(
+            ASSAY_SYSTEM_BASE,
+            "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` followed by exactly one of: accept, revise, reject."
+        );
     }
 
     #[test]
@@ -1107,6 +1167,21 @@ accept"#;
         let violations = detect_constitution_violations(text);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("test coverage"));
+    }
+
+    #[test]
+    fn detect_constitution_violations_strips_markdown_markers() {
+        let text = r#"## Constitution Contradictions
+
+**1. Missing test coverage plan (hard violation)**
+
+## Verdict
+revise"#;
+        let violations = detect_constitution_violations(text);
+        assert_eq!(
+            violations,
+            vec!["Missing test coverage plan (hard violation)"]
+        );
     }
 
     #[test]
