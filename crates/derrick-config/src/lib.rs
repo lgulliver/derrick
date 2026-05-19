@@ -2386,18 +2386,12 @@ pipeline:
     host: claude
     command: "/speckit.specify {{prompt}}"
   - id: clarify
-    role: drafter
-    host: claude
-    command: "/speckit.clarify"
+    runner: derrick
     skippable: true
   - id: plan
     role: proposer
     host: claude
     command: "/speckit.plan"
-  - id: checkpoint
-    runner: human
-    prompt: "Review plan.md at {{feature_dir}}/plan.md — continue? [y/N]"
-    skippable: true
   - id: assay
     runner: derrick
     inputs: ["{{feature_dir}}/spec.md", "{{feature_dir}}/plan.md"]
@@ -2434,7 +2428,7 @@ state:
         let config =
             load_yaml(yaml).unwrap_or_else(|error| panic!("design example should parse: {error}"));
 
-        assert_eq!(config.pipeline().len(), 9);
+        assert_eq!(config.pipeline().len(), 8);
         assert_eq!(config.tools().assay().rounds(), "1");
         assert_eq!(config.tools().substrate().mode(), SubstrateMode::Crew);
     }
@@ -2488,7 +2482,7 @@ state:
         let yaml = replace(
             &minimal_yaml(),
             "pipeline: []",
-            "pipeline:\n  - id: checkpoint\n    runner: human\n",
+            "pipeline:\n  - id: human-step\n    runner: human\n",
         );
 
         assert_validation(&yaml, "runner human");

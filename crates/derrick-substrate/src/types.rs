@@ -514,6 +514,13 @@ pub enum EventKind {
         /// Free-form body.
         body: String,
     },
+    /// A pipeline step finished and recorded a terminal status.
+    PipelineStepCompleted {
+        /// Step identifier (e.g. "specify", "plan", "assay").
+        step_id: String,
+        /// Terminal status: "success", "skipped", "halted", or "failed".
+        status: String,
+    },
 }
 
 /// Snake-case discriminator strings for `EventKind` variants. Used for the
@@ -543,6 +550,7 @@ impl EventKind {
             Self::EscalationStuckInReview { .. } => "escalation_stuck_in_review",
             Self::RestackConflict { .. } => "restack_conflict",
             Self::Note { .. } => "note",
+            Self::PipelineStepCompleted { .. } => "pipeline_step_completed",
         }
     }
 }

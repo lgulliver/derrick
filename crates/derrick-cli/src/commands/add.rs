@@ -24,7 +24,6 @@ pub(crate) async fn execute(args: AddArgs) -> Result<CliExitCode, CliError> {
         unskip: args.unskip,
         dry_run: args.dry_run,
         no_clarify: args.no_clarify,
-        no_checkpoint: args.no_checkpoint,
         no_assay: args.no_assay,
     };
     super::run::execute(RunArgs {
@@ -46,7 +45,6 @@ mod tests {
             unskip: vec![],
             dry_run: false,
             no_clarify: false,
-            no_checkpoint: false,
             no_assay: false,
         }
     }
@@ -69,6 +67,5 @@ mod tests {
         };
         assert!(args.no_clarify);
         assert!(args.no_assay);
-        assert!(!args.no_checkpoint);
     }
 }

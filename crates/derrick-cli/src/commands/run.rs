@@ -55,9 +55,6 @@ fn pipeline_input(args: crate::commands::AddFeatureArgs) -> PipelineInput {
     if args.no_clarify {
         skip.insert("clarify".to_owned());
     }
-    if args.no_checkpoint {
-        skip.insert("checkpoint".to_owned());
-    }
     if args.no_assay {
         skip.insert("assay".to_owned());
     }

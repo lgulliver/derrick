@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -185,6 +185,18 @@ impl Runner {
                             .saturating_add(u64::from(record.tokens_out));
                         manifest.steps.push(ManifestStep::from_record(&record));
                         write_manifest(&self.manifest_path(&run_id), &manifest)?;
+                        let _ = self
+                            .substrate
+                            .record_typed_event(
+                                derrick_substrate::EventScope::Worktree {
+                                    run_id: run_id.clone(),
+                                },
+                                derrick_substrate::EventKind::PipelineStepCompleted {
+                                    step_id: step.id().to_owned(),
+                                    status: "skipped".to_owned(),
+                                },
+                            )
+                            .await;
                         idx += 1;
                         continue;
                     }
@@ -225,6 +237,27 @@ impl Runner {
                         .saturating_add(u64::from(record.tokens_out));
                     manifest.steps.push(ManifestStep::from_record(&record));
                     write_manifest(&self.manifest_path(&run_id), &manifest)?;
+
+                    if record.status == StepStatus::Success {
+                        if let Some(feature_dir) = &state.feature_dir {
+                            let wd = self.working_dir(&state);
+                            if step.id() == "specify" {
+                                let p = wd.join(feature_dir).join("spec.md");
+                                if p.exists() {
+                                    if let Ok(c) = std::fs::read_to_string(&p) {
+                                        eprintln!("\n--- Specification ---\n{c}---\n");
+                                    }
+                                }
+                            } else if step.id() == "plan" {
+                                let p = wd.join(feature_dir).join("plan.md");
+                                if p.exists() {
+                                    if let Ok(c) = std::fs::read_to_string(&p) {
+                                        eprintln!("\n--- Plan ---\n{c}---\n");
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     match record.status {
                         StepStatus::Success | StepStatus::Skipped => {}
@@ -272,6 +305,18 @@ impl Runner {
                         if self.should_skip(step, &input) {
                             let record = self.skipped_record(step);
                             eprintln!("    {} \u{23ed} skipped", step.id());
+                            let _ = self
+                                .substrate
+                                .record_typed_event(
+                                    derrick_substrate::EventScope::Worktree {
+                                        run_id: run_id.clone(),
+                                    },
+                                    derrick_substrate::EventKind::PipelineStepCompleted {
+                                        step_id: step.id().to_owned(),
+                                        status: "skipped".to_owned(),
+                                    },
+                                )
+                                .await;
                             skipped.push(record);
                             continue;
                         }
@@ -472,22 +517,43 @@ impl Runner {
         };
         let finished_at = Utc::now();
 
+        let run_id = state.run_id.clone();
         match result {
             Ok(StepExecution {
                 status,
                 artifacts,
                 tokens_in,
                 tokens_out,
-            }) => Ok(StepRecord {
-                id: step.id().to_owned(),
-                status,
-                started_at,
-                finished_at,
-                log_path,
-                artifacts,
-                tokens_in,
-                tokens_out,
-            }),
+            }) => {
+                let status_str = match status {
+                    StepStatus::Skipped => "skipped",
+                    StepStatus::Success => "success",
+                    StepStatus::Failed => "failed",
+                    StepStatus::Halted => "halted",
+                };
+                let _ = self
+                    .substrate
+                    .record_typed_event(
+                        derrick_substrate::EventScope::Worktree {
+                            run_id: run_id.clone(),
+                        },
+                        derrick_substrate::EventKind::PipelineStepCompleted {
+                            step_id: step.id().to_owned(),
+                            status: status_str.to_owned(),
+                        },
+                    )
+                    .await;
+                Ok(StepRecord {
+                    id: step.id().to_owned(),
+                    status,
+                    started_at,
+                    finished_at,
+                    log_path,
+                    artifacts,
+                    tokens_in,
+                    tokens_out,
+                })
+            }
             Err(error) => {
                 let _ignored = append_log(&log_path, &format!("{error}\n"));
                 let record = StepRecord {
@@ -500,6 +566,18 @@ impl Runner {
                     tokens_in: 0,
                     tokens_out: 0,
                 };
+                let _ = self
+                    .substrate
+                    .record_typed_event(
+                        derrick_substrate::EventScope::Worktree {
+                            run_id: run_id.clone(),
+                        },
+                        derrick_substrate::EventKind::PipelineStepCompleted {
+                            step_id: step.id().to_owned(),
+                            status: "failed".to_owned(),
+                        },
+                    )
+                    .await;
                 let manifest_path = self.manifest_path(&state.run_id);
                 if let Ok(mut manifest) = read_manifest(&manifest_path) {
                     manifest.status = RunStatus::Failed;
@@ -587,6 +665,7 @@ impl Runner {
     ) -> Result<StepExecution, RunError> {
         match step.id() {
             "assay" => self.execute_assay(step, state, log_path).await,
+            "clarify" => self.execute_clarify(state, log_path).await,
             "bridge" => {
                 write_log(log_path, "bridge skipped in solo mode\n", "")?;
                 Ok(StepExecution::skipped())
@@ -621,7 +700,7 @@ impl Runner {
             })?;
         let mut answer = String::new();
         std::io::stdin()
-            .read_to_string(&mut answer)
+            .read_line(&mut answer)
             .map_err(|source| RunError::Io {
                 path: PathBuf::from("<stdin>"),
                 source,
@@ -782,6 +861,128 @@ impl Runner {
             .join("assay")
             .join("verdict.md");
         reconcile_verdicts(&outcomes, on_split, &combined_path, &self.repo_root)
+    }
+
+    async fn execute_clarify(
+        &self,
+        state: &ExecutionState,
+        log_path: &Path,
+    ) -> Result<StepExecution, RunError> {
+        let feature_dir = state.feature_dir.clone().ok_or_else(|| {
+            RunError::Config("clarify requires feature_dir from specify step".to_owned())
+        })?;
+        let wd = self.working_dir(state);
+        let spec_path = wd.join(&feature_dir).join("spec.md");
+        let spec = std::fs::read_to_string(&spec_path).map_err(|source| RunError::Io {
+            path: spec_path,
+            source,
+        })?;
+
+        eprintln!("\n--- Specification (review before clarification) ---\n{spec}---\n");
+
+        let prompt = format!(
+            "You are helping refine a specification. Based on the specification below, generate \
+             clarifying questions to ensure the requirements are well-understood. Focus on ambiguous \
+             areas, trade-offs, and critical decisions that need human input.\n\n\
+             For each question, provide:\n\
+             - The question\n\
+             - Multiple choice options (at least 2)\n\
+             - Your recommendation\n\n\
+             Format each question as:\n\
+             Q: <question>\n\
+             Options: <option1>, <option2>, ...\n\
+             Recommendation: <recommended option>\n\n\
+             Specification:\n{spec}"
+        );
+
+        let model = match derrick_models::resolve_role(
+            "drafter",
+            self.config.roles(),
+            self.config.models(),
+            &derrick_models::AuthStore::from_env(),
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("clarify: cannot resolve drafter model, skipping: {e}");
+                return Ok(StepExecution::success(Vec::new()));
+            }
+        };
+
+        let response = match model.complete(completion_request(prompt, None, None)).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("clarify: model call failed, skipping: {e}");
+                return Ok(StepExecution::success(Vec::new()));
+            }
+        };
+
+        write_log(log_path, &response.text, "")?;
+
+        let questions = parse_clarify_questions(&response.text);
+        if questions.is_empty() {
+            eprintln!("No clarifying questions needed. Proceeding.");
+            return Ok(StepExecution::success(Vec::new()));
+        }
+
+        let mut answers: Vec<String> = Vec::new();
+        for (i, q) in questions.iter().enumerate() {
+            eprintln!("\n--- Question {} of {} ---", i + 1, questions.len());
+            eprintln!("{}", q.question);
+            if !q.options.is_empty() {
+                for (j, opt) in q.options.iter().enumerate() {
+                    let is_rec = q.recommendation.as_deref() == Some(opt.as_str());
+                    if is_rec {
+                        eprintln!("  {}. {} [recommended]", j + 1, opt);
+                    } else {
+                        eprintln!("  {}. {}", j + 1, opt);
+                    }
+                }
+            }
+            eprint!("Your answer (or press Enter to accept recommendation): ");
+            std::io::stdout().flush().map_err(|source| RunError::Io {
+                path: PathBuf::from("<stdout>"),
+                source,
+            })?;
+            let mut answer = String::new();
+            std::io::stdin()
+                .read_line(&mut answer)
+                .map_err(|source| RunError::Io {
+                    path: PathBuf::from("<stdin>"),
+                    source,
+                })?;
+            let trimmed = answer.trim().to_owned();
+            if trimmed.is_empty() {
+                answers.push(q.recommendation.clone().unwrap_or_default());
+            } else {
+                answers.push(trimmed);
+            }
+        }
+
+        let clarify_path = wd.join(&feature_dir).join("clarify.md");
+        let mut content = String::from("# Clarification Q&A\n\n");
+        for (q, a) in questions.iter().zip(answers.iter()) {
+            write!(
+                content,
+                "## Question\n{}\n\nOptions: {}\n\nRecommendation: {}\n\nAnswer: {}\n\n",
+                q.question,
+                q.options.join(", "),
+                q.recommendation.as_deref().unwrap_or("none"),
+                a
+            )
+            .unwrap();
+        }
+        std::fs::write(&clarify_path, &content).map_err(|source| RunError::Io {
+            path: clarify_path.clone(),
+            source,
+        })?;
+
+        eprintln!("\nClarification complete. Answers saved.");
+        Ok(
+            StepExecution::success(vec![relative_to_root(&self.repo_root, clarify_path)?])
+                .with_tokens(response.tokens_in, response.tokens_out),
+        )
     }
 
     async fn run_reviewer_rounds(
@@ -1737,6 +1938,48 @@ fn scanner_frames() -> Vec<String> {
     frames
 }
 
+struct ClarifyQuestion {
+    question: String,
+    options: Vec<String>,
+    recommendation: Option<String>,
+}
+
+fn parse_clarify_questions(text: &str) -> Vec<ClarifyQuestion> {
+    let mut questions: Vec<ClarifyQuestion> = Vec::new();
+    let mut question: Option<String> = None;
+    let mut options: Vec<String> = Vec::new();
+    let mut recommendation: Option<String> = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(stripped) = t.strip_prefix("Q:") {
+            if let Some(q) = question.take() {
+                questions.push(ClarifyQuestion {
+                    question: q,
+                    options: std::mem::take(&mut options),
+                    recommendation: recommendation.take(),
+                });
+            }
+            question = Some(stripped.trim().to_owned());
+        } else if let Some(stripped) = t.strip_prefix("Options:") {
+            options = stripped
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+        } else if let Some(stripped) = t.strip_prefix("Recommendation:") {
+            recommendation = Some(stripped.trim().to_owned());
+        }
+    }
+    if let Some(q) = question {
+        questions.push(ClarifyQuestion {
+            question: q,
+            options,
+            recommendation,
+        });
+    }
+    questions
+}
+
 fn completion_request(
     prompt: String,
     cached_prefix: Option<String>,
@@ -2251,22 +2494,7 @@ mod tests {
         ))
     }
 
-    fn yaml(pipeline: &str, reviewer_cli: &Path) -> String {
-        format!(
-            r#"
-version: 1
-site:
-  name: test
-  prefix: tst
-models:
-  shell-reviewer:
-    provider: shell
-    cli: "{}"
-    model: shell-reviewer
-roles:
-  drafter: shell-reviewer
-  proposer: shell-reviewer
-  reviewer: shell-reviewer
+    const YAML_MID: &str = r#"
 tools:
   speckit:
     enabled: true
@@ -2283,7 +2511,9 @@ tools:
     enabled: false
     agent_identity: derrick-hand
 pipeline:
-{pipeline}
+"#;
+
+    const YAML_TAIL: &str = r#"
 guardrails:
   constitution_path: .specify/memory/constitution.md
   forbid_paths: []
@@ -2296,7 +2526,19 @@ state:
   dir: .derrick
   log_runs: true
   worktree_root: .derrick/worktrees
-"#,
+"#;
+
+    fn yaml(pipeline: &str, reviewer_cli: &Path) -> String {
+        format!(
+            "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  shell-reviewer:\n    provider: shell\n    cli: \"{}\"\n    model: shell-reviewer\nroles:\n  drafter: shell-reviewer\n  proposer: shell-reviewer\n  reviewer: shell-reviewer{YAML_MID}{pipeline}{YAML_TAIL}",
+            reviewer_cli.display()
+        )
+    }
+
+    fn yaml_with_drafter(pipeline: &str, drafter_cli: &Path, reviewer_cli: &Path) -> String {
+        format!(
+            "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  shell-drafter:\n    provider: shell\n    cli: \"{}\"\n    model: shell-drafter\n  shell-reviewer:\n    provider: shell\n    cli: \"{}\"\n    model: shell-reviewer\nroles:\n  drafter: shell-drafter\n  proposer: shell-drafter\n  reviewer: shell-reviewer{YAML_MID}{pipeline}{YAML_TAIL}",
+            drafter_cli.display(),
             reviewer_cli.display()
         )
     }
@@ -2307,9 +2549,7 @@ state:
     host: claude
     command: "/speckit.specify {{prompt}}"
   - id: clarify
-    role: drafter
-    host: claude
-    command: "/speckit.clarify"
+    runner: derrick
     skippable: true
   - id: plan
     role: proposer
@@ -2693,10 +2933,17 @@ fi
 
     #[tokio::test]
     async fn assay_revise_then_accept_succeeds_after_replan() -> TestResult {
+        let drafter = reviewer_script("#!/bin/sh\ncat > /dev/null\nprintf 'ok'")?;
         let reviewer = revise_then_accept_script()?;
         let rounds =
             add_feature_pipeline().replace("rounds: \"{{tools.assay.rounds}}\"", "rounds: 2");
-        let (dir, runner) = runner(&yaml(&rounds, &reviewer.path().join("reviewer"))).await?;
+        let (dir, runner) = runner(&yaml_with_drafter(
+            &rounds,
+            &drafter.path().join("reviewer"),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+
         let outcome = runner
             .run_pipeline(
                 ADD_FEATURE_PIPELINE,
