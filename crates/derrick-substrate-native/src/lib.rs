@@ -84,6 +84,10 @@ impl NativeSubstrate {
     }
 
     /// Reserve a worktree slot and return the planned path.
+    ///
+    /// If a row already exists for `run_id` (e.g. from a previous run that was
+    /// closed or interrupted), the row is re-opened rather than failing — this
+    /// allows `resume` to re-reserve the same worktree.
     pub async fn reserve_worktree(
         &self,
         run_id: &str,
@@ -95,6 +99,30 @@ impl NativeSubstrate {
         let path_for_db = path.clone();
 
         self.run_write(move |connection| {
+            // Try to re-open an existing row for this run_id first.
+            let updated = connection
+                .execute(
+                    "UPDATE worktrees SET branch = ?1, path = ?2, created_at = ?3, closed_at = NULL
+                     WHERE run_id = ?4",
+                    params![branch, path_for_db.to_string_lossy(), now_text(), run_id],
+                )
+                .map_err(sql_error)?;
+
+            if updated == 1 {
+                insert_typed_event_raw(
+                    connection,
+                    &EventScope::Worktree {
+                        run_id: run_id.clone(),
+                    },
+                    &EventKind::WorktreeReserved {
+                        run_id: run_id.clone(),
+                        branch: branch.clone(),
+                    },
+                )?;
+                return Ok(path);
+            }
+
+            // No existing row — fresh reservation with duplicate-branch check.
             let live_branch: Option<String> = connection
                 .query_row(
                     "SELECT run_id FROM worktrees WHERE branch = ?1 AND closed_at IS NULL",

@@ -8,28 +8,13 @@ use derrick_substrate_native::NativeSubstrate;
 use derrick_tools::HostRegistry;
 
 pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliError> {
+    let (_repo_root, _config, _substrate, runner) = build_runner().await?;
+
     match args.command {
         RunCommand::AddFeature(add_feature) => {
-            let repo_root = current_repo_root()?;
-            let config = read_config(&repo_root)?;
-            if config.tools().substrate().backend() != SubstrateBackendKind::Native {
-                return Err(crate::message(
-                    "derrick run add-feature requires tools.substrate.backend: native",
-                ));
-            }
-            let substrate =
-                NativeSubstrate::open(native_paths(&repo_root, &config), config.site().clone())
-                    .await?;
-            let runner = Runner::new(
-                config,
-                std::sync::Arc::new(substrate),
-                HostRegistry::with_defaults(),
-                repo_root,
-            );
-
             if let Some(from_step) = add_feature.resume_from {
                 let outcome = runner
-                    .resume(add_feature.run_id.as_deref(), &from_step)
+                    .resume(add_feature.run_id.as_deref(), Some(&from_step))
                     .await
                     .map_err(|error| crate::message(error.to_string()))?;
                 println!("resumed run {}: {:?}", outcome.run_id, outcome.status);
@@ -44,7 +29,42 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
             println!("run {}: {:?}", outcome.run_id, outcome.status);
             Ok(status_code(outcome.status))
         }
+        RunCommand::Resume(args) => {
+            let outcome = runner
+                .resume(args.run_id.as_deref(), None)
+                .await
+                .map_err(|error| crate::message(error.to_string()))?;
+            println!("resumed run {}: {:?}", outcome.run_id, outcome.status);
+            Ok(status_code(outcome.status))
+        }
     }
+}
+
+async fn build_runner() -> Result<
+    (
+        std::path::PathBuf,
+        derrick_config::Config,
+        derrick_substrate_native::NativeSubstrate,
+        Runner,
+    ),
+    crate::CliError,
+> {
+    let repo_root = current_repo_root()?;
+    let config = read_config(&repo_root)?;
+    if config.tools().substrate().backend() != SubstrateBackendKind::Native {
+        return Err(crate::message(
+            "derrick run add-feature requires tools.substrate.backend: native",
+        ));
+    }
+    let substrate =
+        NativeSubstrate::open(native_paths(&repo_root, &config), config.site().clone()).await?;
+    let runner = Runner::new(
+        config.clone(),
+        std::sync::Arc::new(substrate.clone()),
+        HostRegistry::with_defaults(),
+        repo_root.clone(),
+    );
+    Ok((repo_root, config, substrate, runner))
 }
 
 fn pipeline_input(args: crate::commands::AddFeatureArgs) -> PipelineInput {

@@ -199,6 +199,8 @@ pub(crate) struct RunArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum RunCommand {
     AddFeature(AddFeatureArgs),
+    /// Resume the latest incomplete or failed run.
+    Resume(ResumeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -219,6 +221,13 @@ pub(crate) struct AddFeatureArgs {
     pub(crate) no_clarify: bool,
     #[arg(long, help = "Alias for `--skip assay`")]
     pub(crate) no_assay: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ResumeArgs {
+    /// Specific run to resume; defaults to the latest incomplete or failed run.
+    #[arg(long = "run")]
+    pub(crate) run_id: Option<String>,
 }
 
 #[derive(Debug, Args)]

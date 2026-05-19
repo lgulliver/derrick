@@ -60,11 +60,15 @@ impl Runner {
         self.run_pipeline_from(pipeline_id, input, None).await
     }
 
-    /// Resume a previous run from the named step.
+    /// Resume a previous run from the given step, or auto-detect if `from_step` is `None`.
+    ///
+    /// When `from_step` is `None`, the resume step is determined from the manifest:
+    /// - If the last completed step Failed or Halted, retry that step.
+    /// - If the last completed step was Success or Skipped, resume from the next step.
     pub async fn resume(
         &self,
         run_id: Option<&str>,
-        from_step: &str,
+        from_step: Option<&str>,
     ) -> Result<RunOutcome, RunError> {
         self.validate_pipeline_id(ADD_FEATURE_PIPELINE)?;
         self.validate_config()?;
@@ -82,13 +86,16 @@ impl Runner {
                 manifest.config_hash, current_hash
             )));
         }
-        let from_index = self.step_index(from_step)?;
+        let from_index = match from_step {
+            Some(step) => self.step_index(step)?,
+            None => manifest.resume_step_index(),
+        };
         let mut input = PipelineInput {
             prompt: Some(manifest.prompt),
             skip: manifest.flags.skip.into_iter().collect(),
             unskip: manifest.flags.unskip.into_iter().collect(),
             dry_run: manifest.flags.dry_run,
-            run_id: Some(run_id),
+            run_id: Some(run_id.clone()),
         };
         if input.prompt.as_deref().is_some_and(str::is_empty) {
             input.prompt = None;
@@ -516,8 +523,21 @@ impl Runner {
         manifest.feature_dir = state.feature_dir.clone();
         crate::manifest::write_manifest(&self.manifest_path(&run_id), &manifest)?;
 
-        if let Some(path) = state.worktree_path.clone() {
-            self.teardown_worktree(&run_id, &path).await;
+        match outcome_status {
+            RunStatus::Success => {
+                if let Some(path) = state.worktree_path.clone() {
+                    self.teardown_worktree(&run_id, &path).await;
+                }
+            }
+            RunStatus::Failed | RunStatus::Halted => {
+                if state.worktree_path.is_some() {
+                    tracing::info!(
+                        run_id = %run_id,
+                        status = ?outcome_status,
+                        "preserving worktree for resume"
+                    );
+                }
+            }
         }
 
         let tokens_in_total = manifest.tokens_in;
@@ -554,6 +574,14 @@ impl Runner {
         branch: &str,
         state: &mut ExecutionState,
     ) -> Result<(), RunError> {
+        let path = self.worktree_path(run_id);
+
+        if self.is_valid_worktree(&path) {
+            tracing::info!(run_id = %run_id, "reusing existing worktree");
+            state.worktree_path = Some(path);
+            return Ok(());
+        }
+
         let path = self
             .substrate
             .reserve_worktree(run_id, branch)
@@ -561,7 +589,7 @@ impl Runner {
             .map_err(RunError::Substrate)?;
 
         let result = Command::new("git")
-            .args(["worktree", "add", "-b", branch])
+            .args(["worktree", "add", "-B", branch])
             .arg(&path)
             .arg("HEAD")
             .current_dir(&self.repo_root)
@@ -598,6 +626,16 @@ impl Runner {
                 source,
             }),
         }
+    }
+
+    fn is_valid_worktree(&self, path: &Path) -> bool {
+        path.join(".git").exists()
+    }
+
+    fn worktree_path(&self, run_id: &str) -> PathBuf {
+        self.repo_root
+            .join(self.config.state().worktree_root())
+            .join(run_id)
     }
 
     async fn teardown_worktree(&self, run_id: &str, path: &Path) {
