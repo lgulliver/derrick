@@ -67,6 +67,7 @@ pub(crate) struct AddArgs {
 #[derive(Debug, Args)]
 pub(crate) struct ScrubArgs {
     /// The tool name to apply rules for (e.g. git, gh, claude, cargo).
+    #[arg(long = "tool", value_name = "TOOL")]
     pub(crate) tool: String,
     /// Print scrub statistics to stderr after processing.
     #[arg(long)]

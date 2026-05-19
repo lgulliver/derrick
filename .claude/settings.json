@@ -1,11 +1,4 @@
 {
-  "permissions": {
-    "allow": [
-      "Write(.specify/**)",
-      "Write(.derrick/runs/**)",
-      "Bash(mkdir -p .specify/**)"
-    ]
-  },
   "hooks": {
     "PostToolUse": [
       {

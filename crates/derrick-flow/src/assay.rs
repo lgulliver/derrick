@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -302,9 +302,6 @@ pub async fn run_reviewer_rounds(
 }
 
 async fn detect_codex_fallback(config: &Config, reviewer_role: &str) -> Result<bool, RunError> {
-    if std::io::stdin().is_terminal() {
-        return Ok(false);
-    }
     let Some(model_name) = config.roles().get(reviewer_role) else {
         return Ok(false);
     };
