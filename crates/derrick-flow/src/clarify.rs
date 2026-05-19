@@ -60,10 +60,7 @@ pub(crate) fn select_clarify_answer(question: &ClarifyQuestion, user_input: &str
     user_input.to_owned()
 }
 
-pub(crate) fn render_clarify_markdown(
-    questions: &[ClarifyQuestion],
-    answers: &[String],
-) -> String {
+pub(crate) fn render_clarify_markdown(questions: &[ClarifyQuestion], answers: &[String]) -> String {
     let mut content = String::from("# Clarification Q&A\n\n");
     for (q, a) in questions.iter().zip(answers.iter()) {
         content.push_str("## Question\n");

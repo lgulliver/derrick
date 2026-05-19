@@ -328,10 +328,9 @@ impl Runner {
                         let state_clone = state.clone();
                         let run_id = run_id.clone();
                         handles.push(tokio::task::spawn(async move {
-                            let _permit = sem
-                                .acquire_owned()
-                                .await
-                                .map_err(|_| RunError::Config("semaphore closed unexpectedly".to_owned()))?;
+                            let _permit = sem.acquire_owned().await.map_err(|_| {
+                                RunError::Config("semaphore closed unexpectedly".to_owned())
+                            })?;
                             let mut st = state_clone;
                             let record = steps::execute_step(
                                 &runner.config,
