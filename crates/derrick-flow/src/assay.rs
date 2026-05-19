@@ -20,6 +20,7 @@ pub struct ReviewerOutcome {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub constitution_violations: Vec<String>,
+    pub rounds_used: u32,
 }
 
 pub enum ReviewerRoundOutcome {
@@ -27,7 +28,7 @@ pub enum ReviewerRoundOutcome {
     Skipped,
 }
 
-const ASSAY_SYSTEM: &str = "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` followed by exactly one of: accept, revise, reject.";
+const ASSAY_SYSTEM_BASE: &str = "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` followed by exactly one of: accept, revise, reject.";
 
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_assay(
@@ -79,6 +80,24 @@ pub async fn execute_assay(
                 if outcome.constitution_violations.is_empty() {
                     Ok(StepExecution::success(vec![verdict_path_rel])
                         .with_tokens(tokens_in, tokens_out))
+                } else if config.tools().assay().auto_execute() {
+                    eprintln!(
+                        "  {} {} {}",
+                        "\u{26a0}".yellow(),
+                        "Constitution violation — cannot auto-execute".yellow(),
+                        "\u{26a0}".yellow()
+                    );
+                    for viol in &outcome.constitution_violations {
+                        eprintln!("  {}  {}", "\u{2022}".yellow(), viol.yellow());
+                    }
+                    Ok(StepExecution::halted(
+                        vec![verdict_path_rel],
+                        format!(
+                            "Constitution violations prevent auto-execute:\n{}",
+                            outcome.constitution_violations.join("\n")
+                        ),
+                    )
+                    .with_tokens(tokens_in, tokens_out))
                 } else {
                     eprintln!(
                         "  {} {} {}",
@@ -128,8 +147,8 @@ pub async fn execute_assay(
                 let msg =
                     if outcome.verdict == "revise" && outcome.constitution_violations.is_empty() {
                         format!(
-                            "Revise loop exhausted after configured rounds. Latest review: {}",
-                            outcome.role
+                            "Revise loop exhausted after {} rounds. Latest review: {}",
+                            outcome.rounds_used, outcome.role
                         )
                     } else if outcome.verdict == "revise" {
                         format!(
@@ -226,6 +245,58 @@ pub async fn execute_assay(
     reconcile_verdicts(&outcomes, on_split, &combined_path, repo_root)
 }
 
+fn assay_system_prompt(config: &Config) -> String {
+    if config.tools().assay().strict() {
+        format!(
+            "{}\nBe especially harsh — use a lower confidence threshold for flagging issues. Default to revise unless clearly sound.",
+            ASSAY_SYSTEM_BASE
+        )
+    } else {
+        ASSAY_SYSTEM_BASE.to_owned()
+    }
+}
+
+fn phase_name(round: usize) -> &'static str {
+    if round == 1 {
+        "Cross-Examination"
+    } else {
+        "Deliberation"
+    }
+}
+
+fn write_debate_transcript(
+    transcript_path: &Path,
+    phase: &str,
+    round: usize,
+    max_rounds: usize,
+    model_name: &str,
+    verdict: &str,
+    body: &str,
+) -> Result<(), RunError> {
+    let entry = format!(
+        "## {} (round {}/{})\n**Reviewer:** {}\n**Verdict:** {}\n\n{}\n\n---\n\n",
+        phase, round, max_rounds, model_name, verdict, body
+    );
+    append_log(transcript_path, &entry)
+}
+
+fn write_rebuttal_transcript(transcript_path: &Path, replan_delta: &str) -> Result<(), RunError> {
+    let entry = format!("## Rebuttal\n\n{}\n\n---\n\n", replan_delta);
+    append_log(transcript_path, &entry)
+}
+
+fn write_verdict_transcript(
+    transcript_path: &Path,
+    final_verdict: &str,
+    rounds_used: usize,
+) -> Result<(), RunError> {
+    let entry = format!(
+        "## Verdict\n\n**Final:** {}\n**Rounds used:** {}\n",
+        final_verdict, rounds_used
+    );
+    append_log(transcript_path, &entry)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_reviewer_rounds(
     config: &Config,
@@ -244,6 +315,7 @@ pub async fn run_reviewer_rounds(
     let rounds = assay_rounds(config, step, state)?;
     let spec = read_to_string(&working_dir.join(feature_dir).join("spec.md"))?;
     let constitution = read_to_string(&working_dir.join(config.guardrails().constitution_path()))?;
+    let auto_execute = config.tools().assay().auto_execute();
 
     let codex_fallback = detect_codex_fallback(config, reviewer_role).await?;
     if codex_fallback {
@@ -265,6 +337,8 @@ pub async fn run_reviewer_rounds(
     let verdict_path = reviewer_dir.join("verdict.md");
     create_dir_all(parent(&verdict_path)?)?;
 
+    let transcript_path = reviewer_dir.join("debate.md");
+
     let mut tokens_in_total: u32 = 0;
     let mut tokens_out_total: u32 = 0;
     let mut last_constitution_violations: Vec<String> = Vec::new();
@@ -275,18 +349,15 @@ pub async fn run_reviewer_rounds(
         let plan = read_to_string(&working_dir.join(feature_dir).join("plan.md"))?;
         let prompt = format!("Task: {}\n\nPlan:\n{plan}", state_prompt);
         let cached = format!("Constitution:\n{constitution}\n\nSpec:\n{spec}");
-        let reviewer_display = if codex_fallback {
-            "claude"
-        } else {
-            reviewer_role
-        };
+        let phase = phase_name(round);
+
         eprint!(
-            "\r  {} {} round {}/{} ({})...   ",
+            "\r  {} {} {} (round {}/{})...   ",
             step.id().cyan(),
             "\u{2696}".cyan(),
+            phase.cyan(),
             round,
             max_rounds,
-            reviewer_display.cyan()
         );
         std::io::stderr().flush().ok();
 
@@ -294,7 +365,7 @@ pub async fn run_reviewer_rounds(
             let host = hosts
                 .get("claude")
                 .ok_or_else(|| RunError::Config("host \"claude\" is not registered".to_owned()))?;
-            let full_prompt = format!("{ASSAY_SYSTEM}\n\n{cached}\n\n{prompt}");
+            let full_prompt = format!("{}\n\n{cached}\n\n{prompt}", assay_system_prompt(config));
             let host_response = host
                 .run(HostRequest {
                     headless: true,
@@ -319,7 +390,7 @@ pub async fn run_reviewer_rounds(
                 .complete(completion_request(
                     prompt,
                     Some(cached),
-                    Some(ASSAY_SYSTEM.to_owned()),
+                    Some(assay_system_prompt(config)),
                 ))
                 .await?;
             (response.text, name, response.tokens_in, response.tokens_out)
@@ -334,55 +405,66 @@ pub async fn run_reviewer_rounds(
         })?;
         last_constitution_violations = detect_constitution_violations(&response_text);
 
+        write_debate_transcript(
+            &transcript_path,
+            phase,
+            round,
+            max_rounds,
+            &model_name,
+            verdict,
+            &response_text,
+        )?;
+
         eprint!("\r                                            \r");
         match verdict {
             "accept" => {
                 eprintln!(
-                    "  {} round {}/{} {} accept {}",
+                    "  {} {} {} {} accept {}",
                     step.id().cyan(),
-                    round,
-                    max_rounds,
+                    "\u{2696}".cyan(),
+                    phase.cyan(),
                     "\u{2192}".cyan(),
                     "\u{2713}".green()
                 );
             }
             "revise" => {
                 eprintln!(
-                    "  {} round {}/{} {} revise",
+                    "  {} {} {} {} revise",
                     step.id().cyan(),
-                    round,
-                    max_rounds,
+                    "\u{2696}".cyan(),
+                    phase.cyan(),
                     "\u{2192}".cyan()
                 );
             }
             "reject" => {
                 eprintln!(
-                    "  {} round {}/{} {} reject {}",
+                    "  {} {} {} {} reject {}",
                     step.id().cyan(),
-                    round,
-                    max_rounds,
+                    "\u{2696}".cyan(),
+                    phase.cyan(),
                     "\u{2192}".cyan(),
                     "\u{2717}".red()
                 );
             }
             _ => {
                 eprintln!(
-                    "  {} round {}/{} {} unknown verdict",
+                    "  {} {} {} {} unknown verdict",
                     step.id().cyan(),
-                    round,
-                    max_rounds,
+                    "\u{2696}".cyan(),
+                    phase.cyan(),
                     "\u{2192}".cyan()
                 );
             }
         }
 
         let verdict_body = format!(
-            "model: {model_name}\nreviewer: {reviewer_role}\nround: {round}\nverdict: {verdict}\n\n{response_text}"
+            "model: {model_name}\nreviewer: {reviewer_role}\nround: {round}\nverdict: {verdict}\nphase: {phase}\n\n{response_text}"
         );
         write_file(&verdict_path, &verdict_body)?;
 
         match verdict {
             "accept" => {
+                write_verdict_transcript(&transcript_path, "accept", round)?;
                 let violations = last_constitution_violations.clone();
                 return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
                     role: reviewer_role.to_owned(),
@@ -391,9 +473,11 @@ pub async fn run_reviewer_rounds(
                     tokens_in: tokens_in_total,
                     tokens_out: tokens_out_total,
                     constitution_violations: violations,
+                    rounds_used: round as u32,
                 }));
             }
             "reject" => {
+                write_verdict_transcript(&transcript_path, "reject", round)?;
                 return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
                     role: reviewer_role.to_owned(),
                     verdict: "reject".to_owned(),
@@ -401,6 +485,7 @@ pub async fn run_reviewer_rounds(
                     tokens_in: tokens_in_total,
                     tokens_out: tokens_out_total,
                     constitution_violations: Vec::new(),
+                    rounds_used: round as u32,
                 }));
             }
             "revise" if round < max_rounds => {
@@ -410,10 +495,37 @@ pub async fn run_reviewer_rounds(
                         message: "could not parse suggested revisions from reviewer response"
                             .to_owned(),
                     })?;
-                eprintln!("  {} replanning...", step.id().cyan());
-                replan_from_objections(config, &hosts, working_dir, state, objections).await?;
+                eprintln!(
+                    "  {} {} {}...",
+                    step.id().cyan(),
+                    "\u{2694}".cyan(),
+                    "Rebuttal".cyan()
+                );
+                let replan_delta =
+                    replan_from_objections(config, &hosts, working_dir, state, objections).await?;
+                write_rebuttal_transcript(&transcript_path, &replan_delta)?;
             }
             "revise" => {
+                // Rounds exhausted
+                if auto_execute {
+                    eprintln!(
+                        "  {} {} Maximum {} rounds reached — models could not agree.",
+                        step.id().cyan(),
+                        "\u{26a0}".yellow(),
+                        max_rounds
+                    );
+                    write_verdict_transcript(&transcript_path, "revise", round)?;
+                    let violations = last_constitution_violations.clone();
+                    return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
+                        role: reviewer_role.to_owned(),
+                        verdict: "revise".to_owned(),
+                        verdict_path: verdict_path.clone(),
+                        tokens_in: tokens_in_total,
+                        tokens_out: tokens_out_total,
+                        constitution_violations: violations,
+                        rounds_used: round as u32,
+                    }));
+                }
                 eprintln!(
                     "  {} {} Maximum {} rounds reached. Continue with more?",
                     "\u{276f}".cyan(),
@@ -439,12 +551,21 @@ pub async fn run_reviewer_rounds(
                                 .to_owned(),
                         }
                     })?;
-                    eprintln!("  {} replanning and extending rounds...", step.id().cyan());
-                    replan_from_objections(config, &hosts, working_dir, state, objections).await?;
+                    eprintln!(
+                        "  {} {} {} and extending rounds...",
+                        step.id().cyan(),
+                        "\u{2694}".cyan(),
+                        "Rebuttal".cyan()
+                    );
+                    let replan_delta =
+                        replan_from_objections(config, &hosts, working_dir, state, objections)
+                            .await?;
+                    write_rebuttal_transcript(&transcript_path, &replan_delta)?;
                     max_rounds = max_rounds.saturating_add(10);
                     round += 1;
                     continue;
                 }
+                write_verdict_transcript(&transcript_path, "revise", round)?;
                 let violations = last_constitution_violations.clone();
                 return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
                     role: reviewer_role.to_owned(),
@@ -453,6 +574,7 @@ pub async fn run_reviewer_rounds(
                     tokens_in: tokens_in_total,
                     tokens_out: tokens_out_total,
                     constitution_violations: violations,
+                    rounds_used: round as u32,
                 }));
             }
             _ => unreachable_verdict(step.id())?,
@@ -461,6 +583,7 @@ pub async fn run_reviewer_rounds(
         round += 1;
     }
 
+    write_verdict_transcript(&transcript_path, "revise", rounds)?;
     let violations = last_constitution_violations.clone();
     Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
         role: reviewer_role.to_owned(),
@@ -469,6 +592,7 @@ pub async fn run_reviewer_rounds(
         tokens_in: tokens_in_total,
         tokens_out: tokens_out_total,
         constitution_violations: violations,
+        rounds_used: rounds as u32,
     }))
 }
 
@@ -493,7 +617,7 @@ async fn replan_from_objections(
     working_dir: &Path,
     state: &ExecutionState,
     objections: &str,
-) -> Result<(), RunError> {
+) -> Result<String, RunError> {
     let plan_step = config
         .pipeline()
         .iter()
@@ -516,15 +640,16 @@ async fn replan_from_objections(
             id: "plan".to_owned(),
             message: source.to_string(),
         })?;
-    if !response.stdout.trim().is_empty() {
+    let delta = response.stdout.trim().to_owned();
+    if !delta.is_empty() {
         let feature_dir = state
             .feature_dir
             .as_ref()
             .ok_or_else(|| RunError::Config("replan requires feature_dir".to_owned()))?;
         let plan_path = working_dir.join(feature_dir).join("plan.md");
-        append_log(&plan_path, &response.stdout)?;
+        append_log(&plan_path, &delta)?;
     }
-    Ok(())
+    Ok(delta)
 }
 
 pub fn reconcile_verdicts(
@@ -872,6 +997,13 @@ accept"#;
     fn parse_verdict_none() {
         assert_eq!(parse_verdict("no verdict here"), None);
         assert_eq!(parse_verdict("## Verdict\ninvalid"), None);
+    }
+
+    #[test]
+    fn phase_names_are_correct() {
+        assert_eq!(phase_name(1), "Cross-Examination");
+        assert_eq!(phase_name(2), "Deliberation");
+        assert_eq!(phase_name(10), "Deliberation");
     }
 
     #[test]

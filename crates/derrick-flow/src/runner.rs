@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -340,6 +341,74 @@ impl Runner {
                                         p.display().to_string().cyan()
                                     );
                                 }
+                            } else if step.id() == "assay"
+                                && !self.config.tools().assay().auto_execute()
+                            {
+                                let verdict_path =
+                                    wd.join(feature_dir).join("assay").join("verdict.md");
+                                let rounds_used = std::fs::read_to_string(&verdict_path)
+                                    .ok()
+                                    .and_then(|s| {
+                                        s.lines()
+                                            .find_map(|l| l.strip_prefix("round: "))
+                                            .and_then(|r| r.parse::<usize>().ok())
+                                    })
+                                    .unwrap_or(0);
+                                eprintln!();
+                                eprintln!(
+                                    "  {} {}",
+                                    "\u{250c}".bright_cyan(),
+                                    "Verdict Gate".bold()
+                                );
+                                eprintln!(
+                                    "  {} {} {} {}",
+                                    "\u{2502}".bright_cyan(),
+                                    "Plan approved after".cyan(),
+                                    format!("{rounds_used} rounds").cyan(),
+                                    "by cross-model deliberation.".cyan()
+                                );
+                                eprintln!(
+                                    "  {} {}",
+                                    "\u{2502}".bright_cyan(),
+                                    "Review transcript:".cyan()
+                                );
+                                eprintln!(
+                                    "  {} {}",
+                                    "\u{2502}".bright_cyan(),
+                                    wd.join(feature_dir)
+                                        .join("assay")
+                                        .join("debate.md")
+                                        .display()
+                                        .to_string()
+                                        .cyan()
+                                );
+                                eprintln!(
+                                    "  {} {}",
+                                    "\u{2514}".bright_cyan(),
+                                    "Proceed to implementation?".bold()
+                                );
+                                eprint!("  {} Continue pipeline? [Y/n] ", "\u{276f}".cyan());
+                                std::io::stderr().flush().ok();
+                                let mut answer = String::new();
+                                std::io::stdin().read_line(&mut answer).map_err(|source| {
+                                    RunError::Io {
+                                        path: PathBuf::from("<stdin>"),
+                                        source,
+                                    }
+                                })?;
+                                let trimmed = answer.trim();
+                                if trimmed.eq_ignore_ascii_case("n")
+                                    || trimmed.eq_ignore_ascii_case("no")
+                                {
+                                    eprintln!(
+                                        "  {} {}",
+                                        "\u{26a0}".yellow(),
+                                        "Pipeline halted at verdict gate.".yellow()
+                                    );
+                                    outcome_status = RunStatus::Halted;
+                                    break 'outer;
+                                }
+                                eprintln!();
                             }
                         }
                     }
