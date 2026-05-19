@@ -870,13 +870,15 @@ fn clean_violation_text(line: &str) -> String {
 fn strip_markdown_emphasis(mut s: &str) -> &str {
     loop {
         let trimmed = s.trim();
-        let next = if trimmed.starts_with("**") && trimmed.ends_with("**") && trimmed.len() > 4 {
+        let next = if (trimmed.starts_with("**") || trimmed.starts_with("__"))
+            && (trimmed.ends_with("**") || trimmed.ends_with("__"))
+            && trimmed.len() > 4
+        {
             Some(&trimmed[2..trimmed.len() - 2])
-        } else if trimmed.starts_with("__") && trimmed.ends_with("__") && trimmed.len() > 4 {
-            Some(&trimmed[2..trimmed.len() - 2])
-        } else if trimmed.starts_with('*') && trimmed.ends_with('*') && trimmed.len() > 2 {
-            Some(&trimmed[1..trimmed.len() - 1])
-        } else if trimmed.starts_with('_') && trimmed.ends_with('_') && trimmed.len() > 2 {
+        } else if (trimmed.starts_with('*') || trimmed.starts_with('_'))
+            && (trimmed.ends_with('*') || trimmed.ends_with('_'))
+            && trimmed.len() > 2
+        {
             Some(&trimmed[1..trimmed.len() - 1])
         } else {
             None
