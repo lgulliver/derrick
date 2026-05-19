@@ -1092,6 +1092,15 @@ mod tests {
         assert!(json.contains("\"kind\":\"ticket_state_changed\""));
         let back: EventKind = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, kind);
+
+        let pipeline = EventKind::PipelineStepCompleted {
+            step_id: "clarify".to_owned(),
+            status: "success".to_owned(),
+        };
+        let json = serde_json::to_string(&pipeline).expect("serialize");
+        assert!(json.contains("\"kind\":\"pipeline_step_completed\""));
+        let back: EventKind = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, pipeline);
     }
 
     #[test]
@@ -1103,6 +1112,14 @@ mod tests {
             }
             .discriminator(),
             "note"
+        );
+        assert_eq!(
+            EventKind::PipelineStepCompleted {
+                step_id: "clarify".to_owned(),
+                status: "success".to_owned(),
+            }
+            .discriminator(),
+            "pipeline_step_completed"
         );
     }
 

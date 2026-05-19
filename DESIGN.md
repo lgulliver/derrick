@@ -185,7 +185,7 @@ models:
 # Changing one model changes the whole class of step that uses it.
 roles:
   proposer:  claude-opus       # plan + analyze (heavy reasoning)
-  drafter:   claude-sonnet     # specify + clarify + tasks (mechanical)
+  drafter:   claude-sonnet     # specify + tasks (mechanical)
   reviewer:  codex-gpt5        # assay (adversarial, different family)
   executor:  copilot           # ticket dispatch in crew/copilot mode
   summariser: claude-sonnet    # inter-step caveman-augmented summary, if used
@@ -215,18 +215,12 @@ pipeline:
     host: claude                  # which host CLI loads the prompt (see §6.5)
     command: "/speckit.specify {{prompt}}"
   - id: clarify
-    role: drafter
-    host: claude
-    command: "/speckit.clarify"
+    runner: derrick
     skippable: true
   - id: plan
     role: proposer
     host: claude
     command: "/speckit.plan"
-  - id: checkpoint
-    runner: human
-    prompt: "Review plan.md at {{feature_dir}}/plan.md — continue? [y/N]"
-    skippable: true
   - id: assay
     runner: derrick               # in-process; uses the reviewer role(s) (§7)
     inputs: [{{feature_dir}}/spec.md, {{feature_dir}}/plan.md]
@@ -392,8 +386,8 @@ What happens (this is the load-bearing flow):
      "<command>" --add-dir <cwd>`). The host loads its own
      context (D30).
    - On `runner: gt`/`bash`, shells out and streams output.
-   - On `runner: human`, prompts on stdout and reads stdin (or auto-skips
-     when `--no-checkpoint`).
+   - On interactive `runner: derrick` steps (for example `clarify`), prompts
+     on stdout and reads stdin.
 4. After `specify`, derrick reads `.specify/feature.json` to pin
     `feature_dir` for subsequent steps, solving the
     "stale feature.json" bug.
@@ -405,7 +399,6 @@ Variants exposed as slash commands or flags:
 | Flag | Behaviour |
 |---|---|
 | `--no-clarify` | Skip the clarify step |
-| `--no-checkpoint` | Skip the human plan review |
 | `--no-assay` | Skip cross-model adversarial review |
 | `--dry-run` | Run through tasks; do not create beads or start mayor |
 | `--phase <label>` | Apply a phase label to every bead |
@@ -1338,7 +1331,7 @@ Every byte across a model boundary earns its place. Seven knobs:
 
 | Step | Role | Default model | Why |
 |---|---|---|---|
-| `specify`, `clarify`, `tasks` | `drafter` | claude-sonnet | Mechanical, structured |
+| `specify`, `tasks` | `drafter` | claude-sonnet | Mechanical, structured |
 | `plan`, `analyze` | `proposer` | claude-opus | Hard reasoning |
 | `assay` | `reviewer` | codex-gpt5 | Adversarial, different family |
 | `bridge`, `foreman` | — | n/a | Subprocess / in-process |
