@@ -1022,4 +1022,101 @@ accept"#;
             violations[0]
         );
     }
+
+    #[test]
+    fn is_markdown_heading_variants() {
+        assert!(is_markdown_heading("# Heading"));
+        assert!(is_markdown_heading("## Heading"));
+        assert!(is_markdown_heading("### Heading"));
+        assert!(is_markdown_heading("#### Heading"));
+        assert!(!is_markdown_heading("Not a heading"));
+        assert!(!is_markdown_heading(""));
+        assert!(!is_markdown_heading("#NoSpace"));
+        assert!(!is_markdown_heading("###"));
+        assert!(is_markdown_heading(" # heading after space")); // trims whitespace
+    }
+
+    #[test]
+    fn unreachable_verdict_returns_error() {
+        let result = unreachable_verdict::<()>("assay");
+        assert!(result.is_err());
+        match result {
+            Err(RunError::StepFailed { id, message }) => {
+                assert_eq!(id, "assay");
+                assert_eq!(message, "unsupported verdict");
+            }
+            _ => panic!("expected StepFailed"),
+        }
+    }
+
+    #[test]
+    fn assay_system_prompt_strict_and_normal() {
+        let strict = format!(
+            "{}\nBe especially harsh — use a lower confidence threshold for flagging issues. Default to revise unless clearly sound.",
+            ASSAY_SYSTEM_BASE
+        );
+        assert_eq!(strict, format!(
+            "{}\nBe especially harsh — use a lower confidence threshold for flagging issues. Default to revise unless clearly sound.",
+            ASSAY_SYSTEM_BASE
+        ));
+        assert_eq!(ASSAY_SYSTEM_BASE, "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` followed by exactly one of: accept, revise, reject.");
+    }
+
+    #[test]
+    fn write_transcripts_creates_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("debate.md");
+
+        write_debate_transcript(
+            &path,
+            "Cross-Examination",
+            1,
+            10,
+            "test-model",
+            "revise",
+            "body text",
+        )
+        .unwrap();
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Cross-Examination (round 1/10)"));
+        assert!(content.contains("test-model"));
+        assert!(content.contains("revise"));
+        assert!(content.contains("body text"));
+
+        write_rebuttal_transcript(&path, "replan delta").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Rebuttal"));
+        assert!(content.contains("replan delta"));
+
+        write_verdict_transcript(&path, "accept", 3).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("accept"));
+        assert!(content.contains("**Rounds used:** 3"));
+    }
+
+    #[test]
+    fn detect_constitution_violations_h3_heading() {
+        let text = r#"Some stuff
+
+### Constitution Contradictions
+
+**1. Missing test coverage plan (hard violation)**
+
+## Other Section"#;
+        let violations = detect_constitution_violations(text);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("test coverage"));
+    }
+
+    #[test]
+    fn detect_constitution_violations_no_matches() {
+        let text = r#"## Something Else
+
+**1. Not a violation**
+
+Random text."#;
+        let violations = detect_constitution_violations(text);
+        assert!(violations.is_empty());
+    }
 }
