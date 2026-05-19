@@ -307,11 +307,7 @@ impl Runner {
                                             "Plan Summary".bold()
                                         );
                                         if let Some(first) = lines.first() {
-                                            let preview = if first.len() > 80 {
-                                                format!("{}...", &first[..77])
-                                            } else {
-                                                first.to_string()
-                                            };
+                                            let preview = summarize_line(first, 80);
                                             eprintln!(
                                                 "  {} {}",
                                                 "\u{2502}".bright_cyan(),
@@ -759,4 +755,25 @@ impl Runner {
 fn is_interactive_step(step: &PipelineStep) -> bool {
     matches!(step.runner(), Some(StepRunner::Human))
         || (matches!(step.runner(), Some(StepRunner::Derrick)) && step.id() == "clarify")
+}
+
+fn summarize_line(line: &str, max_chars: usize) -> String {
+    let total = line.chars().count();
+    if total <= max_chars {
+        return line.to_owned();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut preview = line.chars().take(keep).collect::<String>();
+    preview.push_str("...");
+    preview
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn summarize_line_truncates_without_utf8_panics() {
+        let line = "🚀🚀🚀🚀🚀";
+        let preview = super::summarize_line(line, 4);
+        assert_eq!(preview, "🚀...");
+    }
 }

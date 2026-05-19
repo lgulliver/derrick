@@ -5,7 +5,7 @@ use std::sync::Arc;
 use derrick_tools::{HostRegistry, HostRequest};
 use owo_colors::OwoColorize;
 
-use crate::io::{relative_to_root, write_log};
+use crate::io::{append_log, relative_to_root, write_log};
 use crate::types::{RunError, StepExecution};
 
 pub struct ClarifyQuestion {
@@ -78,6 +78,24 @@ pub(crate) fn render_clarify_markdown(questions: &[ClarifyQuestion], answers: &[
     content
 }
 
+fn build_clarify_prompt(spec_rel: &Path) -> String {
+    format!(
+        "You are helping refine a specification. Read and analyze the specification at \
+         `{}` from the working directory. Generate clarifying questions to ensure the \
+         requirements are well-understood. Focus on ambiguous areas, trade-offs, and critical \
+         decisions that need human input.\n\n\
+         For each question, provide:\n\
+         - The question\n\
+         - Multiple choice options (at least 2)\n\
+         - Your recommendation\n\n\
+         Format each question as:\n\
+         Q: <question>\n\
+         Options: <option1>, <option2>, ...\n\
+         Recommendation: <recommended option>",
+        spec_rel.display()
+    )
+}
+
 pub async fn execute_clarify(
     hosts: Arc<HostRegistry>,
     repo_root: &std::path::Path,
@@ -100,20 +118,8 @@ pub async fn execute_clarify(
         spec_lines
     );
 
-    let prompt = format!(
-        "You are helping refine a specification. Based on the specification below, generate \
-         clarifying questions to ensure the requirements are well-understood. Focus on ambiguous \
-         areas, trade-offs, and critical decisions that need human input.\n\n\
-         For each question, provide:\n\
-         - The question\n\
-         - Multiple choice options (at least 2)\n\
-         - Your recommendation\n\n\
-         Format each question as:\n\
-         Q: <question>\n\
-         Options: <option1>, <option2>, ...\n\
-         Recommendation: <recommended option>\n\n\
-         Specification:\n{spec}"
-    );
+    let spec_rel = feature_dir.join("spec.md");
+    let prompt = build_clarify_prompt(&spec_rel);
 
     let host = hosts
         .get("claude")
@@ -129,6 +135,10 @@ pub async fn execute_clarify(
         })?;
 
     write_log(log_path, &response.stdout, &response.stderr)?;
+    append_log(
+        log_path,
+        "\n[clarify] token accounting unavailable for host adapter calls\n",
+    )?;
 
     let questions = parse_clarify_questions(&response.stdout);
     if questions.is_empty() {
@@ -178,4 +188,16 @@ pub async fn execute_clarify(
         repo_root,
         clarify_path,
     )?]))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn clarify_prompt_references_spec_path() {
+        let prompt = super::build_clarify_prompt(Path::new("specs/001-test/spec.md"));
+        assert!(prompt.contains("specs/001-test/spec.md"));
+        assert!(!prompt.contains("Specification:\n"));
+    }
 }
