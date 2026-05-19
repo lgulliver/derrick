@@ -616,15 +616,7 @@ fn run_add_feature_smoke_writes_real_artifacts() -> TestResult {
     let output = derrick()?
         .current_dir(dir.path())
         .env("PATH", path)
-        .args([
-            "run",
-            "add-feature",
-            "--prompt",
-            "hello",
-            "--no-checkpoint",
-            "--run",
-            "smoke",
-        ])
+        .args(["run", "add-feature", "--prompt", "hello", "--run", "smoke"])
         .assert()
         .success()
         .get_output()

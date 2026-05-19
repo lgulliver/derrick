@@ -60,8 +60,6 @@ pub(crate) struct AddArgs {
     pub(crate) dry_run: bool,
     #[arg(long, help = "Alias for `--skip clarify`")]
     pub(crate) no_clarify: bool,
-    #[arg(long, help = "Alias for `--skip checkpoint`")]
-    pub(crate) no_checkpoint: bool,
     #[arg(long, help = "Alias for `--skip assay`")]
     pub(crate) no_assay: bool,
 }
@@ -218,8 +216,6 @@ pub(crate) struct AddFeatureArgs {
     pub(crate) dry_run: bool,
     #[arg(long, help = "Alias for `--skip clarify`")]
     pub(crate) no_clarify: bool,
-    #[arg(long, help = "Alias for `--skip checkpoint`")]
-    pub(crate) no_checkpoint: bool,
     #[arg(long, help = "Alias for `--skip assay`")]
     pub(crate) no_assay: bool,
 }

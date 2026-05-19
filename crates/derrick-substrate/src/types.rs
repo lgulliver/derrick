@@ -514,6 +514,13 @@ pub enum EventKind {
         /// Free-form body.
         body: String,
     },
+    /// A pipeline step finished and recorded a terminal status.
+    PipelineStepCompleted {
+        /// Step identifier (e.g. "specify", "plan", "assay").
+        step_id: String,
+        /// Terminal status: "success", "skipped", "halted", or "failed".
+        status: String,
+    },
 }
 
 /// Snake-case discriminator strings for `EventKind` variants. Used for the
@@ -543,6 +550,7 @@ impl EventKind {
             Self::EscalationStuckInReview { .. } => "escalation_stuck_in_review",
             Self::RestackConflict { .. } => "restack_conflict",
             Self::Note { .. } => "note",
+            Self::PipelineStepCompleted { .. } => "pipeline_step_completed",
         }
     }
 }
@@ -1084,6 +1092,15 @@ mod tests {
         assert!(json.contains("\"kind\":\"ticket_state_changed\""));
         let back: EventKind = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, kind);
+
+        let pipeline = EventKind::PipelineStepCompleted {
+            step_id: "clarify".to_owned(),
+            status: "success".to_owned(),
+        };
+        let json = serde_json::to_string(&pipeline).expect("serialize");
+        assert!(json.contains("\"kind\":\"pipeline_step_completed\""));
+        let back: EventKind = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, pipeline);
     }
 
     #[test]
@@ -1095,6 +1112,14 @@ mod tests {
             }
             .discriminator(),
             "note"
+        );
+        assert_eq!(
+            EventKind::PipelineStepCompleted {
+                step_id: "clarify".to_owned(),
+                status: "success".to_owned(),
+            }
+            .discriminator(),
+            "pipeline_step_completed"
         );
     }
 

@@ -233,6 +233,9 @@ fn summarise_event(kind: &EventKind) -> String {
         EventKind::TicketAssigned { hand } => format!("assigned to {hand}"),
         EventKind::TicketUnassigned { reason } => format!("unassigned: {reason}"),
         EventKind::Note { body } => body.clone(),
+        EventKind::PipelineStepCompleted { step_id, status } => {
+            format!("step {step_id}: {status}")
+        }
         other => other.discriminator().to_owned(),
     }
 }

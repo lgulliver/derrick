@@ -47,18 +47,12 @@ pipeline:
     host: claude
     command: "/speckit.specify {{prompt}}"
   - id: clarify
-    role: drafter
-    host: claude
-    command: "/speckit.clarify"
+    runner: derrick
     skippable: true
   - id: plan
     role: proposer
     host: claude
     command: "/speckit.plan"
-  - id: checkpoint
-    runner: human
-    prompt: "Review plan.md at {{feature_dir}}/plan.md - continue? [y/N]"
-    skippable: true
   - id: assay
     runner: derrick
     inputs: ["{{feature_dir}}/spec.md", "{{feature_dir}}/plan.md"]

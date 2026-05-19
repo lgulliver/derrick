@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -185,11 +185,16 @@ impl Runner {
                             .saturating_add(u64::from(record.tokens_out));
                         manifest.steps.push(ManifestStep::from_record(&record));
                         write_manifest(&self.manifest_path(&run_id), &manifest)?;
+                        self.emit_pipeline_step_completed_event(&run_id, step.id(), "skipped")
+                            .await;
                         idx += 1;
                         continue;
                     }
 
-                    let record = {
+                    let record = if self.step_needs_interactive_prompt(step) {
+                        eprintln!("  {}...", step.id());
+                        self.execute_step(step, &mut state).await?
+                    } else {
                         let step_id = step.id().to_owned();
                         let frames = scanner_frames();
                         let running = Arc::new(AtomicBool::new(true));
@@ -225,6 +230,27 @@ impl Runner {
                         .saturating_add(u64::from(record.tokens_out));
                     manifest.steps.push(ManifestStep::from_record(&record));
                     write_manifest(&self.manifest_path(&run_id), &manifest)?;
+
+                    if record.status == StepStatus::Success {
+                        if let Some(feature_dir) = &state.feature_dir {
+                            let wd = self.working_dir(&state);
+                            if step.id() == "specify" {
+                                let p = wd.join(feature_dir).join("spec.md");
+                                if p.exists() {
+                                    if let Ok(c) = std::fs::read_to_string(&p) {
+                                        eprintln!("\n--- Specification ---\n{c}---\n");
+                                    }
+                                }
+                            } else if step.id() == "plan" {
+                                let p = wd.join(feature_dir).join("plan.md");
+                                if p.exists() {
+                                    if let Ok(c) = std::fs::read_to_string(&p) {
+                                        eprintln!("\n--- Plan ---\n{c}---\n");
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     match record.status {
                         StepStatus::Success | StepStatus::Skipped => {}
@@ -272,6 +298,8 @@ impl Runner {
                         if self.should_skip(step, &input) {
                             let record = self.skipped_record(step);
                             eprintln!("    {} \u{23ed} skipped", step.id());
+                            self.emit_pipeline_step_completed_event(&run_id, step.id(), "skipped")
+                                .await;
                             skipped.push(record);
                             continue;
                         }
@@ -472,22 +500,33 @@ impl Runner {
         };
         let finished_at = Utc::now();
 
+        let run_id = state.run_id.clone();
         match result {
             Ok(StepExecution {
                 status,
                 artifacts,
                 tokens_in,
                 tokens_out,
-            }) => Ok(StepRecord {
-                id: step.id().to_owned(),
-                status,
-                started_at,
-                finished_at,
-                log_path,
-                artifacts,
-                tokens_in,
-                tokens_out,
-            }),
+            }) => {
+                let status_str = match status {
+                    StepStatus::Skipped => "skipped",
+                    StepStatus::Success => "success",
+                    StepStatus::Failed => "failed",
+                    StepStatus::Halted => "halted",
+                };
+                self.emit_pipeline_step_completed_event(&run_id, step.id(), status_str)
+                    .await;
+                Ok(StepRecord {
+                    id: step.id().to_owned(),
+                    status,
+                    started_at,
+                    finished_at,
+                    log_path,
+                    artifacts,
+                    tokens_in,
+                    tokens_out,
+                })
+            }
             Err(error) => {
                 let _ignored = append_log(&log_path, &format!("{error}\n"));
                 let record = StepRecord {
@@ -500,6 +539,8 @@ impl Runner {
                     tokens_in: 0,
                     tokens_out: 0,
                 };
+                self.emit_pipeline_step_completed_event(&run_id, step.id(), "failed")
+                    .await;
                 let manifest_path = self.manifest_path(&state.run_id);
                 if let Ok(mut manifest) = read_manifest(&manifest_path) {
                     manifest.status = RunStatus::Failed;
@@ -521,6 +562,7 @@ impl Runner {
         if let Some(host) = step.host() {
             let command = required_step_text(step.command(), step.id(), "command")?;
             let prompt = render_template(command, &self.template_context(state)?)?;
+            let prompt = self.inject_clarify_answers_for_plan(step.id(), state, prompt)?;
             let host_name = host_name(host);
             let host = self
                 .hosts
@@ -561,6 +603,7 @@ impl Runner {
                 .command()
                 .map_or_else(|| state.prompt.clone(), ToOwned::to_owned);
             let rendered = render_template(&prompt, &self.template_context(state)?)?;
+            let rendered = self.inject_clarify_answers_for_plan(step.id(), state, rendered)?;
             let model = resolve_role(
                 role,
                 self.config.roles(),
@@ -587,6 +630,7 @@ impl Runner {
     ) -> Result<StepExecution, RunError> {
         match step.id() {
             "assay" => self.execute_assay(step, state, log_path).await,
+            "clarify" => self.execute_clarify(state, log_path).await,
             "bridge" => {
                 write_log(log_path, "bridge skipped in solo mode\n", "")?;
                 Ok(StepExecution::skipped())
@@ -621,7 +665,7 @@ impl Runner {
             })?;
         let mut answer = String::new();
         std::io::stdin()
-            .read_to_string(&mut answer)
+            .read_line(&mut answer)
             .map_err(|source| RunError::Io {
                 path: PathBuf::from("<stdin>"),
                 source,
@@ -782,6 +826,153 @@ impl Runner {
             .join("assay")
             .join("verdict.md");
         reconcile_verdicts(&outcomes, on_split, &combined_path, &self.repo_root)
+    }
+
+    async fn execute_clarify(
+        &self,
+        state: &ExecutionState,
+        log_path: &Path,
+    ) -> Result<StepExecution, RunError> {
+        let feature_dir = state.feature_dir.clone().ok_or_else(|| {
+            RunError::Config("clarify requires feature_dir from specify step".to_owned())
+        })?;
+        let wd = self.working_dir(state);
+        let spec_path = wd.join(&feature_dir).join("spec.md");
+        let spec = std::fs::read_to_string(&spec_path).map_err(|source| RunError::Io {
+            path: spec_path,
+            source,
+        })?;
+
+        eprintln!("\n--- Specification (review before clarification) ---\n{spec}---\n");
+
+        let prompt = format!(
+            "You are helping refine a specification. Based on the specification below, generate \
+             clarifying questions to ensure the requirements are well-understood. Focus on ambiguous \
+             areas, trade-offs, and critical decisions that need human input.\n\n\
+             For each question, provide:\n\
+             - The question\n\
+             - Multiple choice options (at least 2)\n\
+             - Your recommendation\n\n\
+             Format each question as:\n\
+             Q: <question>\n\
+             Options: <option1>, <option2>, ...\n\
+             Recommendation: <recommended option>\n\n\
+             Specification:\n{spec}"
+        );
+
+        let model = match derrick_models::resolve_role(
+            "drafter",
+            self.config.roles(),
+            self.config.models(),
+            &derrick_models::AuthStore::from_env(),
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) => return Err(RunError::from(e)),
+        };
+
+        let response = match model.complete(completion_request(prompt, None, None)).await {
+            Ok(r) => r,
+            Err(e) => return Err(RunError::from(e)),
+        };
+
+        write_log(log_path, &response.text, "")?;
+
+        let questions = parse_clarify_questions(&response.text);
+        if questions.is_empty() {
+            eprintln!("No clarifying questions needed. Proceeding.");
+            return Ok(StepExecution::success(Vec::new()));
+        }
+
+        let mut answers: Vec<String> = Vec::new();
+        for (i, q) in questions.iter().enumerate() {
+            eprintln!("\n--- Question {} of {} ---", i + 1, questions.len());
+            eprintln!("{}", q.question);
+            if !q.options.is_empty() {
+                for (j, opt) in q.options.iter().enumerate() {
+                    let is_rec = q.recommendation.as_deref() == Some(opt.as_str());
+                    if is_rec {
+                        eprintln!("  {}. {} [recommended]", j + 1, opt);
+                    } else {
+                        eprintln!("  {}. {}", j + 1, opt);
+                    }
+                }
+            }
+            eprint!("Your answer (or press Enter to accept recommendation): ");
+            std::io::stdout().flush().map_err(|source| RunError::Io {
+                path: PathBuf::from("<stdout>"),
+                source,
+            })?;
+            let mut answer = String::new();
+            std::io::stdin()
+                .read_line(&mut answer)
+                .map_err(|source| RunError::Io {
+                    path: PathBuf::from("<stdin>"),
+                    source,
+                })?;
+            answers.push(select_clarify_answer(q, answer.trim()));
+        }
+
+        let clarify_path = wd.join(&feature_dir).join("clarify.md");
+        let content = render_clarify_markdown(&questions, &answers);
+        std::fs::write(&clarify_path, &content).map_err(|source| RunError::Io {
+            path: clarify_path.clone(),
+            source,
+        })?;
+
+        eprintln!("\nClarification complete. Answers saved.");
+        Ok(
+            StepExecution::success(vec![relative_to_root(&self.repo_root, clarify_path)?])
+                .with_tokens(response.tokens_in, response.tokens_out),
+        )
+    }
+
+    fn step_needs_interactive_prompt(&self, step: &PipelineStep) -> bool {
+        matches!(
+            (step.runner(), step.id()),
+            (Some(StepRunner::Human), _) | (Some(StepRunner::Derrick), "clarify")
+        )
+    }
+
+    async fn emit_pipeline_step_completed_event(&self, run_id: &str, step_id: &str, status: &str) {
+        let _ = self
+            .substrate
+            .record_typed_event(
+                derrick_substrate::EventScope::Worktree {
+                    run_id: run_id.to_owned(),
+                },
+                derrick_substrate::EventKind::PipelineStepCompleted {
+                    step_id: step_id.to_owned(),
+                    status: status.to_owned(),
+                },
+            )
+            .await;
+    }
+
+    fn inject_clarify_answers_for_plan(
+        &self,
+        step_id: &str,
+        state: &ExecutionState,
+        prompt: String,
+    ) -> Result<String, RunError> {
+        if step_id != "plan" {
+            return Ok(prompt);
+        }
+        let Some(feature_dir) = &state.feature_dir else {
+            return Ok(prompt);
+        };
+        let clarify_path = self.working_dir(state).join(feature_dir).join("clarify.md");
+        if !clarify_path.exists() {
+            return Ok(prompt);
+        }
+        let clarify = std::fs::read_to_string(&clarify_path).map_err(|source| RunError::Io {
+            path: clarify_path.clone(),
+            source,
+        })?;
+        Ok(format!(
+            "{prompt}\n\nApply these accepted clarifications when producing the plan:\n\n{clarify}"
+        ))
     }
 
     async fn run_reviewer_rounds(
@@ -1737,6 +1928,76 @@ fn scanner_frames() -> Vec<String> {
     frames
 }
 
+struct ClarifyQuestion {
+    question: String,
+    options: Vec<String>,
+    recommendation: Option<String>,
+}
+
+fn parse_clarify_questions(text: &str) -> Vec<ClarifyQuestion> {
+    let mut questions: Vec<ClarifyQuestion> = Vec::new();
+    let mut question: Option<String> = None;
+    let mut options: Vec<String> = Vec::new();
+    let mut recommendation: Option<String> = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(stripped) = t.strip_prefix("Q:") {
+            if let Some(q) = question.take() {
+                questions.push(ClarifyQuestion {
+                    question: q,
+                    options: std::mem::take(&mut options),
+                    recommendation: recommendation.take(),
+                });
+            }
+            question = Some(stripped.trim().to_owned());
+        } else if let Some(stripped) = t.strip_prefix("Options:") {
+            options = stripped
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+        } else if let Some(stripped) = t.strip_prefix("Recommendation:") {
+            recommendation = Some(stripped.trim().to_owned());
+        }
+    }
+    if let Some(q) = question {
+        questions.push(ClarifyQuestion {
+            question: q,
+            options,
+            recommendation,
+        });
+    }
+    questions
+}
+
+fn select_clarify_answer(question: &ClarifyQuestion, user_input: &str) -> String {
+    if user_input.is_empty() {
+        return question.recommendation.clone().unwrap_or_default();
+    }
+    if let Ok(index) = user_input.parse::<usize>() {
+        if let Some(selected) = question.options.get(index.saturating_sub(1)) {
+            return selected.clone();
+        }
+    }
+    user_input.to_owned()
+}
+
+fn render_clarify_markdown(questions: &[ClarifyQuestion], answers: &[String]) -> String {
+    let mut content = String::from("# Clarification Q&A\n\n");
+    for (q, a) in questions.iter().zip(answers.iter()) {
+        content.push_str("## Question\n");
+        content.push_str(&q.question);
+        content.push_str("\n\nOptions: ");
+        content.push_str(&q.options.join(", "));
+        content.push_str("\n\nRecommendation: ");
+        content.push_str(q.recommendation.as_deref().unwrap_or("none"));
+        content.push_str("\n\nAnswer: ");
+        content.push_str(a);
+        content.push_str("\n\n");
+    }
+    content
+}
+
 fn completion_request(
     prompt: String,
     cached_prefix: Option<String>,
@@ -2251,22 +2512,7 @@ mod tests {
         ))
     }
 
-    fn yaml(pipeline: &str, reviewer_cli: &Path) -> String {
-        format!(
-            r#"
-version: 1
-site:
-  name: test
-  prefix: tst
-models:
-  shell-reviewer:
-    provider: shell
-    cli: "{}"
-    model: shell-reviewer
-roles:
-  drafter: shell-reviewer
-  proposer: shell-reviewer
-  reviewer: shell-reviewer
+    const YAML_MID: &str = r#"
 tools:
   speckit:
     enabled: true
@@ -2283,7 +2529,9 @@ tools:
     enabled: false
     agent_identity: derrick-hand
 pipeline:
-{pipeline}
+"#;
+
+    const YAML_TAIL: &str = r#"
 guardrails:
   constitution_path: .specify/memory/constitution.md
   forbid_paths: []
@@ -2296,7 +2544,19 @@ state:
   dir: .derrick
   log_runs: true
   worktree_root: .derrick/worktrees
-"#,
+"#;
+
+    fn yaml(pipeline: &str, reviewer_cli: &Path) -> String {
+        format!(
+            "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  shell-reviewer:\n    provider: shell\n    cli: \"{}\"\n    model: shell-reviewer\nroles:\n  drafter: shell-reviewer\n  proposer: shell-reviewer\n  reviewer: shell-reviewer{YAML_MID}{pipeline}{YAML_TAIL}",
+            reviewer_cli.display()
+        )
+    }
+
+    fn yaml_with_drafter(pipeline: &str, drafter_cli: &Path, reviewer_cli: &Path) -> String {
+        format!(
+            "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  shell-drafter:\n    provider: shell\n    cli: \"{}\"\n    model: shell-drafter\n  shell-reviewer:\n    provider: shell\n    cli: \"{}\"\n    model: shell-reviewer\nroles:\n  drafter: shell-drafter\n  proposer: shell-drafter\n  reviewer: shell-reviewer{YAML_MID}{pipeline}{YAML_TAIL}",
+            drafter_cli.display(),
             reviewer_cli.display()
         )
     }
@@ -2307,9 +2567,7 @@ state:
     host: claude
     command: "/speckit.specify {{prompt}}"
   - id: clarify
-    role: drafter
-    host: claude
-    command: "/speckit.clarify"
+    runner: derrick
     skippable: true
   - id: plan
     role: proposer
@@ -2414,9 +2672,11 @@ fi
 
     #[tokio::test]
     async fn no_assay_marks_assay_skipped() -> TestResult {
+        let drafter = reviewer_script("#!/bin/sh\ncat > /dev/null\nprintf 'ok'")?;
         let reviewer = reviewer_script("#!/bin/sh\nexit 9")?;
-        let (_dir, runner) = runner(&yaml(
+        let (_dir, runner) = runner(&yaml_with_drafter(
             add_feature_pipeline(),
+            &drafter.path().join("reviewer"),
             &reviewer.path().join("reviewer"),
         ))
         .await?;
@@ -2693,10 +2953,17 @@ fi
 
     #[tokio::test]
     async fn assay_revise_then_accept_succeeds_after_replan() -> TestResult {
+        let drafter = reviewer_script("#!/bin/sh\ncat > /dev/null\nprintf 'ok'")?;
         let reviewer = revise_then_accept_script()?;
         let rounds =
             add_feature_pipeline().replace("rounds: \"{{tools.assay.rounds}}\"", "rounds: 2");
-        let (dir, runner) = runner(&yaml(&rounds, &reviewer.path().join("reviewer"))).await?;
+        let (dir, runner) = runner(&yaml_with_drafter(
+            &rounds,
+            &drafter.path().join("reviewer"),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+
         let outcome = runner
             .run_pipeline(
                 ADD_FEATURE_PIPELINE,
@@ -3275,6 +3542,60 @@ state:
     fn suggested_revisions_extracts_only_block() -> TestResult {
         let text = "## Risks\nfull prompt\n## Suggested revisions\nonly this\n## Verdict\nrevise\n";
         assert_eq!(suggested_revisions(text), Some("only this"));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_clarify_response_and_render_answers() {
+        let model_output =
+            "Q: Which API style should we use?\nOptions: REST, GraphQL\nRecommendation: REST\n";
+        let questions = parse_clarify_questions(model_output);
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].question, "Which API style should we use?");
+        assert_eq!(questions[0].options, vec!["REST", "GraphQL"]);
+        assert_eq!(questions[0].recommendation.as_deref(), Some("REST"));
+
+        let selected = select_clarify_answer(&questions[0], "1");
+        assert_eq!(selected, "REST");
+        let markdown = render_clarify_markdown(&questions, &[selected]);
+        assert!(markdown.contains("Answer: REST"));
+    }
+
+    #[test]
+    fn select_clarify_answer_uses_recommendation_on_empty_input() {
+        let question = ClarifyQuestion {
+            question: "Q".to_owned(),
+            options: vec!["A".to_owned(), "B".to_owned()],
+            recommendation: Some("B".to_owned()),
+        };
+        assert_eq!(select_clarify_answer(&question, ""), "B");
+    }
+
+    #[tokio::test]
+    async fn plan_prompt_includes_clarify_answers_when_present() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let feature_dir = dir.path().join("specs/001-test");
+        std::fs::create_dir_all(&feature_dir)?;
+        std::fs::write(
+            feature_dir.join("clarify.md"),
+            "# Clarification Q&A\n\nAnswer: GraphQL\n",
+        )?;
+        let mut state = ExecutionState::new(
+            "test".to_owned(),
+            "run-clarify".to_owned(),
+            dir.path().join(".derrick/runs/run-clarify"),
+        );
+        state.feature_dir = Some(PathBuf::from("specs/001-test"));
+
+        let prompt =
+            runner.inject_clarify_answers_for_plan("plan", &state, "/speckit.plan".to_owned())?;
+        assert!(prompt.contains("Apply these accepted clarifications"));
+        assert!(prompt.contains("Answer: GraphQL"));
         Ok(())
     }
 
