@@ -222,7 +222,7 @@ async fn execute_derrick_step(
             })?;
             let wd = working_dir(state, repo_root).to_path_buf();
             clarify::execute_clarify(
-                config,
+                hosts.clone(),
                 repo_root,
                 &wd,
                 &feature_dir,

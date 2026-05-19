@@ -1,9 +1,11 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use derrick_models::AuthStore;
+use derrick_tools::{HostRegistry, HostRequest};
+use owo_colors::OwoColorize;
 
-use crate::io::{relative_to_root, write_log};
+use crate::io::{append_log, relative_to_root, write_log};
 use crate::types::{RunError, StepExecution};
 
 pub struct ClarifyQuestion {
@@ -76,8 +78,26 @@ pub(crate) fn render_clarify_markdown(questions: &[ClarifyQuestion], answers: &[
     content
 }
 
+fn build_clarify_prompt(spec_rel: &Path) -> String {
+    format!(
+        "You are helping refine a specification. Read and analyze the specification at \
+         `{}` from the working directory. Generate clarifying questions to ensure the \
+         requirements are well-understood. Focus on ambiguous areas, trade-offs, and critical \
+         decisions that need human input.\n\n\
+         For each question, provide:\n\
+         - The question\n\
+         - Multiple choice options (at least 2)\n\
+         - Your recommendation\n\n\
+         Format each question as:\n\
+         Q: <question>\n\
+         Options: <option1>, <option2>, ...\n\
+         Recommendation: <recommended option>",
+        spec_rel.display()
+    )
+}
+
 pub async fn execute_clarify(
-    config: &derrick_config::Config,
+    hosts: Arc<HostRegistry>,
     repo_root: &std::path::Path,
     working_dir: &Path,
     feature_dir: &Path,
@@ -91,38 +111,36 @@ pub async fn execute_clarify(
         source,
     })?;
 
-    eprintln!("\n--- Specification (review before clarification) ---\n{spec}---\n");
-
-    let prompt = format!(
-        "You are helping refine a specification. Based on the specification below, generate \
-         clarifying questions to ensure the requirements are well-understood. Focus on ambiguous \
-         areas, trade-offs, and critical decisions that need human input.\n\n\
-         For each question, provide:\n\
-         - The question\n\
-         - Multiple choice options (at least 2)\n\
-         - Your recommendation\n\n\
-         Format each question as:\n\
-         Q: <question>\n\
-         Options: <option1>, <option2>, ...\n\
-         Recommendation: <recommended option>\n\n\
-         Specification:\n{spec}"
+    let spec_lines = spec.lines().count();
+    eprintln!(
+        "  {} Specification loaded for review ({} lines)",
+        "\u{2713}".green(),
+        spec_lines
     );
 
-    let model = derrick_models::resolve_role(
-        "drafter",
-        config.roles(),
-        config.models(),
-        &AuthStore::from_env(),
-    )
-    .await?;
+    let spec_rel = feature_dir.join("spec.md");
+    let prompt = build_clarify_prompt(&spec_rel);
 
-    let response = model
-        .complete(completion_request(prompt, None, None))
-        .await?;
+    let host = hosts
+        .get("claude")
+        .ok_or_else(|| RunError::Config("clarify requires the claude host adapter".to_owned()))?;
+    let mut request = HostRequest::new(prompt, working_dir);
+    request.headless = true;
+    let response = host
+        .run(request)
+        .await
+        .map_err(|source| RunError::StepFailed {
+            id: "clarify".to_owned(),
+            message: source.to_string(),
+        })?;
 
-    write_log(log_path, &response.text, "")?;
+    write_log(log_path, &response.stdout, &response.stderr)?;
+    append_log(
+        log_path,
+        "\n[clarify] token accounting unavailable for host adapter calls\n",
+    )?;
 
-    let questions = parse_clarify_questions(&response.text);
+    let questions = parse_clarify_questions(&response.stdout);
     if questions.is_empty() {
         eprintln!("No clarifying questions needed. Proceeding.");
         return Ok(StepExecution::success(Vec::new()));
@@ -166,24 +184,20 @@ pub async fn execute_clarify(
     })?;
 
     eprintln!("\nClarification complete. Answers saved.");
-    Ok(
-        StepExecution::success(vec![relative_to_root(repo_root, clarify_path)?])
-            .with_tokens(response.tokens_in, response.tokens_out),
-    )
+    Ok(StepExecution::success(vec![relative_to_root(
+        repo_root,
+        clarify_path,
+    )?]))
 }
 
-fn completion_request(
-    prompt: String,
-    cached_prefix: Option<String>,
-    system: Option<String>,
-) -> derrick_models::CompletionRequest {
-    use std::time::Duration;
-    derrick_models::CompletionRequest {
-        cached_prefix,
-        prompt,
-        system,
-        max_tokens: Some(4096),
-        temperature: Some(0.2),
-        timeout: Duration::from_secs(600),
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn clarify_prompt_references_spec_path() {
+        let prompt = super::build_clarify_prompt(Path::new("specs/001-test/spec.md"));
+        assert!(prompt.contains("specs/001-test/spec.md"));
+        assert!(!prompt.contains("Specification:\n"));
     }
 }

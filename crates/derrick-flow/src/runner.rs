@@ -6,6 +6,7 @@ use chrono::Utc;
 use derrick_config::{Config, PipelineStep, Runner as StepRunner};
 use derrick_substrate::Substrate;
 use derrick_tools::HostRegistry;
+use owo_colors::OwoColorize;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 
@@ -158,7 +159,12 @@ impl Runner {
 
         let start_index = manifest.steps.len();
         let mut outcome_status = RunStatus::Success;
-        eprintln!("pipeline: {pipeline_id} (run {run_id})");
+        eprintln!(
+            "{} {} ({})",
+            "pipeline:".bold(),
+            pipeline_id.cyan(),
+            format!("run {run_id}").bright_black()
+        );
         let tail = &self.config.pipeline()[start_index..];
         let mut idx = 0usize;
         'outer: while idx < tail.len() {
@@ -167,7 +173,12 @@ impl Runner {
                 None => {
                     if self.should_skip(step, &input) {
                         let record = self.skipped_record(step);
-                        eprintln!("  {} \u{23ed} skipped", step.id());
+                        eprintln!(
+                            "  {} {} {}",
+                            step.id().cyan(),
+                            "\u{23ed}".bright_cyan(),
+                            "skipped".bright_black()
+                        );
                         manifest.tokens_in = manifest
                             .tokens_in
                             .saturating_add(u64::from(record.tokens_in));
@@ -194,7 +205,7 @@ impl Runner {
 
                     let record = {
                         if is_interactive_step(step) {
-                            eprintln!("  {}...", step.id());
+                            eprintln!("  {}...", step.id().cyan());
                             steps::execute_step(
                                 &self.config,
                                 self.substrate.as_ref(),
@@ -217,7 +228,7 @@ impl Runner {
                                 use std::time::Duration;
                                 let mut i = 0usize;
                                 while r2.load(Ordering::Relaxed) {
-                                    eprint!("\r  {} {}...", step_id, frames[i]);
+                                    eprint!("\r  {} {}...", step_id.cyan(), frames[i]);
                                     let _ = std::io::stderr().flush();
                                     tokio::time::sleep(Duration::from_millis(80)).await;
                                     i = (i + 1) % frames.len();
@@ -242,10 +253,30 @@ impl Runner {
                         }
                     };
                     match record.status {
-                        StepStatus::Success => eprintln!("  {} \u{2713}", step.id()),
-                        StepStatus::Skipped => eprintln!("  {} \u{23ed}", step.id()),
-                        StepStatus::Halted => eprintln!("  {} \u{26a0} HALTED", step.id()),
-                        StepStatus::Failed => eprintln!("  {} \u{2717} FAILED", step.id()),
+                        StepStatus::Success => eprintln!(
+                            "  {} {} {}",
+                            step.id().cyan(),
+                            "\u{2713}".green(),
+                            "done".green()
+                        ),
+                        StepStatus::Skipped => eprintln!(
+                            "  {} {} {}",
+                            step.id().cyan(),
+                            "\u{23ed}".bright_cyan(),
+                            "skipped".bright_black()
+                        ),
+                        StepStatus::Halted => eprintln!(
+                            "  {} {} {}",
+                            step.id().cyan(),
+                            "\u{26a0}".yellow(),
+                            "HALTED".yellow()
+                        ),
+                        StepStatus::Failed => eprintln!(
+                            "  {} {} {}",
+                            step.id().cyan(),
+                            "\u{2717}".red(),
+                            "FAILED".red()
+                        ),
                     }
                     manifest.feature_dir = state.feature_dir.clone();
                     manifest.tokens_in = manifest
@@ -260,19 +291,47 @@ impl Runner {
                     if record.status == StepStatus::Success {
                         if let Some(feature_dir) = &state.feature_dir {
                             let wd = self.working_dir(&state);
-                            if step.id() == "specify" {
-                                let p = wd.join(feature_dir).join("spec.md");
-                                if p.exists() {
-                                    if let Ok(c) = std::fs::read_to_string(&p) {
-                                        eprintln!("\n--- Specification ---\n{c}---\n");
-                                    }
-                                }
-                            } else if step.id() == "plan" {
+                            if step.id() == "plan" {
                                 let p = wd.join(feature_dir).join("plan.md");
                                 if p.exists() {
                                     if let Ok(c) = std::fs::read_to_string(&p) {
-                                        eprintln!("\n--- Plan ---\n{c}---\n");
+                                        let line_count = c.lines().count();
+                                        let lines: Vec<&str> = c
+                                            .lines()
+                                            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                                            .collect();
+                                        eprintln!();
+                                        eprintln!(
+                                            "  {} {}",
+                                            "\u{250c}".bright_cyan(),
+                                            "Plan Summary".bold()
+                                        );
+                                        if let Some(first) = lines.first() {
+                                            let preview = summarize_line(first, 80);
+                                            eprintln!(
+                                                "  {} {}",
+                                                "\u{2502}".bright_cyan(),
+                                                preview.bright_white()
+                                            );
+                                        }
+                                        eprintln!(
+                                            "  {} {} {} {}",
+                                            "\u{2514}".bright_cyan(),
+                                            format!("{line_count} lines").cyan(),
+                                            "\u{2192}".cyan(),
+                                            p.display().to_string().cyan()
+                                        );
+                                        eprintln!();
                                     }
+                                }
+                            } else if step.id() == "specify" {
+                                let p = wd.join(feature_dir).join("spec.md");
+                                if p.exists() {
+                                    eprintln!(
+                                        "  {} Specification generated: {}",
+                                        "\u{2713}".green(),
+                                        p.display().to_string().cyan()
+                                    );
                                 }
                             }
                         }
@@ -313,14 +372,20 @@ impl Runner {
                     let mut skipped: Vec<StepRecord> = Vec::new();
 
                     eprintln!(
-                        "  parallel group \"{}\" ({} steps)...",
-                        group_name,
+                        "  {} {} ({} steps)...",
+                        "parallel group".bright_cyan(),
+                        group_name.cyan(),
                         group_steps.len()
                     );
                     for step in &group_steps {
                         if self.should_skip(step, &input) {
                             let record = self.skipped_record(step);
-                            eprintln!("    {} \u{23ed} skipped", step.id());
+                            eprintln!(
+                                "    {} {} {}",
+                                step.id().cyan(),
+                                "\u{23ed}".bright_cyan(),
+                                "skipped".bright_black()
+                            );
                             let _ = self
                                 .substrate
                                 .record_typed_event(
@@ -336,7 +401,7 @@ impl Runner {
                             skipped.push(record);
                             continue;
                         }
-                        eprintln!("    {}...", step.id());
+                        eprintln!("    {}...", step.id().cyan());
                         let sem = semaphore.clone();
                         let runner = self.clone();
                         let step = step.clone();
@@ -359,13 +424,33 @@ impl Runner {
                             )
                             .await?;
                             match record.status {
-                                StepStatus::Success => eprintln!("    {} \u{2713}", step.id()),
-                                StepStatus::Skipped => eprintln!("    {} \u{23ed}", step.id()),
+                                StepStatus::Success => eprintln!(
+                                    "    {} {} {}",
+                                    step.id().cyan(),
+                                    "\u{2713}".green(),
+                                    "done".green()
+                                ),
+                                StepStatus::Skipped => eprintln!(
+                                    "    {} {} {}",
+                                    step.id().cyan(),
+                                    "\u{23ed}".bright_cyan(),
+                                    "skipped".bright_black()
+                                ),
                                 StepStatus::Halted => {
-                                    eprintln!("    {} \u{26a0} HALTED", step.id())
+                                    eprintln!(
+                                        "    {} {} {}",
+                                        step.id().cyan(),
+                                        "\u{26a0}".yellow(),
+                                        "HALTED".yellow()
+                                    )
                                 }
                                 StepStatus::Failed => {
-                                    eprintln!("    {} \u{2717} FAILED", step.id())
+                                    eprintln!(
+                                        "    {} {} {}",
+                                        step.id().cyan(),
+                                        "\u{2717}".red(),
+                                        "FAILED".red()
+                                    )
                                 }
                             }
                             Ok(record)
@@ -670,4 +755,25 @@ impl Runner {
 fn is_interactive_step(step: &PipelineStep) -> bool {
     matches!(step.runner(), Some(StepRunner::Human))
         || (matches!(step.runner(), Some(StepRunner::Derrick)) && step.id() == "clarify")
+}
+
+fn summarize_line(line: &str, max_chars: usize) -> String {
+    let total = line.chars().count();
+    if total <= max_chars {
+        return line.to_owned();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut preview = line.chars().take(keep).collect::<String>();
+    preview.push_str("...");
+    preview
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn summarize_line_truncates_without_utf8_panics() {
+        let line = "🚀🚀🚀🚀🚀";
+        let preview = super::summarize_line(line, 4);
+        assert_eq!(preview, "🚀...");
+    }
 }
