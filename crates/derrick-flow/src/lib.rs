@@ -827,7 +827,7 @@ fi
                 },
             )
             .await?;
-        let outcome = runner.resume(Some("resume-ok"), "tasks").await?;
+        let outcome = runner.resume(Some("resume-ok"), Some("tasks")).await?;
 
         assert_eq!(
             outcome.steps.last().map(|step| step.id.as_str()),
@@ -894,13 +894,136 @@ fi
         std::fs::write(path, contents.replacen("name: test", "name: drift", 1))?;
 
         let error = runner
-            .resume(Some("resume-run"), "tasks")
+            .resume(Some("resume-run"), Some("tasks"))
             .await
             .err()
             .ok_or("resume should refuse drift")?;
 
         assert!(error.to_string().contains("config has changed"));
         Ok(())
+    }
+
+    #[test]
+    fn resume_step_index_retries_failed_step() {
+        use crate::manifest::{ManifestStep, RunManifest};
+        use crate::types::StepStatus;
+        use chrono::Utc;
+
+        let mut manifest = RunManifest::new(
+            "test".into(),
+            "pipeline".into(),
+            "prompt".into(),
+            crate::manifest::FlagsManifest {
+                skip: vec![],
+                unskip: vec![],
+                dry_run: false,
+            },
+            "hash".into(),
+            Utc::now(),
+        );
+        manifest.steps.push(ManifestStep {
+            id: "specify".into(),
+            status: StepStatus::Success,
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            log_path: std::path::PathBuf::new(),
+            artifacts: vec![],
+            tokens_in: 0,
+            tokens_out: 0,
+        });
+        manifest.steps.push(ManifestStep {
+            id: "failme".into(),
+            status: StepStatus::Failed,
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            log_path: std::path::PathBuf::new(),
+            artifacts: vec![],
+            tokens_in: 0,
+            tokens_out: 0,
+        });
+        assert_eq!(manifest.resume_step_index(), 1); // retry from "failme"
+    }
+
+    #[test]
+    fn resume_step_index_skips_to_next_on_success() {
+        use crate::manifest::{ManifestStep, RunManifest};
+        use crate::types::StepStatus;
+        use chrono::Utc;
+
+        let mut manifest = RunManifest::new(
+            "test".into(),
+            "pipeline".into(),
+            "prompt".into(),
+            crate::manifest::FlagsManifest {
+                skip: vec![],
+                unskip: vec![],
+                dry_run: false,
+            },
+            "hash".into(),
+            Utc::now(),
+        );
+        manifest.steps.push(ManifestStep {
+            id: "specify".into(),
+            status: StepStatus::Success,
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            log_path: std::path::PathBuf::new(),
+            artifacts: vec![],
+            tokens_in: 0,
+            tokens_out: 0,
+        });
+        assert_eq!(manifest.resume_step_index(), 1); // next step is index 1
+    }
+
+    #[test]
+    fn resume_step_index_retries_halted_step() {
+        use crate::manifest::{ManifestStep, RunManifest};
+        use crate::types::StepStatus;
+        use chrono::Utc;
+
+        let mut manifest = RunManifest::new(
+            "test".into(),
+            "pipeline".into(),
+            "prompt".into(),
+            crate::manifest::FlagsManifest {
+                skip: vec![],
+                unskip: vec![],
+                dry_run: false,
+            },
+            "hash".into(),
+            Utc::now(),
+        );
+        manifest.steps.push(ManifestStep {
+            id: "assay".into(),
+            status: StepStatus::Halted,
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            log_path: std::path::PathBuf::new(),
+            artifacts: vec![],
+            tokens_in: 0,
+            tokens_out: 0,
+        });
+        assert_eq!(manifest.resume_step_index(), 0); // retry from "assay"
+    }
+
+    #[test]
+    fn resume_step_index_empty_manifest_returns_zero() {
+        use crate::manifest::RunManifest;
+        use chrono::Utc;
+
+        let manifest = RunManifest::new(
+            "test".into(),
+            "pipeline".into(),
+            "prompt".into(),
+            crate::manifest::FlagsManifest {
+                skip: vec![],
+                unskip: vec![],
+                dry_run: false,
+            },
+            "hash".into(),
+            Utc::now(),
+        );
+        assert_eq!(manifest.resume_step_index(), 0);
     }
 
     #[tokio::test]

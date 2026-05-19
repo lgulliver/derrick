@@ -24,6 +24,24 @@ pub struct RunManifest {
 }
 
 impl RunManifest {
+    /// Returns the pipeline step index to resume from.
+    ///
+    /// - If the last step is Failed or Halted, resume from that step (retry).
+    /// - If the last step is Success or Skipped, resume from the next step.
+    /// - If no steps completed, resume from step 0.
+    pub fn resume_step_index(&self) -> usize {
+        let last = match self.steps.last() {
+            Some(s) => s,
+            None => return 0,
+        };
+        match last.status {
+            StepStatus::Failed | StepStatus::Halted => self.steps.len() - 1,
+            StepStatus::Success | StepStatus::Skipped => self.steps.len(),
+        }
+    }
+}
+
+impl RunManifest {
     pub fn new(
         run_id: String,
         pipeline_id: String,
