@@ -54,8 +54,8 @@ pub async fn execute_clarify(
     repo_root: &std::path::Path,
     working_dir: &Path,
     feature_dir: &Path,
-    state_prompt: &str,
-    run_id: &str,
+    _state_prompt: &str,
+    _run_id: &str,
     log_path: &Path,
 ) -> Result<StepExecution, RunError> {
     let spec_path = working_dir.join(feature_dir).join("spec.md");

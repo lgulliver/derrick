@@ -1,9 +1,7 @@
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
-
-use derrick_config::Config;
-use sha2::{Digest, Sha256};
 
 use crate::types::RunError;
 
