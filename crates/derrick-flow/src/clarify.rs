@@ -1,7 +1,9 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use derrick_models::AuthStore;
+use derrick_tools::{HostRegistry, HostRequest};
+use owo_colors::OwoColorize;
 
 use crate::io::{relative_to_root, write_log};
 use crate::types::{RunError, StepExecution};
@@ -77,7 +79,7 @@ pub(crate) fn render_clarify_markdown(questions: &[ClarifyQuestion], answers: &[
 }
 
 pub async fn execute_clarify(
-    config: &derrick_config::Config,
+    hosts: Arc<HostRegistry>,
     repo_root: &std::path::Path,
     working_dir: &Path,
     feature_dir: &Path,
@@ -91,7 +93,12 @@ pub async fn execute_clarify(
         source,
     })?;
 
-    eprintln!("\n--- Specification (review before clarification) ---\n{spec}---\n");
+    let spec_lines = spec.lines().count();
+    eprintln!(
+        "  {} Specification loaded for review ({} lines)",
+        "\u{2713}".green(),
+        spec_lines
+    );
 
     let prompt = format!(
         "You are helping refine a specification. Based on the specification below, generate \
@@ -108,21 +115,22 @@ pub async fn execute_clarify(
          Specification:\n{spec}"
     );
 
-    let model = derrick_models::resolve_role(
-        "drafter",
-        config.roles(),
-        config.models(),
-        &AuthStore::from_env(),
-    )
-    .await?;
+    let host = hosts
+        .get("claude")
+        .ok_or_else(|| RunError::Config("clarify requires the claude host adapter".to_owned()))?;
+    let mut request = HostRequest::new(prompt, working_dir);
+    request.headless = true;
+    let response = host
+        .run(request)
+        .await
+        .map_err(|source| RunError::StepFailed {
+            id: "clarify".to_owned(),
+            message: source.to_string(),
+        })?;
 
-    let response = model
-        .complete(completion_request(prompt, None, None))
-        .await?;
+    write_log(log_path, &response.stdout, &response.stderr)?;
 
-    write_log(log_path, &response.text, "")?;
-
-    let questions = parse_clarify_questions(&response.text);
+    let questions = parse_clarify_questions(&response.stdout);
     if questions.is_empty() {
         eprintln!("No clarifying questions needed. Proceeding.");
         return Ok(StepExecution::success(Vec::new()));
@@ -166,24 +174,8 @@ pub async fn execute_clarify(
     })?;
 
     eprintln!("\nClarification complete. Answers saved.");
-    Ok(
-        StepExecution::success(vec![relative_to_root(repo_root, clarify_path)?])
-            .with_tokens(response.tokens_in, response.tokens_out),
-    )
-}
-
-fn completion_request(
-    prompt: String,
-    cached_prefix: Option<String>,
-    system: Option<String>,
-) -> derrick_models::CompletionRequest {
-    use std::time::Duration;
-    derrick_models::CompletionRequest {
-        cached_prefix,
-        prompt,
-        system,
-        max_tokens: Some(4096),
-        temperature: Some(0.2),
-        timeout: Duration::from_secs(600),
-    }
+    Ok(StepExecution::success(vec![relative_to_root(
+        repo_root,
+        clarify_path,
+    )?]))
 }
