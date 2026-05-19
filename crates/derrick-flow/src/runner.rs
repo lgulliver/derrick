@@ -193,39 +193,54 @@ impl Runner {
                     }
 
                     let record = {
-                        let step_id = step.id().to_owned();
-                        let frames = crate::spinner::scanner_frames();
-                        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-                        let r2 = running.clone();
-                        let spinner = tokio::task::spawn(async move {
-                            use std::io::Write as _;
-                            use std::sync::atomic::Ordering;
-                            use std::time::Duration;
-                            let mut i = 0usize;
-                            while r2.load(Ordering::Relaxed) {
-                                eprint!("\r  {} {}...", step_id, frames[i]);
-                                let _ = std::io::stderr().flush();
-                                tokio::time::sleep(Duration::from_millis(80)).await;
-                                i = (i + 1) % frames.len();
-                            }
-                        });
+                        if is_interactive_step(step) {
+                            eprintln!("  {}...", step.id());
+                            steps::execute_step(
+                                &self.config,
+                                self.substrate.as_ref(),
+                                self.hosts.clone(),
+                                &self.repo_root,
+                                step,
+                                &mut state,
+                                &run_id,
+                                &self.manifest_path(&run_id),
+                            )
+                            .await?
+                        } else {
+                            let step_id = step.id().to_owned();
+                            let frames = crate::spinner::scanner_frames();
+                            let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                            let r2 = running.clone();
+                            let spinner = tokio::task::spawn(async move {
+                                use std::io::Write as _;
+                                use std::sync::atomic::Ordering;
+                                use std::time::Duration;
+                                let mut i = 0usize;
+                                while r2.load(Ordering::Relaxed) {
+                                    eprint!("\r  {} {}...", step_id, frames[i]);
+                                    let _ = std::io::stderr().flush();
+                                    tokio::time::sleep(Duration::from_millis(80)).await;
+                                    i = (i + 1) % frames.len();
+                                }
+                            });
 
-                        let result = steps::execute_step(
-                            &self.config,
-                            self.substrate.as_ref(),
-                            self.hosts.clone(),
-                            &self.repo_root,
-                            step,
-                            &mut state,
-                            &run_id,
-                            &self.manifest_path(&run_id),
-                        )
-                        .await;
-                        running.store(false, std::sync::atomic::Ordering::Relaxed);
-                        let _ = spinner.await;
-                        result?
+                            let result = steps::execute_step(
+                                &self.config,
+                                self.substrate.as_ref(),
+                                self.hosts.clone(),
+                                &self.repo_root,
+                                step,
+                                &mut state,
+                                &run_id,
+                                &self.manifest_path(&run_id),
+                            )
+                            .await;
+                            running.store(false, std::sync::atomic::Ordering::Relaxed);
+                            let _ = spinner.await;
+                            eprint!("\r                                            \r");
+                            result?
+                        }
                     };
-                    eprint!("\r                                            \r");
                     match record.status {
                         StepStatus::Success => eprintln!("  {} \u{2713}", step.id()),
                         StepStatus::Skipped => eprintln!("  {} \u{23ed}", step.id()),
@@ -445,23 +460,7 @@ impl Runner {
         state: &ExecutionState,
         prompt: String,
     ) -> Result<String, RunError> {
-        if step_id != "plan" {
-            return Ok(prompt);
-        }
-        let Some(feature_dir) = &state.feature_dir else {
-            return Ok(prompt);
-        };
-        let clarify_path = self.working_dir(state).join(feature_dir).join("clarify.md");
-        if !clarify_path.exists() {
-            return Ok(prompt);
-        }
-        let clarify = std::fs::read_to_string(&clarify_path).map_err(|source| RunError::Io {
-            path: clarify_path.clone(),
-            source,
-        })?;
-        Ok(format!(
-            "{prompt}\n\nApply these accepted clarifications when producing the plan:\n\n{clarify}"
-        ))
+        steps::inject_clarify_answers_for_plan(step_id, state, &self.repo_root, prompt)
     }
 
     async fn setup_worktree(
@@ -666,4 +665,9 @@ impl Runner {
     fn manifest_path(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("manifest.json")
     }
+}
+
+fn is_interactive_step(step: &PipelineStep) -> bool {
+    matches!(step.runner(), Some(StepRunner::Human))
+        || (matches!(step.runner(), Some(StepRunner::Derrick)) && step.id() == "clarify")
 }

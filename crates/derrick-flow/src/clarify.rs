@@ -108,28 +108,17 @@ pub async fn execute_clarify(
          Specification:\n{spec}"
     );
 
-    let model = match derrick_models::resolve_role(
+    let model = derrick_models::resolve_role(
         "drafter",
         config.roles(),
         config.models(),
         &AuthStore::from_env(),
     )
-    .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!("clarify: cannot resolve drafter model, skipping: {e}");
-            return Ok(StepExecution::success(Vec::new()));
-        }
-    };
+    .await?;
 
-    let response = match model.complete(completion_request(prompt, None, None)).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("clarify: model call failed, skipping: {e}");
-            return Ok(StepExecution::success(Vec::new()));
-        }
-    };
+    let response = model
+        .complete(completion_request(prompt, None, None))
+        .await?;
 
     write_log(log_path, &response.text, "")?;
 

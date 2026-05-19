@@ -127,6 +127,7 @@ async fn execute_role_step(
     if let Some(host) = step.host() {
         let command = crate::io::required_step_text(step.command(), step.id(), "command")?;
         let prompt = render_template(command, &template_context(config, state)?)?;
+        let prompt = inject_clarify_answers_for_plan(step.id(), state, repo_root, prompt)?;
         let host_name = host_name(host);
         let host = hosts
             .get(host_name)
@@ -165,6 +166,7 @@ async fn execute_role_step(
             .command()
             .map_or_else(|| state.prompt.clone(), ToOwned::to_owned);
         let rendered = render_template(&prompt, &template_context(config, state)?)?;
+        let rendered = inject_clarify_answers_for_plan(step.id(), state, repo_root, rendered)?;
         let model = derrick_models::resolve_role(
             role,
             config.roles(),
@@ -361,6 +363,33 @@ fn template_context(
     })
 }
 
+pub(crate) fn inject_clarify_answers_for_plan(
+    step_id: &str,
+    state: &ExecutionState,
+    repo_root: &Path,
+    prompt: String,
+) -> Result<String, RunError> {
+    if step_id != "plan" {
+        return Ok(prompt);
+    }
+    let Some(feature_dir) = &state.feature_dir else {
+        return Ok(prompt);
+    };
+    let clarify_path = working_dir(state, repo_root)
+        .join(feature_dir)
+        .join("clarify.md");
+    if !clarify_path.exists() {
+        return Ok(prompt);
+    }
+    let clarify = std::fs::read_to_string(&clarify_path).map_err(|source| RunError::Io {
+        path: clarify_path.clone(),
+        source,
+    })?;
+    Ok(format!(
+        "{prompt}\n\nApply these accepted clarifications when producing the plan:\n\n{clarify}"
+    ))
+}
+
 fn working_dir<'a>(state: &'a ExecutionState, repo_root: &'a std::path::Path) -> &'a Path {
     state.worktree_path.as_deref().unwrap_or(repo_root)
 }
@@ -378,5 +407,38 @@ fn completion_request(
         max_tokens: Some(4096),
         temperature: Some(0.2),
         timeout: Duration::from_secs(600),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::assay::ExecutionState;
+
+    #[test]
+    fn injects_clarifications_for_plan() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let feature_dir = tmp.path().join("specs/001-test");
+        std::fs::create_dir_all(&feature_dir).expect("create feature dir");
+        std::fs::write(feature_dir.join("clarify.md"), "Answer: GraphQL\n").expect("write clarify");
+
+        let mut state = ExecutionState::new(
+            "test".to_owned(),
+            "run-1".to_owned(),
+            tmp.path().join(".derrick/runs/run-1"),
+        );
+        state.feature_dir = Some(PathBuf::from("specs/001-test"));
+
+        let prompt = super::inject_clarify_answers_for_plan(
+            "plan",
+            &state,
+            tmp.path(),
+            "/speckit.plan".to_owned(),
+        )
+        .expect("inject prompt");
+
+        assert!(prompt.contains("Apply these accepted clarifications"));
+        assert!(prompt.contains("Answer: GraphQL"));
     }
 }
