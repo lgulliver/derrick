@@ -792,7 +792,8 @@ impl Runner {
 
 fn is_interactive_step(step: &PipelineStep) -> bool {
     matches!(step.runner(), Some(StepRunner::Human))
-        || (matches!(step.runner(), Some(StepRunner::Derrick)) && step.id() == "clarify")
+        || (matches!(step.runner(), Some(StepRunner::Derrick))
+            && (step.id() == "clarify" || step.id() == "assay"))
 }
 
 fn summarize_line(line: &str, max_chars: usize) -> String {

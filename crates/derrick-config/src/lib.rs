@@ -676,7 +676,7 @@ impl Default for Assay {
             enabled: false,
             role: "reviewer".to_owned(),
             reviewers: vec!["reviewer".to_owned()],
-            rounds: "1".to_owned(),
+            rounds: "10".to_owned(),
             strict: false,
             on_split: OnSplit::Reject,
         }
@@ -1773,7 +1773,7 @@ impl AssayLayer {
             enabled: self.enabled.unwrap_or(false),
             role: required(self.role, "tools.assay.role")?,
             reviewers: self.reviewers.unwrap_or_default(),
-            rounds: self.rounds.unwrap_or_else(|| "1".to_owned()),
+            rounds: self.rounds.unwrap_or_else(|| "10".to_owned()),
             strict: self.strict.unwrap_or(false),
             on_split: parse_on_split(&self.on_split.unwrap_or_else(|| "reject".to_owned()))?,
         })
@@ -2372,8 +2372,8 @@ tools:
     enabled: true
     role: reviewer
     reviewers: [reviewer]
-    rounds: 1
-    strict: false
+    rounds: 10
+
   substrate:
     backend: native
     mode: crew
@@ -2429,7 +2429,7 @@ state:
             load_yaml(yaml).unwrap_or_else(|error| panic!("design example should parse: {error}"));
 
         assert_eq!(config.pipeline().len(), 8);
-        assert_eq!(config.tools().assay().rounds(), "1");
+        assert_eq!(config.tools().assay().rounds(), "10");
         assert_eq!(config.tools().substrate().mode(), SubstrateMode::Crew);
     }
 

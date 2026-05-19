@@ -29,7 +29,7 @@ tools:
     enabled: true
     role: reviewer
     reviewers: [reviewer]
-    rounds: 1
+    rounds: 10
     strict: false
     on_split: reject
   substrate:
