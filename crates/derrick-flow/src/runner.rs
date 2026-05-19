@@ -12,12 +12,12 @@ use tokio::sync::Semaphore;
 use crate::assay::ExecutionState;
 use crate::io::{
     config_hash, create_dir_all, default_run_id, prior_feature_dir, read_dir_names,
-    read_feature_dir, relative_to_root,
+    read_feature_dir,
 };
 use crate::manifest::{FlagsManifest, ManifestStep, RunManifest};
-use crate::names::{host_name, runner_name};
+use crate::names::runner_name;
 use crate::steps;
-use crate::template::{render_template, validate_rounds_template, validate_template};
+use crate::template::{validate_rounds_template, validate_template};
 use crate::types::{PipelineInput, RunError, RunOutcome, RunStatus, StepRecord, StepStatus};
 
 const ADD_FEATURE_PIPELINE: &str = "add-feature";

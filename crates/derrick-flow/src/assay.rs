@@ -1,4 +1,3 @@
-use std::fmt::Write as _;
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +10,7 @@ use tokio::sync::Semaphore;
 use crate::io::{append_log, create_dir_all, parent, read_to_string, relative_to_root, write_file};
 use crate::names::host_name;
 use crate::template::render_template;
-use crate::types::{RunError, StepExecution, StepStatus};
+use crate::types::{RunError, StepExecution};
 
 pub struct ReviewerOutcome {
     pub role: String,
@@ -169,11 +168,11 @@ pub async fn execute_assay(
 pub async fn run_reviewer_rounds(
     config: &Config,
     hosts: Arc<HostRegistry>,
-    repo_root: &Path,
+    _repo_root: &Path,
     working_dir: &Path,
     feature_dir: &Path,
     state_prompt: &str,
-    run_id: &str,
+    _run_id: &str,
     step: &derrick_config::PipelineStep,
     log_path: &Path,
     reviewer_role: &str,
