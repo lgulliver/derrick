@@ -635,6 +635,7 @@ pub struct Assay {
     reviewers: Vec<String>,
     rounds: String,
     strict: bool,
+    auto_execute: bool,
     on_split: OnSplit,
 }
 
@@ -664,6 +665,12 @@ impl Assay {
         self.strict
     }
 
+    /// Returns whether assay automatically proceeds to implementation
+    /// without a human verdict gate.
+    pub fn auto_execute(&self) -> bool {
+        self.auto_execute
+    }
+
     /// Returns the split-verdict policy.
     pub fn on_split(&self) -> OnSplit {
         self.on_split
@@ -676,8 +683,9 @@ impl Default for Assay {
             enabled: false,
             role: "reviewer".to_owned(),
             reviewers: vec!["reviewer".to_owned()],
-            rounds: "1".to_owned(),
+            rounds: "10".to_owned(),
             strict: false,
+            auto_execute: false,
             on_split: OnSplit::Reject,
         }
     }
@@ -1755,6 +1763,7 @@ struct AssayLayer {
     #[serde(default, deserialize_with = "option_string_or_number")]
     rounds: Option<String>,
     strict: Option<bool>,
+    auto_execute: Option<bool>,
     on_split: Option<String>,
 }
 
@@ -1765,6 +1774,7 @@ impl AssayLayer {
         merge_scalar(&mut self.reviewers, other.reviewers);
         merge_scalar(&mut self.rounds, other.rounds);
         merge_scalar(&mut self.strict, other.strict);
+        merge_scalar(&mut self.auto_execute, other.auto_execute);
         merge_scalar(&mut self.on_split, other.on_split);
     }
 
@@ -1773,8 +1783,9 @@ impl AssayLayer {
             enabled: self.enabled.unwrap_or(false),
             role: required(self.role, "tools.assay.role")?,
             reviewers: self.reviewers.unwrap_or_default(),
-            rounds: self.rounds.unwrap_or_else(|| "1".to_owned()),
+            rounds: self.rounds.unwrap_or_else(|| "10".to_owned()),
             strict: self.strict.unwrap_or(false),
+            auto_execute: self.auto_execute.unwrap_or(false),
             on_split: parse_on_split(&self.on_split.unwrap_or_else(|| "reject".to_owned()))?,
         })
     }
@@ -1788,6 +1799,7 @@ impl From<Assay> for AssayLayer {
             reviewers: Some(assay.reviewers),
             rounds: Some(assay.rounds),
             strict: Some(assay.strict),
+            auto_execute: Some(assay.auto_execute),
             on_split: Some(
                 match assay.on_split {
                     OnSplit::Reject => "reject",
@@ -2372,8 +2384,8 @@ tools:
     enabled: true
     role: reviewer
     reviewers: [reviewer]
-    rounds: 1
-    strict: false
+    rounds: 10
+
   substrate:
     backend: native
     mode: crew
@@ -2429,7 +2441,7 @@ state:
             load_yaml(yaml).unwrap_or_else(|error| panic!("design example should parse: {error}"));
 
         assert_eq!(config.pipeline().len(), 8);
-        assert_eq!(config.tools().assay().rounds(), "1");
+        assert_eq!(config.tools().assay().rounds(), "10");
         assert_eq!(config.tools().substrate().mode(), SubstrateMode::Crew);
     }
 

@@ -820,12 +820,20 @@ Same shape courtroom popularised, compressed:
    violations, and a verdict (`accept | revise | reject`).
 4. **Rebuttal** — if verdict is `revise`, derrick reopens Claude
    *once*, scoped to the codex objections only, and asks for a delta
-   to `plan.md`. Bounded by `tools.assay.rounds`.
-5. **Verdict** — written to `{{feature_dir}}/assay/verdict.md` with
+   to `plan.md`. Bounded by `tools.assay.rounds` (default 10).
+5. **Deliberation** — after rebuttal, the cross-examiner reviews the
+   updated plan in the next loop iteration, continuing the debate
+   until accept/reject or round exhaustion.
+6. **Verdict** — written to `{{feature_dir}}/assay/verdict.md` with
    the model name, rounds used, and the final accept/revise/reject.
-6. **Gate** — on `reject` derrick halts and prints the verdict path.
-   On `revise` past `rounds`, halts the same way. `on_reject: warn`
-   downgrades to a printed warning for solo-mode repos.
+7. **Gate** — on `reject` derrick halts and prints the verdict path.
+   On `revise` past `rounds`, derrick prompts the user to extend or
+   halt. Constitution violations are parsed from the review and
+   enforced as non-negotiable (human override required).
+   `on_reject: warn` downgrades to a printed warning for solo-mode repos.
+
+Progress is streamed in real-time to stderr showing round number,
+verdict per round, and replying status — no spinner.
 
 ### Why a second-family reviewer
 
@@ -1649,6 +1657,7 @@ links back to the section where it lives.
 | D40 | **Token counts and cost estimates are tracked per pipeline step and per run.** `CompletionResponse.tokens_in/out` are threaded through `StepExecution` → `StepRecord` → `ManifestStep` and accumulated into `RunManifest.tokens_in/out`. `RunOutcome.cost_estimate_usd(model_name)` uses a built-in pricing table (`builtin_cost_hint`) seeded with current list prices for Claude Opus/Sonnet/Haiku, GPT-4o/mini, and Gemini 2.5. Host-subprocess steps (claude CLI, copilot CLI) report zero at this layer; their token counts appear separately in `derrick gain` via Claude Code JSONL. `derrick gain --run <id>` shows a per-step breakdown from the manifest; session-level `gain` shows estimated dollar cost alongside token totals. | §9.B / `derrick-models` |
 | D39 | **Adversarial code review fires before every PR, not after.** `derrick ticket code-review <id> --branch <branch> --round N` diffs `origin/<base>...<branch>` (three-dot), passes the diff + ticket requirements to a configured reviewer role, and exits 0 (pass) or 3 (issues found). Hands must call this and get a pass before calling `derrick ticket review`. Auto-remediation is hand-driven: the hand reads `.derrick/reviews/<id>/round-N.md`, fixes, and retries up to `tools.code_review.rounds` times. Beyond that, the hand surfaces the report to the human. Exit code 3 (not 1) lets hands distinguish "fix needed" from infrastructure errors. Disabled by default (`tools.code_review.enabled: false`). | §8.6 / AGENTS.md hand protocol |
 | D41 | **OpenCode is a first-class host.** `derrick-tools` gains an `OpencodeHost` adapter that invokes `opencode run "<prompt>" --dir <cwd> [--dangerously-skip-permissions]`. `derrick-scrub` gains an `opencode` rule set that strips the startup banner, tool-use progress lines, spinner frames, thinking markers, and cost footers. Specialist sub-agents are published under `.opencode/agents/` with opencode frontmatter (`mode: agent`). The `HostRegistry` default set now includes `opencode` alongside `claude`, `codex`, and `copilot`. | §6.5 / `derrick-tools` / `derrick-scrub` |
+| D42 | **Full courtroom pattern: adversarial cross-model deliberation with auto-revise loop.** Assay implements the structured Claude-prosecutes / Codex-cross-examines / Claude-rebuts / Codex-deliberates cycle from the courtroom pattern. Default rounds: 10. Constitution violations are parsed and enforced as non-negotiable gates (override requires human approval). When the revise loop exhausts configured rounds, derrick prompts the user to continue or halt. Progress is streamed in real-time (round N/M, verdict, phase name) instead of a spinner. The loop switches from a `for` to a `while` to allow dynamic round extension at user request. | §7 / `derrick-flow/src/assay.rs` |
 
 ### Remaining open questions
 

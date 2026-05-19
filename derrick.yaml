@@ -29,8 +29,9 @@ tools:
     enabled: true
     role: reviewer
     reviewers: [reviewer]
-    rounds: 1
+    rounds: 10
     strict: false
+    auto_execute: false
     on_split: reject
   substrate:
     backend: native

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -340,6 +341,81 @@ impl Runner {
                                         p.display().to_string().cyan()
                                     );
                                 }
+                            } else if step.id() == "assay"
+                                && !self.config.tools().assay().auto_execute()
+                            {
+                                let assay_dir = wd.join(feature_dir).join("assay");
+                                let verdict_path = assay_dir.join("verdict.md");
+                                let rounds_used = std::fs::read_to_string(&verdict_path)
+                                    .ok()
+                                    .as_deref()
+                                    .and_then(parse_rounds_used)
+                                    .unwrap_or(0);
+                                let transcript_paths = assay_transcript_paths(&assay_dir);
+                                eprintln!();
+                                eprintln!(
+                                    "  {} {}",
+                                    "\u{250c}".bright_cyan(),
+                                    "Verdict Gate".bold()
+                                );
+                                eprintln!(
+                                    "  {} {} {} {}",
+                                    "\u{2502}".bright_cyan(),
+                                    "Plan approved after".cyan(),
+                                    format!("{rounds_used} rounds").cyan(),
+                                    "by cross-model deliberation.".cyan()
+                                );
+                                eprintln!(
+                                    "  {} {}",
+                                    "\u{2502}".bright_cyan(),
+                                    if transcript_paths.len() == 1 {
+                                        "Review transcript:".cyan()
+                                    } else {
+                                        "Review transcripts:".cyan()
+                                    }
+                                );
+                                if transcript_paths.is_empty() {
+                                    eprintln!(
+                                        "  {} {}",
+                                        "\u{2502}".bright_cyan(),
+                                        assay_dir.join("debate.md").display().to_string().cyan()
+                                    );
+                                } else {
+                                    for transcript_path in transcript_paths {
+                                        eprintln!(
+                                            "  {} {}",
+                                            "\u{2502}".bright_cyan(),
+                                            transcript_path.display().to_string().cyan()
+                                        );
+                                    }
+                                }
+                                eprintln!(
+                                    "  {} {}",
+                                    "\u{2514}".bright_cyan(),
+                                    "Proceed to implementation?".bold()
+                                );
+                                eprint!("  {} Continue pipeline? [Y/n] ", "\u{276f}".cyan());
+                                std::io::stderr().flush().ok();
+                                let mut answer = String::new();
+                                std::io::stdin().read_line(&mut answer).map_err(|source| {
+                                    RunError::Io {
+                                        path: PathBuf::from("<stdin>"),
+                                        source,
+                                    }
+                                })?;
+                                let trimmed = answer.trim();
+                                if trimmed.eq_ignore_ascii_case("n")
+                                    || trimmed.eq_ignore_ascii_case("no")
+                                {
+                                    eprintln!(
+                                        "  {} {}",
+                                        "\u{26a0}".yellow(),
+                                        "Pipeline halted at verdict gate.".yellow()
+                                    );
+                                    outcome_status = RunStatus::Halted;
+                                    break 'outer;
+                                }
+                                eprintln!();
                             }
                         }
                     }
@@ -792,7 +868,8 @@ impl Runner {
 
 fn is_interactive_step(step: &PipelineStep) -> bool {
     matches!(step.runner(), Some(StepRunner::Human))
-        || (matches!(step.runner(), Some(StepRunner::Derrick)) && step.id() == "clarify")
+        || (matches!(step.runner(), Some(StepRunner::Derrick))
+            && (step.id() == "clarify" || step.id() == "assay"))
 }
 
 fn summarize_line(line: &str, max_chars: usize) -> String {
@@ -806,6 +883,30 @@ fn summarize_line(line: &str, max_chars: usize) -> String {
     preview
 }
 
+fn parse_rounds_used(verdict_text: &str) -> Option<usize> {
+    verdict_text.lines().find_map(|line| {
+        line.strip_prefix("round: ")
+            .or_else(|| line.strip_prefix("rounds_used: "))
+            .and_then(|value| value.parse::<usize>().ok())
+    })
+}
+
+fn assay_transcript_paths(assay_dir: &Path) -> Vec<PathBuf> {
+    let canonical = assay_dir.join("debate.md");
+    if canonical.is_file() {
+        return vec![canonical];
+    }
+    let Ok(mut reviewers) = read_dir_names(assay_dir) else {
+        return Vec::new();
+    };
+    reviewers.sort();
+    reviewers
+        .into_iter()
+        .map(|reviewer| assay_dir.join(reviewer).join("debate.md"))
+        .filter(|path| path.is_file())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -813,5 +914,40 @@ mod tests {
         let line = "🚀🚀🚀🚀🚀";
         let preview = super::summarize_line(line, 4);
         assert_eq!(preview, "🚀...");
+    }
+
+    #[test]
+    fn parse_rounds_used_supports_single_and_multi_reviewer_verdicts() {
+        assert_eq!(super::parse_rounds_used("round: 3"), Some(3));
+        assert_eq!(super::parse_rounds_used("rounds_used: 7"), Some(7));
+    }
+
+    #[test]
+    fn assay_transcript_paths_uses_canonical_when_present() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let assay_dir = tmp.path().join("assay");
+        std::fs::create_dir_all(&assay_dir).expect("mkdir");
+        std::fs::write(assay_dir.join("debate.md"), "log").expect("write");
+        let paths = super::assay_transcript_paths(&assay_dir);
+        assert_eq!(paths, vec![assay_dir.join("debate.md")]);
+    }
+
+    #[test]
+    fn assay_transcript_paths_discovers_multi_reviewer_logs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let assay_dir = tmp.path().join("assay");
+        std::fs::create_dir_all(assay_dir.join("claude")).expect("mkdir claude");
+        std::fs::create_dir_all(assay_dir.join("codex")).expect("mkdir codex");
+        std::fs::write(assay_dir.join("codex").join("debate.md"), "codex").expect("write codex");
+        std::fs::write(assay_dir.join("claude").join("debate.md"), "claude").expect("write claude");
+
+        let paths = super::assay_transcript_paths(&assay_dir);
+        assert_eq!(
+            paths,
+            vec![
+                assay_dir.join("claude").join("debate.md"),
+                assay_dir.join("codex").join("debate.md")
+            ]
+        );
     }
 }
