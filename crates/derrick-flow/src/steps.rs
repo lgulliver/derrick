@@ -51,6 +51,7 @@ pub async fn execute_step(
             artifacts,
             tokens_in,
             tokens_out,
+            message,
         }) => {
             let status_str = match status {
                 StepStatus::Skipped => "skipped",
@@ -69,6 +70,10 @@ pub async fn execute_step(
                     },
                 )
                 .await;
+            if !message.is_empty() {
+                let _ =
+                    crate::io::append_log(&log_path, &format!("\n---\nstep halted: {message}\n"));
+            }
             Ok(StepRecord {
                 id: step.id().to_owned(),
                 status,

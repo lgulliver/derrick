@@ -13,6 +13,7 @@ pub(crate) struct StepExecution {
     pub(crate) artifacts: Vec<PathBuf>,
     pub(crate) tokens_in: u32,
     pub(crate) tokens_out: u32,
+    pub(crate) message: String,
 }
 
 impl StepExecution {
@@ -22,6 +23,7 @@ impl StepExecution {
             artifacts,
             tokens_in: 0,
             tokens_out: 0,
+            message: String::new(),
         }
     }
 
@@ -31,15 +33,17 @@ impl StepExecution {
             artifacts: Vec::new(),
             tokens_in: 0,
             tokens_out: 0,
+            message: String::new(),
         }
     }
 
-    pub(crate) fn halted(artifacts: Vec<PathBuf>, _message: impl Into<String>) -> Self {
+    pub(crate) fn halted(artifacts: Vec<PathBuf>, message: impl Into<String>) -> Self {
         Self {
             status: StepStatus::Halted,
             artifacts,
             tokens_in: 0,
             tokens_out: 0,
+            message: message.into(),
         }
     }
 

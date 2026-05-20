@@ -273,12 +273,62 @@ impl Runner {
                             "\u{23ed}".bright_cyan(),
                             "skipped".bright_black()
                         ),
-                        StepStatus::Halted => eprintln!(
-                            "  {} {} {}",
-                            step.id().cyan(),
-                            "\u{26a0}".yellow(),
-                            "HALTED".yellow()
-                        ),
+                        StepStatus::Halted => {
+                            eprintln!(
+                                "  {} {} {}",
+                                step.id().cyan(),
+                                "\u{26a0}".yellow(),
+                                "HALTED".yellow()
+                            );
+                            if step.id() == "assay" {
+                                if let Some(feature_dir) = &state.feature_dir {
+                                    let wd = self.working_dir(&state);
+                                    let verdict_path =
+                                        wd.join(feature_dir).join("assay").join("verdict.md");
+                                    if let Ok(content) = std::fs::read_to_string(&verdict_path) {
+                                        let verdict = content
+                                            .lines()
+                                            .find_map(|l| l.strip_prefix("verdict: "))
+                                            .unwrap_or("unknown");
+                                        let lines: Vec<&str> = content
+                                            .lines()
+                                            .skip_while(|l| !l.starts_with("## "))
+                                            .filter(|l| !l.is_empty())
+                                            .collect();
+                                        eprintln!(
+                                            "  {} {} {}",
+                                            "\u{2502}".bright_cyan(),
+                                            "Verdict:".cyan(),
+                                            verdict.yellow()
+                                        );
+                                        let preview: Vec<&str> = lines
+                                            .iter()
+                                            .take_while(|l| !l.starts_with("## Verdict"))
+                                            .flat_map(|l| l.strip_prefix("**"))
+                                            .filter(|l| l.len() > 5)
+                                            .take(3)
+                                            .collect();
+                                        for item in &preview {
+                                            let cleaned = item.trim_end_matches("**").trim();
+                                            if !cleaned.is_empty() {
+                                                eprintln!(
+                                                    "  {} {} {}",
+                                                    "\u{2502}".bright_cyan(),
+                                                    "\u{2022}".yellow(),
+                                                    cleaned.yellow()
+                                                );
+                                            }
+                                        }
+                                        eprintln!(
+                                            "  {} {} {}",
+                                            "\u{2514}".bright_cyan(),
+                                            "Review:".cyan(),
+                                            verdict_path.display().to_string().cyan()
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         StepStatus::Failed => eprintln!(
                             "  {} {} {}",
                             step.id().cyan(),
