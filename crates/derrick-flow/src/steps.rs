@@ -358,15 +358,6 @@ async fn execute_foreman(
         write_log(log_path, "", "foreman: no feature_dir, skipping\n")?;
         return Ok(StepExecution::skipped());
     }
-    let batch_name_str = step_batch_name(config, state, "foreman")
-        .unwrap_or_else(|| format!("br-{}", &state.run_id[..8].to_ascii_lowercase()));
-    let batch_name = match BatchName::new(&batch_name_str) {
-        Ok(b) => b,
-        Err(_) => {
-            write_log(log_path, "foreman: no valid batch name, skipping\n", "")?;
-            return Ok(StepExecution::skipped());
-        }
-    };
 
     let hand_id = HandId::new(format!("{}-hand", config.site().prefix()))
         .map_err(|e| RunError::Config(format!("foreman: invalid hand id: {e}")))?;
@@ -380,7 +371,6 @@ async fn execute_foreman(
         .await;
 
     let filter = TicketFilter {
-        batch: Some(batch_name.clone()),
         state: Some(TicketState::Ready),
         ..TicketFilter::default()
     };
@@ -479,10 +469,7 @@ fn parse_tasks_from_markdown(
 
     for line in text.lines() {
         let trimmed = line.trim();
-        if let Some(title) = trimmed
-            .strip_prefix("## ")
-            .or_else(|| trimmed.strip_prefix("# "))
-        {
+        if let Some(title) = trimmed.strip_prefix("## ") {
             if let Some(prev_title) = current_title.take() {
                 let body = body_lines.join("\n").trim().to_owned();
                 let id_str = format!("{prefix}-{ordinal}");
@@ -716,6 +703,8 @@ mod tests {
 
     use crate::assay::ExecutionState;
 
+    use derrick_substrate::BatchName;
+
     #[test]
     fn injects_clarifications_for_plan() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -740,5 +729,55 @@ mod tests {
 
         assert!(prompt.contains("Apply these accepted clarifications"));
         assert!(prompt.contains("Answer: GraphQL"));
+    }
+
+    #[test]
+    fn parse_tasks_empty_text_returns_empty() {
+        let batch = BatchName::new("test-batch").unwrap();
+        let tickets = super::parse_tasks_from_markdown("", &batch).unwrap();
+        assert!(tickets.is_empty());
+    }
+
+    #[test]
+    fn parse_tasks_extracts_headings_as_tickets() {
+        let batch = BatchName::new("test-batch").unwrap();
+        let text = r#"## Add build.rs with git describe
+
+This task implements the build script.
+
+## Update commands/mod.rs
+
+Need to change the version attribute.
+
+## Fix the test
+
+Update version_matches_cargo_pkg_version.
+"#;
+        let tickets = super::parse_tasks_from_markdown(text, &batch).unwrap();
+        assert_eq!(tickets.len(), 3);
+        assert_eq!(tickets[0].title, "Add build.rs with git describe");
+        assert_eq!(tickets[0].ordinal, Some(0));
+        assert_eq!(tickets[1].title, "Update commands/mod.rs");
+        assert_eq!(tickets[1].ordinal, Some(1));
+        assert_eq!(tickets[2].title, "Fix the test");
+        assert_eq!(tickets[2].ordinal, Some(2));
+    }
+
+    #[test]
+    fn parse_tasks_sets_batch_and_labels() {
+        let batch = BatchName::new("feat-batch").unwrap();
+        let text = "## Only task\nDetails here.\n";
+        let tickets = super::parse_tasks_from_markdown(text, &batch).unwrap();
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(tickets[0].batch, Some(batch));
+        assert!(tickets[0].labels.contains(&"task".to_owned()));
+    }
+
+    #[test]
+    fn parse_tasks_no_headings_returns_empty() {
+        let batch = BatchName::new("test-batch").unwrap();
+        let text = "Just some text\nwithout any headings.\n";
+        let tickets = super::parse_tasks_from_markdown(text, &batch).unwrap();
+        assert!(tickets.is_empty());
     }
 }

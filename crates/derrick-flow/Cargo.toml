@@ -24,4 +24,5 @@ tracing = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 derrick-substrate-native = { path = "../derrick-substrate-native" }
+rusqlite = { workspace = true }
 tempfile = { workspace = true }

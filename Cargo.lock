@@ -573,6 +573,7 @@ dependencies = [
  "derrick-substrate-native",
  "derrick-tools",
  "owo-colors",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -124,11 +124,21 @@ mod tests {
                     }
                 })?;
             } else if request.prompt.contains("speckit.tasks") {
-                std::fs::write(feature.join("tasks.md"), "tasks").map_err(|source| {
-                    HostError::Io {
-                        host: self.name.to_owned(),
-                        source,
-                    }
+                std::fs::write(
+                    feature.join("tasks.md"),
+                    r#"## Task one
+Description of task one.
+
+## Task two
+Description of task two.
+
+## Task three
+Description of task three.
+"#,
+                )
+                .map_err(|source| HostError::Io {
+                    host: self.name.to_owned(),
+                    source,
                 })?;
             } else if request.prompt.contains("reviewer raised") {
                 std::fs::write(feature.join("plan.md"), "\ndelta").map_err(|source| {
@@ -314,6 +324,82 @@ fi
     use std::collections::BTreeSet;
     use std::path::Path;
     use std::sync::Arc;
+
+    fn add_feature_pipeline_with_dispatch() -> String {
+        format!(
+            "{}\n  - id: bridge\n    runner: derrick\n    inputs: [\"{{{{feature_dir}}}}/tasks.md\"]\n    batch: \"br-{{{{run_id}}}}\"\n  - id: foreman\n    runner: derrick\n",
+            add_feature_pipeline()
+        )
+    }
+
+    #[tokio::test]
+    async fn bridge_creates_tickets_from_tasks() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (dir, runner) = runner(&yaml(
+            &add_feature_pipeline_with_dispatch(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("bridge-test".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Success);
+        let db_path = dir.path().join(".derrick/derrick.db");
+        assert!(
+            db_path.exists(),
+            "substrate database should exist after bridge"
+        );
+
+        // Check tasks.md was written by the mock
+        let tasks_md_path = dir.path().join("specs/001-test/tasks.md");
+        assert!(
+            tasks_md_path.exists(),
+            "tasks.md should exist at {tasks_md_path:?}"
+        );
+
+        // Debug: search for tasks.md elsewhere
+        if !tasks_md_path.exists() {
+            let worktree_base = dir.path().join(".derrick/worktrees");
+            if worktree_base.exists() {
+                for entry in std::fs::read_dir(&worktree_base)? {
+                    let entry = entry?;
+                    let wt_tasks = entry.path().join("specs/001-test/tasks.md");
+                    if wt_tasks.exists() {
+                        panic!("tasks.md found in worktree instead: {:?}", wt_tasks);
+                    }
+                }
+            }
+        }
+
+        // Verify tickets were created in the database
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tickets WHERE batch = 'br-bridge-test'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(
+            count >= 3,
+            "expected at least 3 tickets from tasks.md, got {count}"
+        );
+
+        // Verify at least one ticket was dispatched by foreman
+        let dispatched: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE kind = 'ticket_assigned'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(dispatched, 3, "expected 3 tickets to be dispatched");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn add_feature_happy_path_writes_all_artifacts() -> TestResult {
