@@ -1083,17 +1083,14 @@ fn extract_bold_numbered(text: &str) -> Option<String> {
     let trimmed = line.trim();
     let stripped = strip_markdown_emphasis(trimmed);
     // After stripping **, we have "R1 — Title" or "1. Title" or "A) Title"
-    // The separator is em-dash (U+2014), ". ", or ") "
-    let after_sep = stripped
+    // The separator is em-dash (U+2014) + space, ". ", or ") "
+    let (after_sep, sep_len) = stripped
         .find("\u{2014} ")
-        .or_else(|| stripped.find(". "))
-        .or_else(|| stripped.find(") "))
-        .or_else(|| stripped.find(".  "))?;
-    let sep_end = if stripped[after_sep..].starts_with(".  ") {
-        after_sep + 3
-    } else {
-        after_sep + 2 // ". ", ") ", or em-dash + space
-    };
+        .map(|i| (i, "\u{2014} ".len()))  // em dash is 3 bytes + 1 space = 4
+        .or_else(|| stripped.find(". ").map(|i| (i, 2)))
+        .or_else(|| stripped.find(") ").map(|i| (i, 2)))
+        .or_else(|| stripped.find(".  ").map(|i| (i, 3)))?;
+    let sep_end = after_sep + sep_len;
     let result = stripped[sep_end..].trim();
     if result.is_empty() {
         None
