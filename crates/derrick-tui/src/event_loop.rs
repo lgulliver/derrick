@@ -87,7 +87,10 @@ pub async fn run_event_loop<B: Backend>(
     watch_paths: Vec<PathBuf>,
     prune_queue_path: Option<std::path::PathBuf>,
     terminal: &mut Terminal<B>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
+{
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -200,7 +203,10 @@ fn append_prune_slug(path: &std::path::Path, slug: &str) {
     }
 }
 
-fn redraw<B: Backend>(terminal: &mut Terminal<B>, app: &App) -> anyhow::Result<()> {
+fn redraw<B: Backend>(terminal: &mut Terminal<B>, app: &App) -> anyhow::Result<()>
+where
+    <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
+{
     terminal.draw(|frame| {
         let size = frame.area();
         let chunks = Layout::default()
