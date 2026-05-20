@@ -972,20 +972,71 @@ fn strip_markdown_emphasis(mut s: &str) -> &str {
 
 /// Extract the text of the first bold-numbered objection from a review response.
 /// Looks for `**1. Title**` or `**A. Title**` and returns the title portion.
+/// Falls back to any bold line if numbered extraction fails, then to the
+/// first non-empty line after the preamble.
 fn extract_first_objection(text: &str) -> Option<String> {
+    // Try bold-numbered items: **1. Title** or **A. Title**
+    if let Some(result) = extract_bold_numbered(text) {
+        return Some(result);
+    }
+
+    // Try any bold line: **Some highlighted text**
+    if let Some(result) = extract_any_bold(text) {
+        return Some(result);
+    }
+
+    // Fallback: first non-empty, non-comment, non-verdict line
+    text.lines()
+        .map(|l| l.trim())
+        .find(|l| {
+            !l.is_empty()
+                && !l.starts_with("## ")
+                && !l.starts_with("### ")
+                && !l.starts_with("```")
+                && !l.starts_with("---")
+                && !l.eq_ignore_ascii_case("## Verdict")
+                && !l.starts_with("Now I have")
+                && !l.starts_with("Let me")
+                && l.len() > 20
+        })
+        .map(|l| l.chars().take(80).collect())
+}
+
+fn extract_bold_numbered(text: &str) -> Option<String> {
     let line = text.lines().find(|l| {
         let t = l.trim();
         t.starts_with("**")
             && t.as_bytes().get(2).is_some_and(|b| {
                 b.is_ascii_digit() || *b == b'A' || *b == b'B' || *b == b'C' || *b == b'D'
             })
-            && t[2..].contains("**")
     })?;
     let trimmed = line.trim();
-    let after_num = trimmed.find(". ").or_else(|| trimmed.find(".  "))?;
-    let rest = trimmed[after_num + 2..].trim();
-    let end = rest.rfind("**")?;
-    Some(rest[..end].trim().to_owned())
+    let stripped = strip_markdown_emphasis(trimmed);
+    // After stripping **, we have "1. Title" or "A. Title"
+    let after_dot = stripped
+        .find(". ")
+        .or_else(|| stripped.find(".)"))
+        .or_else(|| stripped.find(".  "))?;
+    let result = stripped[after_dot + 2..].trim();
+    if result.is_empty() {
+        None
+    } else {
+        Some(result.to_owned())
+    }
+}
+
+fn extract_any_bold(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| {
+        let t = l.trim();
+        (t.starts_with("**") && t[2..].contains("**"))
+            || (t.starts_with('*') && !t.starts_with("**") && t[1..].contains('*'))
+    })?;
+    let result = strip_markdown_emphasis(line.trim());
+    let result = result.trim();
+    if result.is_empty() || result.len() < 10 {
+        return None;
+    }
+    Some(result.chars().take(80).collect())
 }
 
 /// Count the number of objection items in a reviewer response.
