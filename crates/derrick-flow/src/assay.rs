@@ -345,7 +345,7 @@ pub async fn run_reviewer_rounds(
     let mut last_constitution_violations: Vec<String> = Vec::new();
     let mut max_rounds = rounds;
     let mut round = 1usize;
-    let mut round_summaries: Vec<(usize, String, String, usize)> = Vec::new();
+    let mut round_summaries: Vec<(usize, String, String, usize, String)> = Vec::new();
 
     while round <= max_rounds {
         let plan = read_to_string(&working_dir.join(feature_dir).join("plan.md"))?;
@@ -418,28 +418,58 @@ pub async fn run_reviewer_rounds(
         )?;
 
         let objection_count = count_objects(&response_text);
+        let objection_snippet =
+            extract_first_objection(&response_text).map(|s| s.chars().take(60).collect::<String>());
 
         eprint!("\r                                            \r");
         match verdict {
             "accept" => {
-                eprintln!(
-                    "  {} {} {} {} accept {}",
-                    step.id().cyan(),
-                    "\u{2696}".cyan(),
-                    phase.cyan(),
-                    "\u{2192}".cyan(),
-                    "\u{2713}".green()
-                );
+                let check = "\u{2713}".green().to_string();
+                if let Some(ref snippet) = objection_snippet {
+                    eprintln!(
+                        "  {} {} {} {} accept {} — all resolved {}",
+                        step.id().cyan(),
+                        "\u{2696}".cyan(),
+                        phase.cyan(),
+                        "\u{2192}".cyan(),
+                        check,
+                        snippet.bright_white()
+                    );
+                } else {
+                    eprintln!(
+                        "  {} {} {} {} accept {}",
+                        step.id().cyan(),
+                        "\u{2696}".cyan(),
+                        phase.cyan(),
+                        "\u{2192}".cyan(),
+                        check,
+                    );
+                }
             }
             "revise" => {
-                eprintln!(
-                    "  {} {} {} {} revise {}",
-                    step.id().cyan(),
-                    "\u{2696}".cyan(),
-                    phase.cyan(),
-                    "\u{2192}".cyan(),
-                    format!("({} objections)", objection_count).bright_black()
-                );
+                let count_str = format!("({} objections)", objection_count)
+                    .bright_black()
+                    .to_string();
+                if let Some(ref snippet) = objection_snippet {
+                    eprintln!(
+                        "  {} {} {} {} {} {}",
+                        step.id().cyan(),
+                        "\u{2696}".cyan(),
+                        phase.cyan(),
+                        count_str,
+                        "\u{2192}".cyan(),
+                        snippet.bright_white()
+                    );
+                } else {
+                    eprintln!(
+                        "  {} {} {} {} {}",
+                        step.id().cyan(),
+                        "\u{2696}".cyan(),
+                        phase.cyan(),
+                        count_str,
+                        "\u{2192}".cyan(),
+                    );
+                }
             }
             "reject" => {
                 eprintln!(
@@ -467,7 +497,15 @@ pub async fn run_reviewer_rounds(
         );
         write_file(&verdict_path, &verdict_body)?;
 
-        round_summaries.push((round, phase.to_owned(), verdict.to_owned(), objection_count));
+        let objection_summary =
+            extract_first_objection(&response_text).unwrap_or_else(|| "unspecified".to_owned());
+        round_summaries.push((
+            round,
+            phase.to_owned(),
+            verdict.to_owned(),
+            objection_count,
+            objection_summary,
+        ));
 
         match verdict {
             "accept" => {
@@ -911,6 +949,24 @@ fn strip_markdown_emphasis(mut s: &str) -> &str {
     }
 }
 
+/// Extract the text of the first bold-numbered objection from a review response.
+/// Looks for `**1. Title**` or `**A. Title**` and returns the title portion.
+fn extract_first_objection(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| {
+        let t = l.trim();
+        t.starts_with("**")
+            && t.as_bytes().get(2).is_some_and(|b| {
+                b.is_ascii_digit() || *b == b'A' || *b == b'B' || *b == b'C' || *b == b'D'
+            })
+            && t[2..].contains("**")
+    })?;
+    let trimmed = line.trim();
+    let after_num = trimmed.find(". ").or_else(|| trimmed.find(".  "))?;
+    let rest = trimmed[after_num + 2..].trim();
+    let end = rest.rfind("**")?;
+    Some(rest[..end].trim().to_owned())
+}
+
 /// Count the number of objection items in a reviewer response.
 /// Looks for bold-numbered items (`**1.**`, `**A.**`) typically used
 /// in risk / edge-case / constitution sections.
@@ -926,24 +982,61 @@ fn count_objects(text: &str) -> usize {
         .count()
 }
 
-fn print_round_summaries(summaries: &[(usize, String, String, usize)]) {
+fn print_round_summaries(summaries: &[(usize, String, String, usize, String)]) {
     if summaries.len() <= 1 {
         return;
     }
     let final_verdict = summaries
         .last()
-        .map(|(_, _, v, _)| v.as_str())
+        .map(|(_, _, v, _, _)| v.as_str())
         .unwrap_or("");
     let total_rounds = summaries.len();
-    let total_objs: usize = summaries.iter().map(|(_, _, _, c)| c).sum();
+    let total_objs: usize = summaries.iter().map(|(_, _, _, c, _)| c).sum();
     let verdict_str = match final_verdict {
         "accept" => format!("{} accepted", "\u{2713}").green().to_string(),
         "reject" => format!("{} rejected", "\u{2717}").red().to_string(),
         _ => format!("{} halted", "\u{26a0}").yellow().to_string(),
     };
     eprintln!(
+        "  {} {}",
+        "\u{250c}".bright_cyan(),
+        "Assay Deliberation".bold()
+    );
+    for (round, phase, verdict, count, objection) in summaries {
+        let bullet = match verdict.as_str() {
+            "accept" => "\u{2713}".green().to_string(),
+            "reject" => "\u{2717}".red().to_string(),
+            _ => "\u{2022}".cyan().to_string(),
+        };
+        let obj = if objection == "unspecified" {
+            String::new()
+        } else {
+            format!(" — {}", objection.bright_white())
+        };
+        eprintln!(
+            "  {} {} Round {}: {} ({}){}{}",
+            "\u{2502}".bright_cyan(),
+            bullet,
+            round.to_string().cyan(),
+            phase.cyan(),
+            match verdict.as_str() {
+                "accept" => format!("{} accept", "\u{2713}").green().to_string(),
+                "reject" => format!("{} reject", "\u{2717}").red().to_string(),
+                _ => format!("{} revise", count).yellow().to_string(),
+            },
+            if verdict == "revise" {
+                format!(" objection{}", if *count == 1 { "" } else { "s" })
+                    .bright_black()
+                    .to_string()
+            } else {
+                String::new()
+            },
+            obj,
+        );
+    }
+    eprintln!(
         "  {} {} {} {} rounds, {} {} {}",
-        "\u{2502}".bright_cyan(),
+        "\u{2514}".bright_cyan(),
         "Assay:".cyan(),
         format!("{total_rounds}").cyan(),
         "rounds,".cyan(),
@@ -1349,5 +1442,38 @@ Details.
 - Dash
 No marker"#;
         assert_eq!(count_objects(text), 0);
+    }
+
+    #[test]
+    fn extract_first_objection_matches_bold_item() {
+        let text = r#"Preamble
+
+**1. Clap won't read DERRICK_VERSION automatically (critical)**
+
+Details.
+
+**2. Second item**
+"#;
+        let result = extract_first_objection(text);
+        assert_eq!(
+            result,
+            Some("Clap won't read DERRICK_VERSION automatically (critical)".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_first_objection_lettered_items() {
+        let text = r#"**A. No v*-matching tag, but other tags exist**
+
+Details"#;
+        let result = extract_first_objection(text);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("No v"));
+    }
+
+    #[test]
+    fn extract_first_objection_no_match_returns_none() {
+        assert_eq!(extract_first_objection("## Verdict\naccept"), None);
+        assert_eq!(extract_first_objection("No bold items here"), None);
     }
 }
