@@ -3,6 +3,10 @@ site:
   name: {{site_name}}
   prefix: {{prefix}}
 models:
+  claude-opus:
+    provider: shell
+    cli: "claude"
+    model: claude-opus
   claude-sonnet:
     provider: shell
     cli: "claude"

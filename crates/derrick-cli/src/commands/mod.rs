@@ -9,6 +9,7 @@ pub(crate) mod doctor;
 pub(crate) mod foreman;
 pub(crate) mod gain;
 pub(crate) mod init;
+pub(crate) mod init_wizard;
 pub(crate) mod observe;
 pub(crate) mod run;
 pub(crate) mod scrub;
@@ -133,7 +134,7 @@ pub(crate) struct InitArgs {
     pub(crate) greenfield: bool,
     #[arg(long, value_enum, default_value_t = InitMode::Solo)]
     pub(crate) mode: InitMode,
-    #[arg(long)]
+    #[arg(long = "site", alias = "project", help = "Derrick project name written to site.name")]
     pub(crate) site: Option<String>,
     #[arg(long)]
     pub(crate) prefix: Option<String>,
@@ -141,6 +142,10 @@ pub(crate) struct InitArgs {
     pub(crate) force: bool,
     #[arg(long)]
     pub(crate) yes: bool,
+    #[arg(long, conflicts_with_all = ["no_wizard", "yes"])]
+    pub(crate) wizard: bool,
+    #[arg(long, conflicts_with = "wizard")]
+    pub(crate) no_wizard: bool,
     #[arg(long)]
     pub(crate) dry_run: bool,
     #[arg(long)]

@@ -266,6 +266,10 @@ async fn execute_bridge(
     repo_root: &Path,
     log_path: &Path,
 ) -> Result<StepExecution, RunError> {
+    if config.tools().substrate().mode() != derrick_config::SubstrateMode::Crew {
+        write_log(log_path, "", "bridge: skipped because mode is not crew\n")?;
+        return Ok(StepExecution::skipped());
+    }
     let wd = working_dir(state, repo_root);
     let feature_dir = match state.feature_dir.as_ref() {
         Some(fd) => fd.clone(),
@@ -299,7 +303,7 @@ async fn execute_bridge(
             message: format!("create_batch: {e}"),
         })?;
 
-    let tickets = parse_tasks_from_markdown(&tasks_text, &batch_name)?;
+    let tickets = parse_tasks_from_markdown(&tasks_text, &batch_name, config.site().prefix())?;
 
     let created = tickets.len();
     for ticket in &tickets {
@@ -354,18 +358,42 @@ async fn execute_foreman(
     _repo_root: &Path,
     log_path: &Path,
 ) -> Result<StepExecution, RunError> {
+    if config.tools().substrate().mode() != derrick_config::SubstrateMode::Crew {
+        write_log(log_path, "", "foreman: skipped because mode is not crew\n")?;
+        return Ok(StepExecution::skipped());
+    }
     if state.feature_dir.is_none() {
         write_log(log_path, "", "foreman: no feature_dir, skipping\n")?;
         return Ok(StepExecution::skipped());
     }
 
-    let hand_id = HandId::new(format!("{}-hand", config.site().prefix()))
+    let foreman_step = config.pipeline().iter().find(|step| step.id() == "foreman");
+    let executor_role = foreman_step
+        .and_then(derrick_config::PipelineStep::executor_role)
+        .unwrap_or("executor");
+    let model_name = config.roles().get(executor_role).ok_or_else(|| {
+        RunError::Config(format!(
+            "crew mode requires role `{executor_role}`, but it is not configured under `roles`"
+        ))
+    })?;
+    let model = config.models().get(model_name).ok_or_else(|| {
+        RunError::Config(format!(
+            "role `{executor_role}` points to model `{model_name}`, but no model named `{model_name}` exists under `models`"
+        ))
+    })?;
+    let hand_kind = hand_kind_for_executor(model_name, model.provider());
+    let hand_suffix = match hand_kind {
+        HandKind::Copilot => "copilot",
+        HandKind::Claude => "claude",
+        HandKind::Human => "human",
+    };
+    let hand_id = HandId::new(format!("{}-{hand_suffix}-hand", config.site().prefix()))
         .map_err(|e| RunError::Config(format!("foreman: invalid hand id: {e}")))?;
 
     let _ = substrate
         .register_hand(Hand {
             id: hand_id.clone(),
-            kind: HandKind::Human,
+            kind: hand_kind,
             last_seen: None,
         })
         .await;
@@ -398,6 +426,13 @@ async fn execute_foreman(
         "  {} {}",
         "\u{250c}".bright_cyan(),
         "Foreman — Dispatch".bold()
+    );
+    eprintln!(
+        "  {} role {} using model {} ({})",
+        "\u{2502}".bright_cyan(),
+        executor_role.cyan(),
+        model_name.cyan(),
+        hand_kind.to_string().bright_black()
     );
 
     let mut dispatched = 0u32;
@@ -460,8 +495,14 @@ async fn execute_foreman(
 fn parse_tasks_from_markdown(
     text: &str,
     batch: &derrick_substrate::BatchName,
+    prefix: &str,
 ) -> Result<Vec<NewTicket>, RunError> {
-    let prefix = "tsk";
+    let sanitized_prefix = prefix.trim();
+    if sanitized_prefix.is_empty() {
+        return Err(RunError::Config(
+            "bridge: site prefix is empty; cannot generate ticket ids".to_owned(),
+        ));
+    }
     let mut tickets = Vec::new();
     let mut ordinal = 0u32;
     let mut body_lines = Vec::new();
@@ -472,7 +513,7 @@ fn parse_tasks_from_markdown(
         if let Some(title) = trimmed.strip_prefix("## ") {
             if let Some(prev_title) = current_title.take() {
                 let body = body_lines.join("\n").trim().to_owned();
-                let id_str = format!("{prefix}-{ordinal}");
+                let id_str = format!("{sanitized_prefix}-{ordinal}");
                 if let Ok(id) = TicketId::new(&id_str) {
                     tickets.push(
                         NewTicket::new(
@@ -500,7 +541,7 @@ fn parse_tasks_from_markdown(
 
     if let Some(title) = current_title {
         let body = body_lines.join("\n").trim().to_owned();
-        let id_str = format!("{prefix}-{ordinal}");
+        let id_str = format!("{sanitized_prefix}-{ordinal}");
         if let Ok(id) = TicketId::new(&id_str) {
             tickets.push(
                 NewTicket::new(
@@ -520,6 +561,16 @@ fn parse_tasks_from_markdown(
     }
 
     Ok(tickets)
+}
+
+fn hand_kind_for_executor(model_name: &str, provider: &str) -> HandKind {
+    if provider == "copilot-cli" || model_name == "copilot" {
+        HandKind::Copilot
+    } else if model_name.starts_with("claude") || provider == "anthropic" {
+        HandKind::Claude
+    } else {
+        HandKind::Human
+    }
 }
 
 fn step_batch_name(
@@ -734,7 +785,7 @@ mod tests {
     #[test]
     fn parse_tasks_empty_text_returns_empty() {
         let batch = BatchName::new("test-batch").unwrap();
-        let tickets = super::parse_tasks_from_markdown("", &batch).unwrap();
+        let tickets = super::parse_tasks_from_markdown("", &batch, "tsk").unwrap();
         assert!(tickets.is_empty());
     }
 
@@ -753,7 +804,7 @@ Need to change the version attribute.
 
 Update version_matches_cargo_pkg_version.
 "#;
-        let tickets = super::parse_tasks_from_markdown(text, &batch).unwrap();
+        let tickets = super::parse_tasks_from_markdown(text, &batch, "tsk").unwrap();
         assert_eq!(tickets.len(), 3);
         assert_eq!(tickets[0].title, "Add build.rs with git describe");
         assert_eq!(tickets[0].ordinal, Some(0));
@@ -767,7 +818,7 @@ Update version_matches_cargo_pkg_version.
     fn parse_tasks_sets_batch_and_labels() {
         let batch = BatchName::new("feat-batch").unwrap();
         let text = "## Only task\nDetails here.\n";
-        let tickets = super::parse_tasks_from_markdown(text, &batch).unwrap();
+        let tickets = super::parse_tasks_from_markdown(text, &batch, "tsk").unwrap();
         assert_eq!(tickets.len(), 1);
         assert_eq!(tickets[0].batch, Some(batch));
         assert!(tickets[0].labels.contains(&"task".to_owned()));
@@ -777,7 +828,15 @@ Update version_matches_cargo_pkg_version.
     fn parse_tasks_no_headings_returns_empty() {
         let batch = BatchName::new("test-batch").unwrap();
         let text = "Just some text\nwithout any headings.\n";
-        let tickets = super::parse_tasks_from_markdown(text, &batch).unwrap();
+        let tickets = super::parse_tasks_from_markdown(text, &batch, "tsk").unwrap();
         assert!(tickets.is_empty());
+    }
+
+    #[test]
+    fn parse_tasks_uses_supplied_prefix() {
+        let batch = BatchName::new("test-batch").unwrap();
+        let text = "## Task one\nBody\n";
+        let tickets = super::parse_tasks_from_markdown(text, &batch, "abc").unwrap();
+        assert_eq!(tickets[0].id.as_str(), "abc-0");
     }
 }

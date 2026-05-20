@@ -221,7 +221,7 @@ fn greenfield_init_in_empty_repo_creates_files() -> TestResult {
         .stdout
         .clone();
 
-    assert_contains(&output, "initialised derrick site test")?;
+    assert_contains(&output, "initialised derrick project test")?;
     assert!(dir.path().join("derrick.yaml").exists());
     assert!(dir.path().join(".derrick/derrick.db").exists());
     Ok(())
@@ -312,6 +312,66 @@ fn greenfield_init_validates_prefix() -> TestResult {
         .clone();
 
     assert_contains(&output, "^[a-z]{1,6}$")?;
+    Ok(())
+}
+
+#[test]
+fn init_rejects_wizard_and_no_wizard_combination() -> TestResult {
+    let output = derrick()?
+        .args(["init", "--wizard", "--no-wizard"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert_contains(&output, "cannot be used with")?;
+    Ok(())
+}
+
+#[test]
+fn init_accepts_project_alias_for_site() -> TestResult {
+    let dir = repo()?;
+    derrick()?
+        .current_dir(dir.path())
+        .args([
+            "init",
+            "--greenfield",
+            "--project",
+            "testproj",
+            "--prefix",
+            "tst",
+        ])
+        .assert()
+        .success();
+    let config = fs::read_to_string(dir.path().join("derrick.yaml"))?;
+    assert!(config.contains("name: testproj"));
+    Ok(())
+}
+
+#[test]
+fn greenfield_crew_init_writes_mode_roles_and_crew_steps() -> TestResult {
+    let dir = repo()?;
+    derrick()?
+        .current_dir(dir.path())
+        .args([
+            "init",
+            "--greenfield",
+            "--site",
+            "test",
+            "--prefix",
+            "tst",
+            "--mode",
+            "crew",
+            "--yes",
+        ])
+        .assert()
+        .success();
+    let config = fs::read_to_string(dir.path().join("derrick.yaml"))?;
+    assert!(config.contains("mode: crew"));
+    assert!(config.contains("proposer: claude-opus"));
+    assert!(config.contains("id: bridge"));
+    assert!(config.contains("id: foreman"));
+    assert!(config.contains("executor_role: executor"));
     Ok(())
 }
 

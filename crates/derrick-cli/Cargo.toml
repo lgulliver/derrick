@@ -28,6 +28,7 @@ derrick-observe = { path = "../derrick-observe" }
 derrick-tui = { path = "../derrick-tui" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 which = { workspace = true }

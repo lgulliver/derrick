@@ -82,9 +82,10 @@ contract is the same.
 
 - **Minimum 80% line coverage** across the workspace. CI fails
   below this.
-- Measured via `cargo llvm-cov --workspace --lcov`.
+- Measured via `cargo llvm-cov --workspace --all-features`.
+- CI gate: `cargo llvm-cov --workspace --all-features --fail-under-lines 80`.
 - Local: `cargo install cargo-llvm-cov && cargo llvm-cov
-  --workspace --html`.
+  --workspace --all-features --fail-under-lines 80`.
 - Coverage is a floor, not a ceiling. Critical paths (substrate,
   foreman, stack restack) should be closer to 100%.
 

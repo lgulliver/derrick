@@ -85,6 +85,21 @@ derrick doctor                   # checks toolchain, hooks, squash-merge policy
 derrick foreman start --attached # start the dispatch loop
 ```
 
+Or launch the guided setup:
+
+```bash
+derrick init --wizard
+```
+
+The wizard uses **Project name** language in prompts (internally this still maps to `site.name` in `derrick.yaml`) and lets you choose:
+- init type (existing repo vs fresh project)
+- operating mode (`solo`, `copilot`, `crew`)
+- AI tool bindings (recommended defaults, one tool for all stages, or per-stage)
+- optional editor integrations
+- final preview + confirmation before writes
+
+Non-interactive usage is unchanged (`--yes`, `--dry-run`, non-TTY, and scripted flags skip prompts).
+
 Start a feature:
 
 ```bash
@@ -183,6 +198,25 @@ derrick gain
 
 Configured per pipeline step in `derrick.yaml`. Bring your own model on any step.
 
+### Crew mode role bindings
+
+`crew` mode is role-aware and uses differentiated bindings by default:
+
+```yaml
+tools:
+  substrate:
+    mode: crew
+
+roles:
+  proposer: claude-opus
+  drafter: claude-sonnet
+  reviewer: codex-gpt5
+  executor: copilot
+  summariser: claude-sonnet
+```
+
+You can override any role binding in `roles`.
+
 ---
 
 ## Status
@@ -214,6 +248,16 @@ What's landed and tested:
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 
 431 tests passing across 17 crates.
+
+## Coverage
+
+CI enforces a workspace line-coverage floor of 80%.
+
+Run locally:
+
+```bash
+cargo llvm-cov --workspace --all-features --fail-under-lines 80
+```
 
 ---
 
