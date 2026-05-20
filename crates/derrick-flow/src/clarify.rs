@@ -31,8 +31,8 @@ pub fn parse_clarify_questions(text: &str) -> Vec<ClarifyQuestion> {
             }
             question = Some(stripped.trim().to_owned());
         } else if let Some(stripped) = t.strip_prefix("Options:") {
-            options = stripped
-                .split(',')
+            options = split_options_smart(stripped)
+                .into_iter()
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
                 .collect();
@@ -48,6 +48,37 @@ pub fn parse_clarify_questions(text: &str) -> Vec<ClarifyQuestion> {
         });
     }
     questions
+}
+
+/// Split options text on commas, but only commas at the top level
+/// (not inside matching parentheses, brackets, or backtick pairs).
+fn split_options_smart(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    for (i, ch) in text.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '`' => {
+                // Toggle backtick depth
+                if depth == 0 {
+                    depth = -1
+                } else if depth == -1 {
+                    depth = 0
+                }
+            }
+            ',' if depth == 0 => {
+                parts.push(text[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < text.len() {
+        parts.push(text[start..].trim());
+    }
+    parts
 }
 
 pub(crate) fn select_clarify_answer(question: &ClarifyQuestion, user_input: &str) -> String {
@@ -192,7 +223,24 @@ pub async fn execute_clarify(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::path::Path;
+
+    #[test]
+    fn split_options_respects_parens() {
+        let input = "`0.0.0-nightly.20260520` (pre-release, sorts below stable), `0.0.0+nightly.20260520` (build metadata, unordered)";
+        let result = split_options_smart(input);
+        assert_eq!(result.len(), 2);
+        assert!(result[0].contains("nightly"));
+        assert!(result[1].contains("build metadata"));
+    }
+
+    #[test]
+    fn split_options_simple() {
+        let input = "REST, GraphQL, gRPC";
+        let result = split_options_smart(input);
+        assert_eq!(result, vec!["REST", "GraphQL", "gRPC"]);
+    }
 
     #[test]
     fn clarify_prompt_references_spec_path() {
