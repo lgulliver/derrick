@@ -347,11 +347,25 @@ pub async fn run_reviewer_rounds(
     let mut max_rounds = rounds;
     let mut round = 1usize;
     let mut round_summaries: Vec<(usize, String, String, usize, String)> = Vec::new();
+    let mut previous_objections: Option<String> = None;
 
     while round <= max_rounds {
-        let plan = read_to_string(&working_dir.join(feature_dir).join("plan.md"))?;
-        let prompt = format!("Task: {}\n\nPlan:\n{plan}", state_prompt);
-        let cached = format!("Constitution:\n{constitution}\n\nSpec:\n{spec}");
+        let (prompt, cached) = if let (2.., Some(ref prev)) = (round, &previous_objections) {
+            // Rounds 2+: send only the latest delta with the previous objections
+            let plan_delta =
+                last_delta_from_plan(&working_dir.join(feature_dir).join("plan.md"), prev)?;
+            let prompt = format!(
+                "Task: {}\n\nPrevious objections (verify each is resolved):\n{prev}\n\nLatest plan changes:\n{plan_delta}\n\nEvaluate ONLY whether the latest changes adequately address the previous objections. Do NOT re-list previously resolved items. List ONLY remaining or new concerns.",
+                state_prompt
+            );
+            let cached = format!("Constitution:\n{constitution}\n\nSpec:\n{spec}");
+            (prompt, cached)
+        } else {
+            let plan = read_to_string(&working_dir.join(feature_dir).join("plan.md"))?;
+            let prompt = format!("Task: {}\n\nPlan:\n{plan}", state_prompt);
+            let cached = format!("Constitution:\n{constitution}\n\nSpec:\n{spec}");
+            (prompt, cached)
+        };
         let phase = phase_name(round);
 
         eprint!(
@@ -557,8 +571,10 @@ pub async fn run_reviewer_rounds(
             phase.to_owned(),
             verdict.to_owned(),
             objection_count,
-            objection_summary,
+            objection_summary.clone(),
         ));
+        // Store objections for the next round's delta-focused prompt
+        previous_objections = Some(response_text.clone());
 
         match verdict {
             "accept" => {
@@ -759,7 +775,9 @@ async fn replan_from_objections(
             .as_ref()
             .ok_or_else(|| RunError::Config("replan requires feature_dir".to_owned()))?;
         let plan_path = working_dir.join(feature_dir).join("plan.md");
-        append_log(&plan_path, &delta)?;
+        // Append with a separator so we can extract the latest delta later
+        let sep = "\n\n---\n\n";
+        append_log(&plan_path, &format!("{sep}{delta}"))?;
     }
     Ok(delta)
 }
@@ -1059,22 +1077,28 @@ fn extract_bold_numbered(text: &str) -> Option<String> {
     let line = text.lines().find(|l| {
         let t = l.trim();
         t.starts_with("**")
-            && t.as_bytes().get(2).is_some_and(|b| {
-                b.is_ascii_digit() || *b == b'A' || *b == b'B' || *b == b'C' || *b == b'D'
-            })
+            && t.len() > 5
+            && (t.contains("\u{2014}") || t.contains(". ") || t.contains(") "))
     })?;
     let trimmed = line.trim();
     let stripped = strip_markdown_emphasis(trimmed);
-    // After stripping **, we have "1. Title" or "A. Title"
-    let after_dot = stripped
-        .find(". ")
-        .or_else(|| stripped.find(".)"))
+    // After stripping **, we have "R1 — Title" or "1. Title" or "A) Title"
+    // The separator is em-dash (U+2014), ". ", or ") "
+    let after_sep = stripped
+        .find("\u{2014} ")
+        .or_else(|| stripped.find(". "))
+        .or_else(|| stripped.find(") "))
         .or_else(|| stripped.find(".  "))?;
-    let result = stripped[after_dot + 2..].trim();
+    let sep_end = if stripped[after_sep..].starts_with(".  ") {
+        after_sep + 3
+    } else {
+        after_sep + 2 // ". ", ") ", or em-dash + space
+    };
+    let result = stripped[sep_end..].trim();
     if result.is_empty() {
         None
     } else {
-        Some(result.to_owned())
+        Some(result.chars().take(80).collect())
     }
 }
 
@@ -1093,16 +1117,28 @@ fn extract_any_bold(text: &str) -> Option<String> {
 }
 
 /// Count the number of objection items in a reviewer response.
-/// Looks for bold-numbered items (`**1.**`, `**A.**`) typically used
-/// in risk / edge-case / constitution sections.
+/// Looks for bold items with objection identifiers
+/// (`**1.`, `**R1 —`, `**E1 —`, `**C1 —`, `**A.`, etc.)
 fn count_objects(text: &str) -> usize {
     text.lines()
         .filter(|l| {
             let t = l.trim();
-            t.starts_with("**")
-                && t.as_bytes().get(2).is_some_and(|b| {
-                    b.is_ascii_digit() || *b == b'A' || *b == b'B' || *b == b'C' || *b == b'D'
-                })
+            if !t.starts_with("**") || t.len() < 6 {
+                return false;
+            }
+            let after = &t[2..];
+            // Must start with an identifier (digit, or letter+digit)
+            let first = after.as_bytes().first().copied().unwrap_or(0);
+            if !first.is_ascii_alphanumeric() {
+                return false;
+            }
+            // Must have a separator after the identifier
+            let id_len = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .count();
+            let after_id = &after[id_len..];
+            after_id.contains(". ") || after_id.contains("\u{2014}") || after_id.contains(") ")
         })
         .count()
 }
@@ -1169,6 +1205,20 @@ fn print_round_summaries(summaries: &[(usize, String, String, usize, String)]) {
         "objections,".cyan(),
         verdict_str
     );
+}
+
+/// Extract the most recent delta from plan.md by finding the last
+/// `---` separator and returning everything after it.
+fn last_delta_from_plan(plan_path: &Path, _previous: &str) -> Result<String, RunError> {
+    let content = read_to_string(plan_path)?;
+    if let Some(pos) = content.rfind("\n---\n\n") {
+        let delta = content[pos + 5..].trim().to_owned();
+        if !delta.is_empty() {
+            return Ok(delta);
+        }
+    }
+    // No separator found — return the full plan as fallback
+    read_to_string(plan_path)
 }
 
 fn is_markdown_heading(s: &str) -> bool {
