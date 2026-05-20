@@ -345,6 +345,7 @@ pub async fn run_reviewer_rounds(
     let mut last_constitution_violations: Vec<String> = Vec::new();
     let mut max_rounds = rounds;
     let mut round = 1usize;
+    let mut round_summaries: Vec<(usize, String, String, usize)> = Vec::new();
 
     while round <= max_rounds {
         let plan = read_to_string(&working_dir.join(feature_dir).join("plan.md"))?;
@@ -416,6 +417,8 @@ pub async fn run_reviewer_rounds(
             &response_text,
         )?;
 
+        let objection_count = count_objects(&response_text);
+
         eprint!("\r                                            \r");
         match verdict {
             "accept" => {
@@ -430,11 +433,12 @@ pub async fn run_reviewer_rounds(
             }
             "revise" => {
                 eprintln!(
-                    "  {} {} {} {} revise",
+                    "  {} {} {} {} revise {}",
                     step.id().cyan(),
                     "\u{2696}".cyan(),
                     phase.cyan(),
-                    "\u{2192}".cyan()
+                    "\u{2192}".cyan(),
+                    format!("({} objections)", objection_count).bright_black()
                 );
             }
             "reject" => {
@@ -463,9 +467,12 @@ pub async fn run_reviewer_rounds(
         );
         write_file(&verdict_path, &verdict_body)?;
 
+        round_summaries.push((round, phase.to_owned(), verdict.to_owned(), objection_count));
+
         match verdict {
             "accept" => {
                 write_verdict_transcript(&transcript_path, "accept", round)?;
+                print_round_summaries(&round_summaries);
                 let violations = last_constitution_violations.clone();
                 return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
                     role: reviewer_role.to_owned(),
@@ -479,6 +486,7 @@ pub async fn run_reviewer_rounds(
             }
             "reject" => {
                 write_verdict_transcript(&transcript_path, "reject", round)?;
+                print_round_summaries(&round_summaries);
                 return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
                     role: reviewer_role.to_owned(),
                     verdict: "reject".to_owned(),
@@ -496,12 +504,6 @@ pub async fn run_reviewer_rounds(
                         message: "could not parse suggested revisions from reviewer response"
                             .to_owned(),
                     })?;
-                eprintln!(
-                    "  {} {} {}...",
-                    step.id().cyan(),
-                    "\u{2694}".cyan(),
-                    "Rebuttal".cyan()
-                );
                 let replan_delta =
                     replan_from_objections(config, &hosts, working_dir, state, objections).await?;
                 write_rebuttal_transcript(&transcript_path, &replan_delta)?;
@@ -516,6 +518,7 @@ pub async fn run_reviewer_rounds(
                         max_rounds
                     );
                     write_verdict_transcript(&transcript_path, "revise", round)?;
+                    print_round_summaries(&round_summaries);
                     let violations = last_constitution_violations.clone();
                     return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
                         role: reviewer_role.to_owned(),
@@ -552,12 +555,6 @@ pub async fn run_reviewer_rounds(
                                 .to_owned(),
                         }
                     })?;
-                    eprintln!(
-                        "  {} {} {} and extending rounds...",
-                        step.id().cyan(),
-                        "\u{2694}".cyan(),
-                        "Rebuttal".cyan()
-                    );
                     let replan_delta =
                         replan_from_objections(config, &hosts, working_dir, state, objections)
                             .await?;
@@ -567,6 +564,7 @@ pub async fn run_reviewer_rounds(
                     continue;
                 }
                 write_verdict_transcript(&transcript_path, "revise", round)?;
+                print_round_summaries(&round_summaries);
                 let violations = last_constitution_violations.clone();
                 return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
                     role: reviewer_role.to_owned(),
@@ -585,6 +583,7 @@ pub async fn run_reviewer_rounds(
     }
 
     write_verdict_transcript(&transcript_path, "revise", rounds)?;
+    print_round_summaries(&round_summaries);
     let violations = last_constitution_violations.clone();
     Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
         role: reviewer_role.to_owned(),
@@ -910,6 +909,48 @@ fn strip_markdown_emphasis(mut s: &str) -> &str {
             None => return trimmed,
         }
     }
+}
+
+/// Count the number of objection items in a reviewer response.
+/// Looks for bold-numbered items (`**1.**`, `**A.**`) typically used
+/// in risk / edge-case / constitution sections.
+fn count_objects(text: &str) -> usize {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with("**")
+                && t.as_bytes().get(2).is_some_and(|b| {
+                    b.is_ascii_digit() || *b == b'A' || *b == b'B' || *b == b'C' || *b == b'D'
+                })
+        })
+        .count()
+}
+
+fn print_round_summaries(summaries: &[(usize, String, String, usize)]) {
+    if summaries.len() <= 1 {
+        return;
+    }
+    let final_verdict = summaries
+        .last()
+        .map(|(_, _, v, _)| v.as_str())
+        .unwrap_or("");
+    let total_rounds = summaries.len();
+    let total_objs: usize = summaries.iter().map(|(_, _, _, c)| c).sum();
+    let verdict_str = match final_verdict {
+        "accept" => format!("{} accepted", "\u{2713}").green().to_string(),
+        "reject" => format!("{} rejected", "\u{2717}").red().to_string(),
+        _ => format!("{} halted", "\u{26a0}").yellow().to_string(),
+    };
+    eprintln!(
+        "  {} {} {} {} rounds, {} {} {}",
+        "\u{2502}".bright_cyan(),
+        "Assay:".cyan(),
+        format!("{total_rounds}").cyan(),
+        "rounds,".cyan(),
+        format!("{total_objs}").cyan(),
+        "objections,".cyan(),
+        verdict_str
+    );
 }
 
 fn is_markdown_heading(s: &str) -> bool {
@@ -1284,5 +1325,29 @@ revise"#;
 Random text."#;
         let violations = detect_constitution_violations(text);
         assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn count_objects_counts_bold_numbered_items() {
+        let text = r#"Some preamble
+
+**1. First objection**
+
+Details.
+
+**2. Second objection**
+
+**A. Edge case**
+"#;
+        assert_eq!(count_objects(text), 3);
+    }
+
+    #[test]
+    fn count_objects_ignores_non_bold_lines() {
+        let text = r#"1. Plain numbered
+* Bullet
+- Dash
+No marker"#;
+        assert_eq!(count_objects(text), 0);
     }
 }

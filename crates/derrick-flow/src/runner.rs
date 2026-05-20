@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::io::Write as _;
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -343,6 +343,7 @@ impl Runner {
                                 }
                             } else if step.id() == "assay"
                                 && !self.config.tools().assay().auto_execute()
+                                && std::io::stdin().is_terminal()
                             {
                                 let assay_dir = wd.join(feature_dir).join("assay");
                                 let verdict_path = assay_dir.join("verdict.md");
@@ -416,6 +417,12 @@ impl Runner {
                                     break 'outer;
                                 }
                                 eprintln!();
+                            } else if step.id() == "assay" {
+                                eprintln!(
+                                    "  {} {}",
+                                    "\u{2502}".bright_cyan(),
+                                    "Assay complete.".cyan()
+                                );
                             }
                         }
                     }
