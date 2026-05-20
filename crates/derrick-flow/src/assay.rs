@@ -776,6 +776,7 @@ pub fn reconcile_verdicts(
 
 /// Parse the verdict from the reviewer's response text.
 /// Looks for `## Verdict` heading followed by accept/revise/reject.
+/// Handles common markdown formatting around the verdict word (`**revise**`, `*accept*`).
 pub fn parse_verdict(text: &str) -> Option<&'static str> {
     let mut in_verdict = false;
     for line in text.lines() {
@@ -785,7 +786,8 @@ pub fn parse_verdict(text: &str) -> Option<&'static str> {
             continue;
         }
         if in_verdict {
-            match trimmed.to_ascii_lowercase().as_str() {
+            let cleaned = trimmed.trim_matches(|c: char| c == '*' || c == '_' || c == '`');
+            match cleaned.to_ascii_lowercase().as_str() {
                 "accept" => return Some("accept"),
                 "revise" => return Some("revise"),
                 "reject" => return Some("reject"),
@@ -1038,6 +1040,18 @@ accept"#;
     fn parse_verdict_none() {
         assert_eq!(parse_verdict("no verdict here"), None);
         assert_eq!(parse_verdict("## Verdict\ninvalid"), None);
+    }
+
+    #[test]
+    fn parse_verdict_bold_formatting() {
+        assert_eq!(parse_verdict("## Verdict\n**revise**"), Some("revise"));
+        assert_eq!(parse_verdict("## Verdict\n*accept*"), Some("accept"));
+        assert_eq!(parse_verdict("## Verdict\n__reject__"), Some("reject"));
+    }
+
+    #[test]
+    fn parse_verdict_inline_code() {
+        assert_eq!(parse_verdict("## Verdict\n`revise`"), Some("revise"));
     }
 
     #[test]
