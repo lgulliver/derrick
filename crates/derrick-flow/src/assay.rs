@@ -802,12 +802,32 @@ pub fn parse_verdict(text: &str) -> Option<&'static str> {
 
 /// Extract suggested revisions from the reviewer's response.
 /// Looks for `## Suggested revisions` heading.
+/// Extract suggested revisions from the reviewer's response.
+/// First tries to find an explicit `## Suggested revisions` section.
+/// Falls back to everything between the first heading and `## Verdict`.
 pub fn suggested_revisions(text: &str) -> Option<&str> {
     let start_marker = "## Suggested revisions";
-    let start = text.find(start_marker)? + start_marker.len();
-    let rest = &text[start..];
-    let end = rest.find("\n## ").unwrap_or(rest.len());
-    Some(rest[..end].trim())
+    if let Some(start) = text.find(start_marker) {
+        let rest = &text[start + start_marker.len()..];
+        let end = rest.find("\n## ").unwrap_or(rest.len());
+        let extracted = rest[..end].trim();
+        if !extracted.is_empty() {
+            return Some(extracted);
+        }
+    }
+
+    let first_heading = text.find("\n## ")?;
+    let body_start = first_heading + 1;
+    let verdict_pos = text.find("\n## Verdict")?;
+    if body_start >= verdict_pos {
+        return None;
+    }
+    let objections = &text[body_start..verdict_pos].trim();
+    if objections.is_empty() {
+        None
+    } else {
+        Some(objections)
+    }
 }
 
 /// Detect constitution violations in the reviewer's response.
@@ -1059,6 +1079,61 @@ accept"#;
         assert_eq!(phase_name(1), "Cross-Examination");
         assert_eq!(phase_name(2), "Deliberation");
         assert_eq!(phase_name(10), "Deliberation");
+    }
+
+    #[test]
+    fn suggested_revisions_fallback_extracts_body_before_verdict() {
+        let text = "Now I have the full picture.
+
+## Plan Review
+
+### Highest Risks
+
+**1. Clap won't read DERRICK_VERSION automatically (critical)**
+
+The plan targets main.rs but the version is in commands/mod.rs.
+
+### Constitution Contradictions
+
+**1. Missing test coverage plan (hard violation)**
+
+No tests planned for new code.
+
+## Verdict
+
+revise
+";
+        let result = suggested_revisions(text);
+        assert!(result.is_some(), "should fall back to body before verdict");
+        let body = result.unwrap();
+        assert!(body.contains("Highest Risks"));
+        assert!(body.contains("Constitution Contradictions"));
+        assert!(!body.contains("## Verdict"));
+    }
+
+    #[test]
+    fn suggested_revisions_prefers_explicit_section() {
+        let text = "Preamble.
+
+## Highest Risks
+
+Irrelevant.
+
+## Suggested revisions
+
+only this
+
+## Verdict
+
+revise
+";
+        assert_eq!(suggested_revisions(text), Some("only this"));
+    }
+
+    #[test]
+    fn suggested_revisions_no_sections_returns_none() {
+        let text = "blah\n## Verdict\naccept";
+        assert_eq!(suggested_revisions(text), None);
     }
 
     #[test]
