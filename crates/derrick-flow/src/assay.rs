@@ -523,17 +523,38 @@ pub async fn run_reviewer_rounds(
                 }));
             }
             "reject" => {
-                write_verdict_transcript(&transcript_path, "reject", round)?;
-                print_round_summaries(&round_summaries);
-                return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
-                    role: reviewer_role.to_owned(),
-                    verdict: "reject".to_owned(),
-                    verdict_path: verdict_path.clone(),
-                    tokens_in: tokens_in_total,
-                    tokens_out: tokens_out_total,
-                    constitution_violations: Vec::new(),
-                    rounds_used: round as u32,
-                }));
+                if round < max_rounds {
+                    let objections = suggested_revisions(&response_text).ok_or_else(|| {
+                        RunError::StepFailed {
+                            id: step.id().to_owned(),
+                            message: "could not parse suggested revisions from reviewer response"
+                                .to_owned(),
+                        }
+                    })?;
+                    let replan_delta = replan_from_objections(
+                        config,
+                        &hosts,
+                        working_dir,
+                        state,
+                        &format!(
+                            "The reviewer REJECTED the plan. Revisions must address:\n\n{objections}"
+                        ),
+                    )
+                    .await?;
+                    write_rebuttal_transcript(&transcript_path, &replan_delta)?;
+                } else {
+                    write_verdict_transcript(&transcript_path, "reject", round)?;
+                    print_round_summaries(&round_summaries);
+                    return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
+                        role: reviewer_role.to_owned(),
+                        verdict: "reject".to_owned(),
+                        verdict_path: verdict_path.clone(),
+                        tokens_in: tokens_in_total,
+                        tokens_out: tokens_out_total,
+                        constitution_violations: Vec::new(),
+                        rounds_used: round as u32,
+                    }));
+                }
             }
             "revise" if round < max_rounds => {
                 let objections =
