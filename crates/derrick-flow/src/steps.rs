@@ -5,7 +5,11 @@ use std::sync::Arc;
 use chrono::Utc;
 use derrick_config::{PipelineStep, Runner as StepRunner};
 use derrick_models::AuthStore;
+use derrick_substrate::{
+    BatchName, Hand, HandId, HandKind, NewTicket, TicketFilter, TicketId, TicketState,
+};
 use derrick_tools::{CopilotToolPermission, HostRegistry, HostRequest};
+use owo_colors::OwoColorize;
 
 use crate::assay::{self, ExecutionState};
 use crate::clarify;
@@ -32,7 +36,16 @@ pub async fn execute_step(
             execute_role_step(config, &hosts, repo_root, step, state, &log_path).await
         }
         (None, Some(StepRunner::Derrick)) => {
-            execute_derrick_step(config, hosts.clone(), repo_root, step, state, &log_path).await
+            execute_derrick_step(
+                config,
+                substrate,
+                hosts.clone(),
+                repo_root,
+                step,
+                state,
+                &log_path,
+            )
+            .await
         }
         (None, Some(StepRunner::Human)) => execute_human_step(config, step, state, &log_path),
         (None, Some(StepRunner::Bash)) => {
@@ -192,6 +205,7 @@ async fn execute_role_step(
 
 async fn execute_derrick_step(
     config: &derrick_config::Config,
+    substrate: &dyn derrick_substrate::Substrate,
     hosts: Arc<HostRegistry>,
     repo_root: &std::path::Path,
     step: &PipelineStep,
@@ -237,18 +251,299 @@ async fn execute_derrick_step(
             )
             .await
         }
-        "bridge" => {
-            write_log(log_path, "bridge skipped in solo mode\n", "")?;
-            Ok(StepExecution::skipped())
-        }
-        "foreman" => {
-            write_log(log_path, "foreman skipped in solo mode\n", "")?;
-            Ok(StepExecution::skipped())
-        }
+        "bridge" => execute_bridge(config, substrate, state, repo_root, log_path).await,
+        "foreman" => execute_foreman(config, substrate, state, repo_root, log_path).await,
         other => Err(RunError::Config(format!(
             "runner derrick is not supported for step {other:?} in T010"
         ))),
     }
+}
+
+async fn execute_bridge(
+    config: &derrick_config::Config,
+    substrate: &dyn derrick_substrate::Substrate,
+    state: &ExecutionState,
+    repo_root: &Path,
+    log_path: &Path,
+) -> Result<StepExecution, RunError> {
+    let wd = working_dir(state, repo_root);
+    let feature_dir = match state.feature_dir.as_ref() {
+        Some(fd) => fd.clone(),
+        None => {
+            write_log(log_path, "", "bridge: no feature_dir, skipping\n")?;
+            return Ok(StepExecution::skipped());
+        }
+    };
+    let tasks_path = wd.join(feature_dir).join("tasks.md");
+    let tasks_text = match std::fs::read_to_string(&tasks_path) {
+        Ok(t) => t,
+        Err(_) => {
+            write_log(log_path, "", "bridge: no tasks.md found, skipping\n")?;
+            return Ok(StepExecution::skipped());
+        }
+    };
+
+    let batch_name_str = step_batch_name(config, state, "bridge")
+        .unwrap_or_else(|| format!("br-{}", &state.run_id[..8].to_ascii_lowercase()));
+    let batch_name = BatchName::new(&batch_name_str).map_err(|e| {
+        RunError::Config(format!(
+            "bridge: invalid batch name {batch_name_str:?}: {e}"
+        ))
+    })?;
+
+    substrate
+        .create_batch(batch_name.clone())
+        .await
+        .map_err(|e| RunError::StepFailed {
+            id: "bridge".to_owned(),
+            message: format!("create_batch: {e}"),
+        })?;
+
+    let tickets = parse_tasks_from_markdown(&tasks_text, &batch_name)?;
+
+    let created = tickets.len();
+    for ticket in &tickets {
+        write_log(
+            log_path,
+            &format!("creating ticket {}: {}\n", ticket.id, ticket.title),
+            "",
+        )?;
+        if let Err(e) = substrate.create_ticket(ticket.clone()).await {
+            write_log(log_path, &format!("  failed: {e}\n"), "")?;
+        }
+    }
+
+    let prefix = config.site().prefix();
+    eprintln!();
+    eprintln!(
+        "  {} {}",
+        "\u{250c}".bright_cyan(),
+        "Bridge — Ticket Plan".bold()
+    );
+    for ticket in &tickets {
+        let ordinal = ticket.ordinal.unwrap_or(0);
+        eprintln!(
+            "  {} {} {} {}",
+            "\u{2502}".bright_cyan(),
+            format!("{}-{}", prefix, ordinal + 1).cyan(),
+            "\u{2192}".cyan(),
+            ticket.title.bright_white()
+        );
+    }
+    eprintln!(
+        "  {} {} {} {} {}",
+        "\u{2514}".bright_cyan(),
+        format!("{created} tickets").cyan(),
+        "created in batch".bright_black(),
+        batch_name.as_str().cyan(),
+        "\u{2713}".green()
+    );
+    eprintln!();
+
+    let mut artifacts = vec![];
+    if let Ok(rel) = crate::io::relative_to_root(repo_root, tasks_path) {
+        artifacts.push(rel);
+    }
+    Ok(StepExecution::success(artifacts))
+}
+
+async fn execute_foreman(
+    config: &derrick_config::Config,
+    substrate: &dyn derrick_substrate::Substrate,
+    state: &ExecutionState,
+    _repo_root: &Path,
+    log_path: &Path,
+) -> Result<StepExecution, RunError> {
+    if state.feature_dir.is_none() {
+        write_log(log_path, "", "foreman: no feature_dir, skipping\n")?;
+        return Ok(StepExecution::skipped());
+    }
+    let batch_name_str = step_batch_name(config, state, "foreman")
+        .unwrap_or_else(|| format!("br-{}", &state.run_id[..8].to_ascii_lowercase()));
+    let batch_name = match BatchName::new(&batch_name_str) {
+        Ok(b) => b,
+        Err(_) => {
+            write_log(log_path, "foreman: no valid batch name, skipping\n", "")?;
+            return Ok(StepExecution::skipped());
+        }
+    };
+
+    let hand_id = HandId::new(format!("{}-hand", config.site().prefix()))
+        .map_err(|e| RunError::Config(format!("foreman: invalid hand id: {e}")))?;
+
+    let _ = substrate
+        .register_hand(Hand {
+            id: hand_id.clone(),
+            kind: HandKind::Human,
+            last_seen: None,
+        })
+        .await;
+
+    let filter = TicketFilter {
+        batch: Some(batch_name.clone()),
+        state: Some(TicketState::Ready),
+        ..TicketFilter::default()
+    };
+    let ready = substrate
+        .list_tickets(filter)
+        .await
+        .map_err(|e| RunError::StepFailed {
+            id: "foreman".to_owned(),
+            message: format!("list_tickets: {e}"),
+        })?;
+
+    if ready.is_empty() {
+        write_log(log_path, "foreman: no ready tickets to dispatch\n", "")?;
+        eprintln!(
+            "  {} {}",
+            "\u{2502}".bright_cyan(),
+            "No ready tickets to dispatch.".bright_black()
+        );
+        return Ok(StepExecution::success(vec![]));
+    }
+
+    let prefix = config.site().prefix();
+    eprintln!();
+    eprintln!(
+        "  {} {}",
+        "\u{250c}".bright_cyan(),
+        "Foreman — Dispatch".bold()
+    );
+
+    let mut dispatched = 0u32;
+    for ticket in &ready {
+        let ordinal = ticket.ordinal.unwrap_or(0);
+        match substrate.assign_to_hand(&ticket.id, &hand_id).await {
+            Ok(_) => {
+                dispatched += 1;
+                eprintln!(
+                    "  {} {} {} {} {} {}",
+                    "\u{2502}".bright_cyan(),
+                    format!("{}-{}", prefix, ordinal + 1).cyan(),
+                    "\u{2192}".cyan(),
+                    "dispatched to".bright_black(),
+                    hand_id.as_str().cyan(),
+                    "\u{2713}".green()
+                );
+            }
+            Err(e) => {
+                write_log(
+                    log_path,
+                    &format!("dispatch failed for ticket {}: {e}\n", ticket.id),
+                    "",
+                )?;
+                eprintln!(
+                    "  {} {} {} {}",
+                    "\u{2502}".bright_cyan(),
+                    format!("{}-{}", prefix, ordinal + 1).cyan(),
+                    "\u{2192}".cyan(),
+                    format!("dispatch failed: {e}").yellow()
+                );
+            }
+        }
+    }
+
+    let remaining = ready.len().saturating_sub(dispatched as usize);
+    let remaining_str = if remaining > 0 {
+        format!(" ({} remaining)", remaining)
+            .bright_black()
+            .to_string()
+    } else {
+        String::new()
+    };
+    eprintln!(
+        "  {} {} {}",
+        "\u{2514}".bright_cyan(),
+        format!("{dispatched} dispatched").cyan(),
+        remaining_str,
+    );
+    eprintln!();
+
+    write_log(
+        log_path,
+        &format!("foreman: {dispatched} dispatched, {remaining} remaining\n"),
+        "",
+    )?;
+    Ok(StepExecution::success(vec![]))
+}
+
+fn parse_tasks_from_markdown(
+    text: &str,
+    batch: &derrick_substrate::BatchName,
+) -> Result<Vec<NewTicket>, RunError> {
+    let prefix = "tsk";
+    let mut tickets = Vec::new();
+    let mut ordinal = 0u32;
+    let mut body_lines = Vec::new();
+    let mut current_title: Option<String> = None;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(title) = trimmed
+            .strip_prefix("## ")
+            .or_else(|| trimmed.strip_prefix("# "))
+        {
+            if let Some(prev_title) = current_title.take() {
+                let body = body_lines.join("\n").trim().to_owned();
+                let id_str = format!("{prefix}-{ordinal}");
+                if let Ok(id) = TicketId::new(&id_str) {
+                    tickets.push(
+                        NewTicket::new(
+                            id,
+                            Some(batch.clone()),
+                            Some(ordinal),
+                            prev_title,
+                            body,
+                            vec!["task".to_owned()],
+                        )
+                        .map_err(|e| RunError::StepFailed {
+                            id: "bridge".to_owned(),
+                            message: format!("invalid ticket {id_str}: {e}"),
+                        })?,
+                    );
+                }
+                ordinal += 1;
+            }
+            current_title = Some(title.to_owned());
+            body_lines.clear();
+        } else if current_title.is_some() {
+            body_lines.push(line.to_owned());
+        }
+    }
+
+    if let Some(title) = current_title {
+        let body = body_lines.join("\n").trim().to_owned();
+        let id_str = format!("{prefix}-{ordinal}");
+        if let Ok(id) = TicketId::new(&id_str) {
+            tickets.push(
+                NewTicket::new(
+                    id,
+                    Some(batch.clone()),
+                    Some(ordinal),
+                    title,
+                    body,
+                    vec!["task".to_owned()],
+                )
+                .map_err(|e| RunError::StepFailed {
+                    id: "bridge".to_owned(),
+                    message: format!("invalid ticket: {e}"),
+                })?,
+            );
+        }
+    }
+
+    Ok(tickets)
+}
+
+fn step_batch_name(
+    config: &derrick_config::Config,
+    state: &ExecutionState,
+    step_id: &str,
+) -> Option<String> {
+    let step = config.pipeline().iter().find(|s| s.id() == step_id)?;
+    let raw = step.batch()?;
+    let ctx = template_context(config, state).ok()?;
+    render_template(raw, &ctx).ok()
 }
 
 fn execute_human_step(

@@ -35,7 +35,7 @@ tools:
     on_split: reject
   substrate:
     backend: native
-    mode: solo
+    mode: crew
   copilot:
     enabled: false
     agent_identity: derrick-hand
@@ -68,6 +68,13 @@ pipeline:
     role: drafter
     host: claude
     command: "/speckit.tasks"
+  - id: bridge
+    runner: derrick
+    inputs: ["{{feature_dir}}/tasks.md"]
+    batch: "{{run_id}}"
+  - id: foreman
+    runner: derrick
+    executor_role: executor
 guardrails:
   constitution_path: CONTRIBUTING.md
   forbid_paths: []
