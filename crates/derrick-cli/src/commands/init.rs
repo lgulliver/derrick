@@ -100,9 +100,15 @@ fn resolve_options(
     args: InitArgs,
 ) -> Result<Option<ResolvedInitOptions>, crate::CliError> {
     let mode = args.mode;
-    let site_name = args.site.unwrap_or_else(|| default_site_name(repo_root));
+    let site_name = args
+        .site
+        .clone()
+        .unwrap_or_else(|| default_site_name(repo_root));
     let default_prefix_value = default_prefix(&site_name);
-    let prefix = args.prefix.unwrap_or_else(|| default_prefix_value.clone());
+    let prefix = args
+        .prefix
+        .clone()
+        .unwrap_or_else(|| default_prefix_value.clone());
     let constitution = constitution_mode(&args);
 
     if should_run_wizard(&args) {
@@ -289,10 +295,70 @@ fn override_plan_yaml(
     plan: &mut derrick_adopt::AdoptionPlan,
     resolved: &ResolvedInitOptions,
 ) -> Result<(), crate::CliError> {
-    if let Some(write) = plan.writes.iter_mut().find(|write| write.path == Path::new("derrick.yaml")) {
-        write.content = apply_config_overrides(&write.content, resolved)?;
+    if let Some(write) = plan
+        .writes
+        .iter_mut()
+        .find(|write| write.path == Path::new("derrick.yaml"))
+    {
+        write.content = apply_text_overrides(&write.content, resolved);
     }
     Ok(())
+}
+
+fn apply_text_overrides(rendered: &str, resolved: &ResolvedInitOptions) -> String {
+    let mut lines = rendered
+        .lines()
+        .map(std::borrow::ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if let Some(mode_index) = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("mode: "))
+    {
+        let indent = lines[mode_index]
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .collect::<String>();
+        lines[mode_index] = format!("{indent}mode: {}", resolved.mode.as_str());
+    }
+
+    if let Some(roles_start) = lines.iter().position(|line| line == "roles:") {
+        let mut roles_end = roles_start + 1;
+        while roles_end < lines.len() {
+            let line = &lines[roles_end];
+            if line.is_empty() || line.starts_with("  ") {
+                roles_end += 1;
+            } else {
+                break;
+            }
+        }
+        let replacement = vec![
+            "roles:".to_owned(),
+            format!("  proposer: {}", resolved.roles.proposer),
+            format!("  drafter: {}", resolved.roles.drafter),
+            format!("  reviewer: {}", resolved.roles.reviewer),
+            format!("  executor: {}", resolved.roles.executor),
+            format!("  summariser: {}", resolved.roles.summariser),
+        ];
+        lines.splice(roles_start..roles_end, replacement);
+    }
+
+    if matches!(resolved.mode, crate::commands::InitMode::Crew)
+        && !lines.iter().any(|line| line.trim() == "- id: bridge")
+    {
+        if let Some(guardrails_index) = lines.iter().position(|line| line == "guardrails:") {
+            let addition = vec![
+                "  - id: bridge".to_owned(),
+                "    runner: derrick".to_owned(),
+                "  - id: foreman".to_owned(),
+                "    runner: derrick".to_owned(),
+                "    executor_role: executor".to_owned(),
+            ];
+            lines.splice(guardrails_index..guardrails_index, addition);
+        }
+    }
+
+    format!("{}\n", lines.join("\n"))
 }
 
 fn apply_config_overrides(
@@ -331,7 +397,10 @@ fn nested_mapping<'a>(
 ) -> Result<&'a mut serde_yaml::Mapping, crate::CliError> {
     let key_value = serde_yaml::Value::String(key.to_owned());
     if !mapping.contains_key(&key_value) {
-        mapping.insert(key_value.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        mapping.insert(
+            key_value.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
     }
     mapping
         .get_mut(&key_value)
@@ -392,9 +461,7 @@ fn yaml_step(entries: &[(&str, &str)]) -> serde_yaml::Value {
 
 fn step_id(step: &serde_yaml::Value) -> Option<&str> {
     let id_key = serde_yaml::Value::String("id".to_owned());
-    step.as_mapping()?
-        .get(&id_key)?
-        .as_str()
+    step.as_mapping()?.get(&id_key)?.as_str()
 }
 
 fn validate_role_bindings(
@@ -415,10 +482,22 @@ pub(crate) fn recommended_role_bindings(
     mode: crate::commands::InitMode,
     available_models: &BTreeMap<String, &'static str>,
 ) -> RoleBindings {
-    let claude_opus = pick_model(available_models, &["claude-opus", "claude-sonnet", "codex-gpt5", "copilot"]);
-    let claude_sonnet = pick_model(available_models, &["claude-sonnet", "claude-opus", "codex-gpt5", "copilot"]);
-    let codex = pick_model(available_models, &["codex-gpt5", "copilot", "claude-sonnet", "claude-opus"]);
-    let copilot = pick_model(available_models, &["copilot", "codex-gpt5", "claude-sonnet", "claude-opus"]);
+    let claude_opus = pick_model(
+        available_models,
+        &["claude-opus", "claude-sonnet", "codex-gpt5", "copilot"],
+    );
+    let claude_sonnet = pick_model(
+        available_models,
+        &["claude-sonnet", "claude-opus", "codex-gpt5", "copilot"],
+    );
+    let codex = pick_model(
+        available_models,
+        &["codex-gpt5", "copilot", "claude-sonnet", "claude-opus"],
+    );
+    let copilot = pick_model(
+        available_models,
+        &["copilot", "codex-gpt5", "claude-sonnet", "claude-opus"],
+    );
 
     match mode {
         crate::commands::InitMode::Solo => RoleBindings {
@@ -468,7 +547,10 @@ pub(crate) fn available_model_ids() -> BTreeMap<String, &'static str> {
 pub(crate) fn available_model_choices() -> Vec<(&'static str, &'static str)> {
     vec![
         ("claude-opus", "good for architecture and planning"),
-        ("claude-sonnet", "balanced default for drafting and summaries"),
+        (
+            "claude-sonnet",
+            "balanced default for drafting and summaries",
+        ),
         ("codex-gpt5", "good for code review and implementation"),
         ("copilot", "good for Copilot CLI workflows"),
     ]
@@ -658,7 +740,8 @@ mod tests {
 
     #[test]
     fn crew_recommendations_use_differentiated_roles() {
-        let roles = recommended_role_bindings(crate::commands::InitMode::Crew, &available_model_ids());
+        let roles =
+            recommended_role_bindings(crate::commands::InitMode::Crew, &available_model_ids());
         assert_eq!(roles.proposer, "claude-opus");
         assert_eq!(roles.drafter, "claude-sonnet");
         assert_eq!(roles.reviewer, "codex-gpt5");

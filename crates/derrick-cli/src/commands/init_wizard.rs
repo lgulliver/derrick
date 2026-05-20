@@ -4,7 +4,9 @@ use std::path::Path;
 
 use derrick_adopt::ConstitutionMode;
 
-use crate::commands::init::{available_model_ids, recommended_role_bindings, validate_prefix, RoleBindings};
+use crate::commands::init::{
+    available_model_ids, recommended_role_bindings, validate_prefix, RoleBindings,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiConfigurationStyle {
@@ -133,7 +135,10 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
                 &input.available_models,
                 role_defaults.executor.as_str(),
             )?;
-            (AiConfigurationStyle::OneTool, RoleBindings::one_model(selected))
+            (
+                AiConfigurationStyle::OneTool,
+                RoleBindings::one_model(selected),
+            )
         }
         _ => {
             let proposer = prompt_model(
@@ -192,10 +197,8 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
             1 => ConstitutionMode::Stub,
             _ => ConstitutionMode::FromDocs,
         };
-        let append_agents_md = prompt_yes_no(
-            "Append AGENTS.md guidance?",
-            input.default_append_agents_md,
-        )?;
+        let append_agents_md =
+            prompt_yes_no("Append AGENTS.md guidance?", input.default_append_agents_md)?;
         let no_hooks = if input.no_hooks_forced {
             true
         } else {
@@ -284,7 +287,10 @@ fn print_preview(
     println!("  Execution: {}", roles.executor);
     println!("  Summary: {}", roles.summariser);
     if !greenfield {
-        println!("Constitution handling: {}", constitution_label(constitution));
+        println!(
+            "Constitution handling: {}",
+            constitution_label(constitution)
+        );
         println!(
             "AGENTS.md guidance: {}",
             if append_agents_md { "yes" } else { "no" }
@@ -315,12 +321,10 @@ fn print_preview(
 
 fn prompt_text(prompt: &str, default: &str) -> Result<String, crate::CliError> {
     print!("{prompt} [{default}]: ");
-    io::stdout()
-        .flush()
-        .map_err(|error| crate::CliError::Io {
-            path: "<stdout>".into(),
-            source: error,
-        })?;
+    io::stdout().flush().map_err(|error| crate::CliError::Io {
+        path: "<stdout>".into(),
+        source: error,
+    })?;
     let mut buffer = String::new();
     let read = io::stdin()
         .read_line(&mut buffer)
@@ -343,12 +347,10 @@ fn prompt_yes_no(prompt: &str, default_yes: bool) -> Result<bool, crate::CliErro
     let default_label = if default_yes { "Y/n" } else { "y/N" };
     loop {
         print!("{prompt} [{default_label}]: ");
-        io::stdout()
-            .flush()
-            .map_err(|error| crate::CliError::Io {
-                path: "<stdout>".into(),
-                source: error,
-            })?;
+        io::stdout().flush().map_err(|error| crate::CliError::Io {
+            path: "<stdout>".into(),
+            source: error,
+        })?;
         let mut buffer = String::new();
         let read = io::stdin()
             .read_line(&mut buffer)
@@ -385,12 +387,10 @@ fn prompt_select(
     loop {
         let default_display = default_index + 1;
         print!("Select [default {default_display}]: ");
-        io::stdout()
-            .flush()
-            .map_err(|error| crate::CliError::Io {
-                path: "<stdout>".into(),
-                source: error,
-            })?;
+        io::stdout().flush().map_err(|error| crate::CliError::Io {
+            path: "<stdout>".into(),
+            source: error,
+        })?;
         let mut buffer = String::new();
         let read = io::stdin()
             .read_line(&mut buffer)
@@ -427,7 +427,11 @@ fn prompt_model(
     for (index, (id, description)) in models.iter().enumerate() {
         println!("  {}. {} ({})", index + 1, id, description);
     }
-    let selected = prompt_select("Choose model", &models.iter().map(|(id, _)| *id).collect::<Vec<_>>(), default)?;
+    let selected = prompt_select(
+        "Choose model",
+        &models.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        default,
+    )?;
     Ok(models[selected].0.to_owned())
 }
 
@@ -458,6 +462,7 @@ fn constitution_to_index(mode: ConstitutionMode) -> usize {
         ConstitutionMode::Reference => 0,
         ConstitutionMode::Stub => 1,
         ConstitutionMode::FromDocs => 2,
+        _ => 0,
     }
 }
 
@@ -466,6 +471,7 @@ fn constitution_label(mode: ConstitutionMode) -> &'static str {
         ConstitutionMode::Reference => "Reference existing docs",
         ConstitutionMode::Stub => "Generate stub",
         ConstitutionMode::FromDocs => "Draft from docs",
+        _ => "Reference existing docs",
     }
 }
 
@@ -483,9 +489,18 @@ mod tests {
 
     #[test]
     fn ai_style_labels_match_preview_text() {
-        assert_eq!(AiConfigurationStyle::Recommended.label(), "recommended defaults");
-        assert_eq!(AiConfigurationStyle::OneTool.label(), "one tool for all stages");
-        assert_eq!(AiConfigurationStyle::PerStage.label(), "per-stage configuration");
+        assert_eq!(
+            AiConfigurationStyle::Recommended.label(),
+            "recommended defaults"
+        );
+        assert_eq!(
+            AiConfigurationStyle::OneTool.label(),
+            "one tool for all stages"
+        );
+        assert_eq!(
+            AiConfigurationStyle::PerStage.label(),
+            "per-stage configuration"
+        );
     }
 
     #[test]

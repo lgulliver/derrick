@@ -134,7 +134,11 @@ pub(crate) struct InitArgs {
     pub(crate) greenfield: bool,
     #[arg(long, value_enum, default_value_t = InitMode::Solo)]
     pub(crate) mode: InitMode,
-    #[arg(long = "site", alias = "project", help = "Derrick project name written to site.name")]
+    #[arg(
+        long = "site",
+        alias = "project",
+        help = "Derrick project name written to site.name"
+    )]
     pub(crate) site: Option<String>,
     #[arg(long)]
     pub(crate) prefix: Option<String>,

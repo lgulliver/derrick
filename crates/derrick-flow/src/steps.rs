@@ -386,6 +386,7 @@ async fn execute_foreman(
         HandKind::Copilot => "copilot",
         HandKind::Claude => "claude",
         HandKind::Human => "human",
+        _ => "human",
     };
     let hand_id = HandId::new(format!("{}-{hand_suffix}-hand", config.site().prefix()))
         .map_err(|e| RunError::Config(format!("foreman: invalid hand id: {e}")))?;
