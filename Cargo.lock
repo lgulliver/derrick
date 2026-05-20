@@ -572,6 +572,7 @@ dependencies = [
  "derrick-substrate",
  "derrick-substrate-native",
  "derrick-tools",
+ "futures",
  "owo-colors",
  "rusqlite",
  "serde",

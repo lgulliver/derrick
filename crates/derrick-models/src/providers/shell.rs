@@ -2,7 +2,7 @@ use std::process::Stdio;
 
 use async_trait::async_trait;
 use derrick_config::ModelDef;
-use futures::stream;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -61,23 +61,31 @@ impl Model for ShellModel {
     }
 
     async fn stream(&self, request: CompletionRequest) -> Result<CompletionStream, ModelError> {
-        let timeout = request.timeout;
-        let events = match time::timeout(timeout, self.invoke(request)).await {
-            Ok(result) => result?,
-            Err(_) => {
-                return Err(ModelError::Timeout {
-                    provider: PROVIDER.to_owned(),
-                    seconds: timeout.as_secs(),
-                });
-            }
-        };
+        self.stream_inner(request).await
+    }
 
-        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<crate::CompletionResponse, ModelError> {
+        let timeout = request.timeout;
+        let stream = self.stream(request).await?;
+        match time::timeout(timeout, consume_stream(stream)).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(ModelError::Timeout {
+                provider: PROVIDER.to_owned(),
+                seconds: timeout.as_secs(),
+            }),
+        }
     }
 }
 
 impl ShellModel {
-    async fn invoke(&self, request: CompletionRequest) -> Result<Vec<CompletionEvent>, ModelError> {
+    async fn stream_inner(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionStream, ModelError> {
         let mut command = Command::new(&self.argv[0]);
         command
             .args(&self.argv[1..])
@@ -122,30 +130,128 @@ impl ShellModel {
             })?;
         drop(stdin);
 
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|error| ModelError::Provider {
-                provider: PROVIDER.to_owned(),
-                message: format!("failed waiting for shell provider: {error}"),
-                retryable: true,
-            })?;
+        let stdout = child.stdout.take().ok_or_else(|| ModelError::Provider {
+            provider: PROVIDER.to_owned(),
+            message: "failed to open shell provider stdout".to_owned(),
+            retryable: false,
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| ModelError::Provider {
+            provider: PROVIDER.to_owned(),
+            message: "failed to open shell provider stderr".to_owned(),
+            retryable: false,
+        })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ModelError::Provider {
-                provider: PROVIDER.to_owned(),
-                message: format!(
-                    "process exited with {}; stderr: {}",
-                    output.status,
-                    stderr.trim()
-                ),
-                retryable: false,
-            });
-        }
-
-        parse_stdout(&output.stdout)
+        Ok(Box::pin(stream_output(stdout, stderr, child)))
     }
+}
+
+async fn consume_stream(
+    mut stream: CompletionStream,
+) -> Result<crate::CompletionResponse, ModelError> {
+    let mut text = String::new();
+    let mut tokens_in = 0u32;
+    let mut tokens_out = 0u32;
+    let mut finish_reason = FinishReason::Stop;
+    while let Some(event) = stream.next().await {
+        match event? {
+            CompletionEvent::Content { text: chunk } => text.push_str(&chunk),
+            CompletionEvent::End {
+                tokens_in: ti,
+                tokens_out: to,
+                finish_reason: fr,
+            } => {
+                tokens_in = ti;
+                tokens_out = to;
+                finish_reason = fr;
+            }
+        }
+    }
+    Ok(crate::CompletionResponse {
+        text,
+        tokens_in,
+        tokens_out,
+        finish_reason,
+    })
+}
+
+fn stream_output(
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    mut child: tokio::process::Child,
+) -> CompletionStream {
+    let (tx, rx) = futures::channel::mpsc::channel::<Result<CompletionEvent, ModelError>>(64);
+    tokio::task::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let mut buf = Vec::<u8>::new();
+        let mut saw_end = false;
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    // read_until includes the \n delimiter, preserving any \r
+                    let raw = String::from_utf8_lossy(&buf);
+                    if let Some(text) = raw.strip_prefix(CONTENT_PREFIX) {
+                        let _ = tx.clone().try_send(Ok(CompletionEvent::Content {
+                            text: text.to_owned(),
+                        }));
+                    } else if let Some(meta) = raw.strip_prefix(META_PREFIX) {
+                        saw_end = true;
+                        let _ = child.wait().await;
+                        let event = parse_meta(meta.trim_end_matches(['\r', '\n']));
+                        let _ = tx.clone().try_send(event);
+                        break;
+                    } else {
+                        let _ = tx.clone().try_send(Ok(CompletionEvent::Content {
+                            text: raw.to_string(),
+                        }));
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.clone().try_send(Err(ModelError::Provider {
+                        provider: PROVIDER.to_owned(),
+                        message: format!("failed reading shell provider stdout: {e}"),
+                        retryable: true,
+                    }));
+                    return;
+                }
+            }
+        }
+        // Wait for process exit and check exit code
+        let status = child.wait().await;
+        if let Ok(status) = status {
+            if !status.success() {
+                let stderr = tokio::io::BufReader::new(stderr);
+                let stderr_text = stderr
+                    .lines()
+                    .next_line()
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let msg = if stderr_text.is_empty() {
+                    format!("process exited with {status}")
+                } else {
+                    format!("process exited with {status}; stderr: {stderr_text}")
+                };
+                let _ = tx.clone().try_send(Err(ModelError::Provider {
+                    provider: PROVIDER.to_owned(),
+                    message: msg,
+                    retryable: false,
+                }));
+                return;
+            }
+        }
+        if !saw_end {
+            let _ = tx.clone().try_send(Ok(CompletionEvent::End {
+                tokens_in: 0,
+                tokens_out: 0,
+                finish_reason: FinishReason::Error,
+            }));
+        }
+    });
+    Box::pin(rx)
 }
 
 #[derive(Serialize)]
@@ -195,42 +301,6 @@ fn argv_from_model_def(model_def: &ModelDef) -> Result<Vec<String>, ModelError> 
     } else {
         Ok(argv)
     }
-}
-
-fn parse_stdout(stdout: &[u8]) -> Result<Vec<CompletionEvent>, ModelError> {
-    let output = String::from_utf8_lossy(stdout);
-    let mut events = Vec::new();
-    let mut saw_end = false;
-
-    for line in split_inclusive_lines(&output) {
-        if let Some(text) = line.strip_prefix(CONTENT_PREFIX) {
-            events.push(CompletionEvent::Content {
-                text: text.to_owned(),
-            });
-        } else if let Some(meta) = line.strip_prefix(META_PREFIX) {
-            events.push(parse_meta(meta.trim_end_matches(['\r', '\n']))?);
-            saw_end = true;
-            break;
-        } else {
-            events.push(CompletionEvent::Content {
-                text: line.to_owned(),
-            });
-        }
-    }
-
-    if !saw_end {
-        events.push(CompletionEvent::End {
-            tokens_in: 0,
-            tokens_out: 0,
-            finish_reason: FinishReason::Error,
-        });
-    }
-
-    Ok(events)
-}
-
-fn split_inclusive_lines(output: &str) -> impl Iterator<Item = &str> {
-    output.split_inclusive('\n')
 }
 
 fn parse_meta(meta: &str) -> Result<CompletionEvent, ModelError> {

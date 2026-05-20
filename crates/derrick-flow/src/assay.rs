@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use derrick_config::{Config, OnSplit};
-use derrick_models::AuthStore;
+use derrick_models::{AuthStore, CompletionEvent};
 use derrick_tools::{HostRegistry, HostRequest};
+use futures::StreamExt;
 use owo_colors::OwoColorize;
 use tokio::sync::Semaphore;
 
@@ -388,14 +389,66 @@ pub async fn run_reviewer_rounds(
             )
             .await?;
             let name = model.name().to_owned();
-            let response = model
-                .complete(completion_request(
+            let mut response_text = String::new();
+            let mut tokens_in = 0u32;
+            let mut tokens_out = 0u32;
+            let mut stream = model
+                .stream(completion_request(
                     prompt,
                     Some(cached),
                     Some(assay_system_prompt(config)),
                 ))
                 .await?;
-            (response.text, name, response.tokens_in, response.tokens_out)
+            eprint!(
+                "\r  {} {} {} (round {}/{})...  ",
+                step.id().cyan(),
+                "\u{2696}".cyan(),
+                phase.cyan(),
+                round,
+                max_rounds,
+            );
+            std::io::stderr().flush().ok();
+            while let Some(event) = stream.next().await {
+                match event.map_err(|e| RunError::StepFailed {
+                    id: step.id().to_owned(),
+                    message: e.to_string(),
+                })? {
+                    CompletionEvent::Content { text } => {
+                        response_text.push_str(&text);
+                        // Show a compact preview of the last line
+                        if text.contains('\n') {
+                            let last = text.rsplit('\n').next().unwrap_or("").trim();
+                            if !last.is_empty() {
+                                let preview = if last.len() > 60 {
+                                    format!("{}...", &last[..57])
+                                } else {
+                                    last.to_owned()
+                                };
+                                eprint!(
+                                    "\r  {} {} {} (round {}/{}) {}  ",
+                                    step.id().cyan(),
+                                    "\u{2696}".cyan(),
+                                    phase.cyan(),
+                                    round,
+                                    max_rounds,
+                                    preview.bright_black()
+                                );
+                                std::io::stderr().flush().ok();
+                            }
+                        }
+                    }
+                    CompletionEvent::End {
+                        tokens_in: ti,
+                        tokens_out: to,
+                        ..
+                    } => {
+                        tokens_in = ti;
+                        tokens_out = to;
+                    }
+                    _ => {}
+                }
+            }
+            (response_text, name, tokens_in, tokens_out)
         };
         tokens_in_total = tokens_in_total.saturating_add(round_tokens_in);
         tokens_out_total = tokens_out_total.saturating_add(round_tokens_out);
