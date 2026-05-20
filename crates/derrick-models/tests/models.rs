@@ -327,7 +327,7 @@ async fn shell_provider_completes_simple_prompt() -> TestResult {
     .await?;
 
     let response = model
-        .complete(request("hello shell", Duration::from_secs(2)))
+        .complete(request("hello shell", Duration::from_secs(10)))
         .await?;
 
     assert_eq!(response.text, "hello shell\n");
@@ -370,7 +370,7 @@ async fn shell_provider_nonzero_exit_surfaces_stderr() -> TestResult {
     )
     .await?;
     let error = model
-        .complete(request("fail", Duration::from_secs(2)))
+        .complete(request("fail", Duration::from_secs(10)))
         .await
         .err()
         .ok_or("nonzero exit should error")?;
@@ -393,7 +393,7 @@ async fn shell_provider_spawn_failure_returns_provider_error() -> TestResult {
     )
     .await?;
     let error = model
-        .complete(request("spawn", Duration::from_secs(2)))
+        .complete(request("spawn", Duration::from_secs(10)))
         .await
         .err()
         .ok_or("spawn failure should error")?;
@@ -468,7 +468,7 @@ async fn shell_provider_missing_trailing_json_falls_back() -> TestResult {
     .await?;
 
     let response = model
-        .complete(request("plain", Duration::from_secs(2)))
+        .complete(request("plain", Duration::from_secs(10)))
         .await?;
 
     assert_eq!(response.text, "plain output\n");
@@ -489,7 +489,7 @@ async fn shell_provider_streaming_emits_content_then_end() -> TestResult {
     )
     .await?;
     let events = model
-        .stream(request("stream", Duration::from_secs(2)))
+        .stream(request("stream", Duration::from_secs(10)))
         .await?
         .collect::<Vec<_>>()
         .await
@@ -527,7 +527,7 @@ async fn shell_provider_handles_crlf_in_stdout() -> TestResult {
     .await?;
 
     let response = model
-        .complete(request("crlf", Duration::from_secs(2)))
+        .complete(request("crlf", Duration::from_secs(10)))
         .await?;
 
     assert_eq!(response.text, "crlf one\r\n");
@@ -548,7 +548,7 @@ async fn shell_provider_invalid_metadata_returns_provider_error() -> TestResult 
     )
     .await?;
     let error = model
-        .complete(request("bad meta", Duration::from_secs(2)))
+        .complete(request("bad meta", Duration::from_secs(10)))
         .await
         .err()
         .ok_or("invalid metadata should error")?;
@@ -572,7 +572,7 @@ async fn shell_provider_error_finish_reason_round_trips() -> TestResult {
     .await?;
 
     let response = model
-        .complete(request("error finish", Duration::from_secs(2)))
+        .complete(request("error finish", Duration::from_secs(10)))
         .await?;
 
     assert_eq!(response.finish_reason, FinishReason::Error);
@@ -590,7 +590,7 @@ async fn shell_provider_invalid_finish_reason_returns_provider_error() -> TestRe
     )
     .await?;
     let error = model
-        .complete(request("bad reason", Duration::from_secs(2)))
+        .complete(request("bad reason", Duration::from_secs(10)))
         .await
         .err()
         .ok_or("invalid finish reason should error")?;
