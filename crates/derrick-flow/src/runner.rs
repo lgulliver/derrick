@@ -382,6 +382,72 @@ impl Runner {
                                         eprintln!();
                                     }
                                 }
+                            } else if step.id() == "analyze" {
+                                let p = wd.join(feature_dir).join("analyze.md");
+                                if p.exists() {
+                                    if let Ok(c) = std::fs::read_to_string(&p) {
+                                        let line_count = c.lines().count();
+                                        let lines: Vec<&str> = c
+                                            .lines()
+                                            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                                            .collect();
+                                        eprintln!();
+                                        eprintln!(
+                                            "  {} {}",
+                                            "\u{250c}".bright_cyan(),
+                                            "Analysis".bold()
+                                        );
+                                        if let Some(first) = lines.first() {
+                                            let preview = summarize_line(first, 80);
+                                            eprintln!(
+                                                "  {} {}",
+                                                "\u{2502}".bright_cyan(),
+                                                preview.bright_white()
+                                            );
+                                        }
+                                        eprintln!(
+                                            "  {} {} {} {}",
+                                            "\u{2514}".bright_cyan(),
+                                            format!("{line_count} lines").cyan(),
+                                            "\u{2192}".cyan(),
+                                            p.display().to_string().cyan()
+                                        );
+                                        eprintln!();
+                                    }
+                                }
+                            } else if step.id() == "tasks" {
+                                let p = wd.join(feature_dir).join("tasks.md");
+                                if p.exists() {
+                                    if let Ok(c) = std::fs::read_to_string(&p) {
+                                        let line_count = c.lines().count();
+                                        let task_count = c
+                                            .lines()
+                                            .filter(|l| {
+                                                l.trim().starts_with("## ")
+                                                    || l.trim().starts_with("- [")
+                                            })
+                                            .count();
+                                        eprintln!();
+                                        eprintln!(
+                                            "  {} {}",
+                                            "\u{250c}".bright_cyan(),
+                                            "Task Plan".bold()
+                                        );
+                                        eprintln!(
+                                            "  {} {} {} {}",
+                                            "\u{2502}".bright_cyan(),
+                                            format!("{task_count} tasks").cyan(),
+                                            format!("({line_count} lines)").bright_black(),
+                                            "\u{2192}".cyan(),
+                                        );
+                                        eprintln!(
+                                            "  {} {}",
+                                            "\u{2514}".bright_cyan(),
+                                            p.display().to_string().cyan()
+                                        );
+                                        eprintln!();
+                                    }
+                                }
                             } else if step.id() == "specify" {
                                 let p = wd.join(feature_dir).join("spec.md");
                                 if p.exists() {
