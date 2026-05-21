@@ -381,7 +381,7 @@ async fn execute_foreman(
             "role `{executor_role}` points to model `{model_name}`, but no model named `{model_name}` exists under `models`"
         ))
     })?;
-    let hand_kind = hand_kind_for_executor(model_name, model.provider());
+    let hand_kind = hand_kind_for_executor(model.provider(), model.cli());
     let hand_suffix = match hand_kind {
         HandKind::Copilot => "copilot",
         HandKind::Claude => "claude",
@@ -564,10 +564,10 @@ fn parse_tasks_from_markdown(
     Ok(tickets)
 }
 
-fn hand_kind_for_executor(model_name: &str, provider: &str) -> HandKind {
-    if provider == "copilot-cli" || model_name == "copilot" {
+fn hand_kind_for_executor(provider: &str, cli: Option<&str>) -> HandKind {
+    if provider == "copilot-cli" || cli.is_some_and(|value| value.starts_with("copilot")) {
         HandKind::Copilot
-    } else if model_name.starts_with("claude") || provider == "anthropic" {
+    } else if provider == "anthropic" || cli.is_some_and(|value| value.starts_with("claude")) {
         HandKind::Claude
     } else {
         HandKind::Human
@@ -839,5 +839,23 @@ Update version_matches_cargo_pkg_version.
         let text = "## Task one\nBody\n";
         let tickets = super::parse_tasks_from_markdown(text, &batch, "abc").unwrap();
         assert_eq!(tickets[0].id.as_str(), "abc-0");
+    }
+
+    #[test]
+    fn hand_kind_uses_provider_for_copilot() {
+        let kind = super::hand_kind_for_executor("copilot-cli", None);
+        assert_eq!(kind, derrick_substrate::HandKind::Copilot);
+    }
+
+    #[test]
+    fn hand_kind_uses_cli_for_shell_copilot() {
+        let kind = super::hand_kind_for_executor("shell", Some("copilot"));
+        assert_eq!(kind, derrick_substrate::HandKind::Copilot);
+    }
+
+    #[test]
+    fn hand_kind_uses_provider_for_claude() {
+        let kind = super::hand_kind_for_executor("anthropic", None);
+        assert_eq!(kind, derrick_substrate::HandKind::Claude);
     }
 }

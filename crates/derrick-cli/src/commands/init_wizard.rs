@@ -427,12 +427,34 @@ fn prompt_model(
     for (index, (id, description)) in models.iter().enumerate() {
         println!("  {}. {} ({})", index + 1, id, description);
     }
-    let selected = prompt_select(
-        "Choose model",
-        &models.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-        default,
-    )?;
-    Ok(models[selected].0.to_owned())
+    loop {
+        let default_display = default + 1;
+        print!("Select [default {default_display}]: ");
+        io::stdout().flush().map_err(|error| crate::CliError::Io {
+            path: "<stdout>".into(),
+            source: error,
+        })?;
+        let mut buffer = String::new();
+        let read = io::stdin()
+            .read_line(&mut buffer)
+            .map_err(|error| crate::CliError::Io {
+                path: "<stdin>".into(),
+                source: error,
+            })?;
+        if read == 0 {
+            return Ok(models[default].0.to_owned());
+        }
+        let trimmed = buffer.trim();
+        if trimmed.is_empty() {
+            return Ok(models[default].0.to_owned());
+        }
+        if let Ok(choice) = trimmed.parse::<usize>() {
+            if (1..=models.len()).contains(&choice) {
+                return Ok(models[choice - 1].0.to_owned());
+            }
+        }
+        eprintln!("Please enter a number between 1 and {}.", models.len());
+    }
 }
 
 fn validate_role_models(

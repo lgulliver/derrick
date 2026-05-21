@@ -150,7 +150,7 @@ pub(crate) struct InitArgs {
     pub(crate) wizard: bool,
     #[arg(long, conflicts_with = "wizard")]
     pub(crate) no_wizard: bool,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "wizard")]
     pub(crate) dry_run: bool,
     #[arg(long)]
     pub(crate) no_hooks: bool,
