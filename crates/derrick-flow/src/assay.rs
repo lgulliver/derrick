@@ -945,18 +945,53 @@ pub fn suggested_revisions(text: &str) -> Option<&str> {
         }
     }
 
-    let first_heading = text.find("\n## ")?;
-    let body_start = first_heading + 1;
-    let verdict_pos = text.find("\n## Verdict")?;
-    if body_start >= verdict_pos {
-        return None;
+    let verdict_pos = find_h2(text, "## Verdict")?;
+
+    if let Some(first_heading) = find_first_h2(text) {
+        if first_heading < verdict_pos {
+            let objections = &text[first_heading..verdict_pos].trim();
+            if !objections.is_empty() {
+                return Some(objections);
+            }
+        }
     }
-    let objections = &text[body_start..verdict_pos].trim();
-    if objections.is_empty() {
+
+    let objections = text[..verdict_pos].trim();
+    if objections.is_empty() || !has_structured_revision_content(objections) {
         None
     } else {
         Some(objections)
     }
+}
+
+fn find_h2(text: &str, heading: &str) -> Option<usize> {
+    if text.starts_with(heading) {
+        Some(0)
+    } else {
+        text.find(&format!("\n{heading}")).map(|pos| pos + 1)
+    }
+}
+
+fn find_first_h2(text: &str) -> Option<usize> {
+    if text.starts_with("## ") {
+        Some(0)
+    } else {
+        text.find("\n## ").map(|pos| pos + 1)
+    }
+}
+
+fn has_structured_revision_content(text: &str) -> bool {
+    text.lines().map(str::trim).any(|line| {
+        if line.is_empty() {
+            return false;
+        }
+        line.starts_with("## ")
+            || line.starts_with("### ")
+            || line.starts_with("**")
+            || line.starts_with("- ")
+            || line.starts_with("* ")
+            || line.chars().next().is_some_and(|c| c.is_ascii_digit())
+    })
 }
 
 /// Detect constitution violations in the reviewer's response.
@@ -1440,6 +1475,32 @@ revise
     fn suggested_revisions_no_sections_returns_none() {
         let text = "blah\n## Verdict\naccept";
         assert_eq!(suggested_revisions(text), None);
+    }
+
+    #[test]
+    fn suggested_revisions_fallback_extracts_structured_prose_without_headings() {
+        let text = r#"The "latest plan changes" claim that all three concerns are resolved does not match the actual file content at lines 1–107.
+
+**Concern: All three previous objections remain unresolved in the canonical plan body (HIGH)**
+
+The file was not edited.
+
+- Step 3 and Step 6 still use `cargo run`
+- Steps 1 and 4 still have no version pin
+
+## Verdict
+
+revise
+"#;
+        let result = suggested_revisions(text);
+        assert!(
+            result.is_some(),
+            "should extract structured prose before verdict"
+        );
+        let body = result.unwrap();
+        assert!(body.contains("Concern: All three previous objections remain unresolved"));
+        assert!(body.contains("Step 3 and Step 6 still use `cargo run`"));
+        assert!(!body.contains("## Verdict"));
     }
 
     #[test]

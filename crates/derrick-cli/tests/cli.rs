@@ -32,6 +32,15 @@ fn greenfield(dir: &Path) -> TestResult<assert_cmd::assert::Assert> {
         .assert())
 }
 
+fn adopted_init(dir: &Path) -> TestResult<assert_cmd::assert::Assert> {
+    fs::write(dir.join("AGENTS.md"), "# Agents\n")?;
+    fs::write(dir.join("CLAUDE.md"), "# Claude\n")?;
+    Ok(derrick()?
+        .current_dir(dir)
+        .args(["init", "--site", "test", "--prefix", "tst"])
+        .assert())
+}
+
 fn mock_path(dir: &Path, names: &[&str]) -> TestResult<PathBuf> {
     let bin_dir = dir.join("bin");
     fs::create_dir(&bin_dir)?;
@@ -432,6 +441,76 @@ fn doctor_passes_after_successful_init() -> TestResult {
         .clone();
 
     assert_not_contains(&output, "fail")?;
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_claude_hooks_as_installed_when_markers_exist() -> TestResult {
+    let dir = repo()?;
+    adopted_init(dir.path())?.success();
+    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "Claude Code hooks")?;
+    assert_contains(&output, "derrick D29 scrub and caveman hooks are installed")?;
+    Ok(())
+}
+
+#[test]
+fn doctor_warns_when_claude_hook_markers_are_missing() -> TestResult {
+    let dir = repo()?;
+    adopted_init(dir.path())?.success();
+    fs::write(dir.path().join(".claude/settings.json"), "{\"hooks\":{}}")?;
+    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "warn")?;
+    assert_contains(&output, "Claude Code hooks")?;
+    assert_contains(
+        &output,
+        "derrick D29 scrub and caveman hooks are missing from .claude/settings.json",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn doctor_warns_when_claude_settings_json_is_invalid() -> TestResult {
+    let dir = repo()?;
+    adopted_init(dir.path())?.success();
+    fs::write(dir.path().join(".claude/settings.json"), "{")?;
+    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+
+    let output = derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .arg("doctor")
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(&output, "warn")?;
+    assert_contains(&output, "Claude Code hooks")?;
+    assert_contains(&output, ".claude/settings.json is not valid JSON")?;
     Ok(())
 }
 

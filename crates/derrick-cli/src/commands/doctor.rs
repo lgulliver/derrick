@@ -5,6 +5,7 @@ use derrick_config::{Config, Host, ModelDef, Runner, StackBackendKind, Substrate
 use derrick_models::AuthStore;
 use derrick_substrate_native::NativeSubstrate;
 use serde_json::json;
+use serde_json::Value;
 
 use crate::commands::DoctorArgs;
 use crate::exit_code::CliExitCode;
@@ -109,8 +110,8 @@ async fn add_config_driven_checks(repo_root: &Path, config: &Config, checks: &mu
         )),
     }
 
-    checks.push(hook_check(repo_root, ".claude/settings.json"));
-    checks.push(hook_check(repo_root, ".codex/instructions.md"));
+    checks.push(claude_hook_check(repo_root));
+    checks.push(codex_instructions_check(repo_root));
 
     if config.tools().git().stacking().backend() != StackBackendKind::None {
         checks.push(binary_check("gh", true));
@@ -465,17 +466,99 @@ fn binary_check(binary: &str, required: bool) -> Check {
     }
 }
 
-fn hook_check(repo_root: &Path, relative: &str) -> Check {
+fn claude_hook_check(repo_root: &Path) -> Check {
+    let relative = ".claude/settings.json";
+    let path = repo_root.join(relative);
+    if !path.exists() {
+        return Check::warn(
+            "Claude Code hooks",
+            format!("{relative} is missing"),
+            "run `derrick init` to install D29 Claude scrub and caveman hooks",
+        );
+    }
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            return Check::warn(
+                "Claude Code hooks",
+                format!("failed to read {relative}: {error}"),
+                format!("inspect {relative} and rerun `derrick doctor`"),
+            );
+        }
+    };
+    let settings: Value = match serde_json::from_str(&content) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return Check::warn(
+                "Claude Code hooks",
+                format!("{relative} is not valid JSON: {error}"),
+                format!("repair {relative} and rerun `derrick doctor`"),
+            );
+        }
+    };
+
+    let scrub_installed = hook_stage_contains_description(&settings, "PreToolUse", "derrick:scrub");
+    let caveman_installed =
+        hook_stage_contains_description(&settings, "PostToolUse", "derrick:caveman");
+
+    match (scrub_installed, caveman_installed) {
+        (true, true) => Check::pass(
+            "Claude Code hooks",
+            "derrick D29 scrub and caveman hooks are installed",
+        ),
+        (false, false) => Check::warn(
+            "Claude Code hooks",
+            "derrick D29 scrub and caveman hooks are missing from .claude/settings.json",
+            "run `derrick init` to install the missing Claude hook entries",
+        ),
+        (false, true) => Check::warn(
+            "Claude Code hooks",
+            "derrick D29 scrub hook is missing from .claude/settings.json",
+            "run `derrick init` to reinstall the missing PreToolUse scrub hook",
+        ),
+        (true, false) => Check::warn(
+            "Claude Code hooks",
+            "derrick D29 caveman hook is missing from .claude/settings.json",
+            "run `derrick init` to reinstall the missing PostToolUse caveman hook",
+        ),
+    }
+}
+
+fn codex_instructions_check(repo_root: &Path) -> Check {
+    let relative = ".codex/instructions.md";
     let path = repo_root.join(relative);
     if path.exists() {
-        Check::pass(format!("D29 hook {relative}"), "hook file is present")
+        Check::pass(
+            "Codex instructions",
+            "Codex host context file is present (D34 hook installation is deferred)",
+        )
     } else {
         Check::warn(
-            format!("D29 hook {relative}"),
-            "host hook file is not installed in T008",
-            "wait for T011 derrick-adopt to install scrub and caveman hooks",
+            "Codex instructions",
+            format!("{relative} is missing"),
+            "run `derrick init` to install the Codex context file; Codex hooks remain deferred per D34",
         )
     }
+}
+
+fn hook_stage_contains_description(settings: &Value, stage: &str, description: &str) -> bool {
+    settings
+        .get("hooks")
+        .and_then(|hooks| hooks.get(stage))
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.get("description").and_then(Value::as_str) == Some(description)
+                        })
+                    })
+            })
+        })
 }
 
 fn print_checks(checks: &[Check], format: OutputFormat) -> Result<(), crate::CliError> {
