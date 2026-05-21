@@ -216,6 +216,25 @@ tools:
 pipeline:
 "#;
 
+    const YAML_MID_CREW: &str = r#"
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: 1
+  substrate:
+    backend: native
+    mode: crew
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+pipeline:
+"#;
+
     const YAML_TAIL: &str = r#"
 guardrails:
   constitution_path: .specify/memory/constitution.md
@@ -234,6 +253,13 @@ state:
     fn yaml(pipeline: &str, reviewer_cli: &Path) -> String {
         format!(
             "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  shell-reviewer:\n    provider: shell\n    cli: \"{}\"\n    model: shell-reviewer\nroles:\n  drafter: shell-reviewer\n  proposer: shell-reviewer\n  reviewer: shell-reviewer{YAML_MID}{pipeline}{YAML_TAIL}",
+            reviewer_cli.display()
+        )
+    }
+
+    fn yaml_crew(pipeline: &str, reviewer_cli: &Path) -> String {
+        format!(
+            "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  shell-reviewer:\n    provider: shell\n    cli: \"{}\"\n    model: shell-reviewer\nroles:\n  drafter: shell-reviewer\n  proposer: shell-reviewer\n  reviewer: shell-reviewer\n  executor: shell-reviewer{YAML_MID_CREW}{pipeline}{YAML_TAIL}",
             reviewer_cli.display()
         )
     }
@@ -335,7 +361,7 @@ fi
     #[tokio::test]
     async fn bridge_creates_tickets_from_tasks() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (dir, runner) = runner(&yaml(
+        let (dir, runner) = runner(&yaml_crew(
             &add_feature_pipeline_with_dispatch(),
             &reviewer.path().join("reviewer"),
         ))

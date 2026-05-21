@@ -214,27 +214,7 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
     )?;
     let force = prompt_yes_no("Enable force overwrite?", input.default_force)?;
 
-    print_preview(
-        &input,
-        greenfield,
-        &site_name,
-        &prefix,
-        mode,
-        ai_style,
-        &roles,
-        constitution,
-        append_agents_md,
-        no_hooks,
-        vscode,
-        jetbrains,
-        force,
-    );
-
-    if !prompt_yes_no("Proceed with these changes?", true)? {
-        return Ok(WizardSelection::Cancelled);
-    }
-
-    Ok(WizardSelection::Proceed(WizardOutput {
+    let output = WizardOutput {
         greenfield,
         site_name,
         prefix,
@@ -247,30 +227,38 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         vscode,
         jetbrains,
         force,
-    }))
+    };
+
+    print_preview(&input, &output);
+
+    if !prompt_yes_no("Proceed with these changes?", true)? {
+        return Ok(WizardSelection::Cancelled);
+    }
+
+    Ok(WizardSelection::Proceed(output))
 }
 
-fn print_preview(
-    input: &WizardInput<'_>,
-    greenfield: bool,
-    site_name: &str,
-    prefix: &str,
-    mode: crate::commands::InitMode,
-    ai_style: AiConfigurationStyle,
-    roles: &RoleBindings,
-    constitution: ConstitutionMode,
-    append_agents_md: bool,
-    no_hooks: bool,
-    vscode: bool,
-    jetbrains: bool,
-    force: bool,
-) {
+fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
+    let WizardOutput {
+        greenfield,
+        site_name,
+        prefix,
+        mode,
+        ai_style,
+        roles,
+        constitution,
+        append_agents_md,
+        no_hooks,
+        vscode,
+        jetbrains,
+        force,
+    } = output;
     println!();
     println!("Preview");
     println!("Repository path: {}", input.repo_root.display());
     println!(
         "Init type: {}",
-        if greenfield {
+        if *greenfield {
             "fresh project"
         } else {
             "existing repo"
@@ -289,20 +277,20 @@ fn print_preview(
     if !greenfield {
         println!(
             "Constitution handling: {}",
-            constitution_label(constitution)
+            constitution_label(*constitution)
         );
         println!(
             "AGENTS.md guidance: {}",
-            if append_agents_md { "yes" } else { "no" }
+            if *append_agents_md { "yes" } else { "no" }
         );
     }
     println!(
         "Codex instructions/hooks enabled: {}",
-        if no_hooks { "no" } else { "yes" }
+        if *no_hooks { "no" } else { "yes" }
     );
-    println!("VS Code config: {}", yes_no(vscode));
-    println!("JetBrains config: {}", yes_no(jetbrains));
-    println!("Force overwrite enabled: {}", yes_no(force));
+    println!("VS Code config: {}", yes_no(*vscode));
+    println!("JetBrains config: {}", yes_no(*jetbrains));
+    println!("Force overwrite enabled: {}", yes_no(*force));
     println!("Expected writes:");
     println!("  - derrick.yaml");
     println!("  - .derrick/.gitignore");
@@ -310,10 +298,10 @@ fn print_preview(
     if !no_hooks {
         println!("  - .codex/instructions.md");
     }
-    if vscode {
+    if *vscode {
         println!("  - .vscode/tasks.json");
     }
-    if jetbrains {
+    if *jetbrains {
         println!("  - .idea/runConfigurations/*.xml");
     }
     println!();
