@@ -479,6 +479,23 @@ dependencies = [
 [[package]]
 name = "derrick-assay"
 version = "0.0.0"
+dependencies = [
+ "chrono",
+ "derrick-config",
+ "derrick-models",
+ "derrick-substrate",
+ "derrick-tools",
+ "futures",
+ "owo-colors",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "derrick-caveman"
@@ -574,6 +591,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "derrick-assay",
  "derrick-config",
  "derrick-models",
  "derrick-substrate",

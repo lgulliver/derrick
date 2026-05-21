@@ -1,3 +1,5 @@
+//! Filesystem and config-hash helpers shared by the pipeline runner and assay.
+
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -181,7 +183,7 @@ pub fn default_run_id() -> String {
     Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
 }
 
-pub(crate) const FEATURE_JSON: &str = ".specify/feature.json";
+pub const FEATURE_JSON: &str = ".specify/feature.json";
 
 pub fn read_feature_dir(repo_root: &Path) -> Result<std::path::PathBuf, RunError> {
     use serde_json::Value;
@@ -198,17 +200,4 @@ pub fn read_feature_dir(repo_root: &Path) -> Result<std::path::PathBuf, RunError
             RunError::Config(".specify/feature.json missing feature_directory".to_owned())
         })?;
     Ok(std::path::PathBuf::from(feature_dir))
-}
-
-pub fn prior_feature_dir(steps: &[crate::manifest::ManifestStep]) -> Option<std::path::PathBuf> {
-    steps
-        .iter()
-        .flat_map(|step| step.artifacts.iter())
-        .find_map(|artifact| {
-            if artifact.ends_with("spec.md") {
-                artifact.parent().map(std::path::Path::to_path_buf)
-            } else {
-                None
-            }
-        })
 }

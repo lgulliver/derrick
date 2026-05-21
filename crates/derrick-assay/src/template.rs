@@ -1,3 +1,5 @@
+//! `{{...}}` template variable renderer for pipeline step fields.
+
 use crate::types::RunError;
 
 pub struct TemplateContext {

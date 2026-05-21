@@ -3,7 +3,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{RunError, RunStatus, StepRecord, StepStatus};
+use derrick_assay::types::{RunError, RunStatus, StepRecord, StepStatus};
 
 #[derive(Deserialize, Serialize)]
 pub struct RunManifest {
@@ -75,7 +75,7 @@ pub struct FlagsManifest {
 }
 
 impl FlagsManifest {
-    pub fn from_input(input: &crate::types::PipelineInput) -> Self {
+    pub fn from_input(input: &derrick_assay::types::PipelineInput) -> Self {
         Self {
             skip: input.skip.iter().cloned().collect(),
             unskip: input.unskip.iter().cloned().collect(),
@@ -137,6 +137,19 @@ pub fn read_manifest(path: &Path) -> Result<RunManifest, RunError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+pub fn prior_feature_dir(steps: &[ManifestStep]) -> Option<std::path::PathBuf> {
+    steps
+        .iter()
+        .flat_map(|step| step.artifacts.iter())
+        .find_map(|artifact| {
+            if artifact.ends_with("spec.md") {
+                artifact.parent().map(std::path::Path::to_path_buf)
+            } else {
+                None
+            }
+        })
 }
 
 pub fn write_manifest(path: &Path, manifest: &RunManifest) -> Result<(), RunError> {

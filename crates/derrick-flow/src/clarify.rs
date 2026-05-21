@@ -5,8 +5,8 @@ use std::sync::Arc;
 use derrick_tools::{HostRegistry, HostRequest};
 use owo_colors::OwoColorize;
 
-use crate::io::{append_log, relative_to_root, write_log};
-use crate::types::{RunError, StepExecution};
+use derrick_assay::io::{append_log, relative_to_root, write_log};
+use derrick_assay::types::{RunError, StepExecution};
 
 pub struct ClarifyQuestion {
     pub question: String,

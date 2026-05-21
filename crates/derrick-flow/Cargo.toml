@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chrono = { workspace = true }
+derrick-assay = { path = "../derrick-assay" }
 derrick-config = { path = "../derrick-config" }
 derrick-models = { path = "../derrick-models" }
 derrick-substrate = { path = "../derrick-substrate" }
