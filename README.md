@@ -194,10 +194,10 @@ derrick gain
 
 | Provider key | Backend | Auth |
 |---|---|---|
-| `anthropic` | Anthropic Messages API (streaming SSE) | `ANTHROPIC_API_KEY` env or `~/.derrick/credentials.yaml` |
-| `openai-cli` | `codex exec` CLI (default) or OpenAI Chat API when `OPENAI_API_KEY` is set | CLI: host-delegated; API: `OPENAI_API_KEY` or credentials file |
+| `anthropic` | Anthropic Messages API (streaming SSE) | `ANTHROPIC_API_KEY` env (or AuthStore override) |
+| `openai-cli` | `codex exec` CLI (default) or OpenAI Chat API when `OPENAI_API_KEY` is set | CLI: host-delegated; API: `OPENAI_API_KEY` env (or `openai-cli` AuthStore override) |
 | `opencode` | `opencode run` CLI | Host-delegated (opencode manages its own auth) |
-| `shell` | Any shell command via `cli:` field in `derrick.yaml` | Host-delegated |
+| `shell` | Any shell command via `cli:` field in `derrick.yaml` | N/A (caller-managed) |
 
 **Hosts** (for pipeline steps that invoke a CLI tool to run a slash command):
 `claude` · `codex` · `copilot` · `opencode`

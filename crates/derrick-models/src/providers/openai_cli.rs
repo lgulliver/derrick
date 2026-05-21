@@ -3,7 +3,7 @@
 //! * CLI mode (default): shells to the `codex` binary (or whatever
 //!   `model_def.cli()` points at) and streams its stdout. This is the
 //!   path used when the host already owns the OpenAI session.
-//! * Direct API mode: if `OPENAI_API_KEY` or an `openai` AuthStore
+//! * Direct API mode: if `OPENAI_API_KEY` or an `openai-cli` AuthStore
 //!   override is present *and* the model definition has no `cli`
 //!   override (i.e. the caller did not explicitly force CLI), we POST
 //!   to `https://api.openai.com/v1/chat/completions` with SSE.

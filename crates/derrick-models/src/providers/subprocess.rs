@@ -9,6 +9,7 @@
 
 use std::process::Stdio;
 
+use futures::SinkExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::warn;
@@ -91,23 +92,79 @@ fn stream_output(
     let (tx, rx) = futures::channel::mpsc::channel::<Result<CompletionEvent, ModelError>>(64);
     tokio::task::spawn(async move {
         use tokio::io::AsyncBufReadExt;
-        let mut reader = tokio::io::BufReader::new(stdout);
-        let mut buf = Vec::<u8>::new();
-        loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    let text = String::from_utf8_lossy(&buf).to_string();
-                    let _ = tx.clone().try_send(Ok(CompletionEvent::Content { text }));
+        const STDERR_LIMIT: usize = 8 * 1024;
+
+        let mut tx = tx;
+        let mut stdout_reader = tokio::io::BufReader::new(stdout);
+        let mut stderr_reader = tokio::io::BufReader::new(stderr);
+        let mut stdout_buf = Vec::<u8>::new();
+        let mut stderr_buf = Vec::<u8>::new();
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+        let mut stderr_text = String::new();
+        let mut stderr_truncated = false;
+
+        while stdout_open || stderr_open {
+            tokio::select! {
+                result = stdout_reader.read_until(b'\n', &mut stdout_buf), if stdout_open => {
+                    match result {
+                        Ok(0) => stdout_open = false,
+                        Ok(_) => {
+                            let text = String::from_utf8_lossy(&stdout_buf).to_string();
+                            stdout_buf.clear();
+                            if tx.send(Ok(CompletionEvent::Content { text })).await.is_err() {
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = tx.send(Err(ModelError::Provider {
+                                provider: provider.to_owned(),
+                                message: format!("failed reading subprocess stdout: {error}"),
+                                retryable: true,
+                            })).await;
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                            return;
+                        }
+                    }
                 }
-                Err(error) => {
-                    let _ = tx.clone().try_send(Err(ModelError::Provider {
-                        provider: provider.to_owned(),
-                        message: format!("failed reading subprocess stdout: {error}"),
-                        retryable: true,
-                    }));
-                    return;
+                result = stderr_reader.read_until(b'\n', &mut stderr_buf), if stderr_open => {
+                    match result {
+                        Ok(0) => stderr_open = false,
+                        Ok(_) => {
+                            if stderr_text.len() < STDERR_LIMIT {
+                                let chunk = String::from_utf8_lossy(&stderr_buf);
+                                let remaining = STDERR_LIMIT - stderr_text.len();
+                                if chunk.len() <= remaining {
+                                    stderr_text.push_str(&chunk);
+                                } else {
+                                    let cut = chunk
+                                        .char_indices()
+                                        .map(|(idx, _)| idx)
+                                        .take_while(|idx| *idx <= remaining)
+                                        .last()
+                                        .unwrap_or(0);
+                                    stderr_text.push_str(&chunk[..cut]);
+                                    stderr_truncated = true;
+                                }
+                            } else {
+                                stderr_truncated = true;
+                            }
+                            stderr_buf.clear();
+                        }
+                        Err(error) => {
+                            let _ = tx.send(Err(ModelError::Provider {
+                                provider: provider.to_owned(),
+                                message: format!("failed reading subprocess stderr: {error}"),
+                                retryable: true,
+                            })).await;
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                            return;
+                        }
+                    }
                 }
             }
         }
@@ -115,39 +172,44 @@ fn stream_output(
         let status = child.wait().await;
         match status {
             Ok(status) if status.success() => {
-                let _ = tx.clone().try_send(Ok(CompletionEvent::End {
-                    tokens_in: 0,
-                    tokens_out: 0,
-                    finish_reason: FinishReason::Stop,
-                }));
+                let _ = tx
+                    .send(Ok(CompletionEvent::End {
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        finish_reason: FinishReason::Stop,
+                    }))
+                    .await;
             }
             Ok(status) => {
-                let stderr_reader = tokio::io::BufReader::new(stderr);
-                let stderr_text = stderr_reader
-                    .lines()
-                    .next_line()
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                let msg = if stderr_text.is_empty() {
+                let mut stderr_summary = stderr_text.trim().to_owned();
+                if stderr_truncated {
+                    if !stderr_summary.is_empty() {
+                        stderr_summary.push(' ');
+                    }
+                    stderr_summary.push_str("(stderr truncated)");
+                }
+                let msg = if stderr_summary.is_empty() {
                     format!("process exited with {status}")
                 } else {
-                    format!("process exited with {status}; stderr: {stderr_text}")
+                    format!("process exited with {status}; stderr: {stderr_summary}")
                 };
-                let _ = tx.clone().try_send(Err(ModelError::Provider {
-                    provider: provider.to_owned(),
-                    message: msg,
-                    retryable: false,
-                }));
+                let _ = tx
+                    .send(Err(ModelError::Provider {
+                        provider: provider.to_owned(),
+                        message: msg,
+                        retryable: false,
+                    }))
+                    .await;
             }
             Err(error) => {
                 warn!(target: "derrick_models::subprocess", "wait failed: {error}");
-                let _ = tx.clone().try_send(Ok(CompletionEvent::End {
-                    tokens_in: 0,
-                    tokens_out: 0,
-                    finish_reason: FinishReason::Error,
-                }));
+                let _ = tx
+                    .send(Ok(CompletionEvent::End {
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        finish_reason: FinishReason::Error,
+                    }))
+                    .await;
             }
         }
     });

@@ -2,10 +2,7 @@
 //!
 //! Shells to the `opencode` CLI (default `opencode run`). `opencode`
 //! does not currently expose a stable HTTP surface, so this provider
-//! always uses the CLI path. The `OPENCODE_API_KEY` credential is
-//! looked up via D12 conventions but is treated as host-managed —
-//! we do not embed it in the spawned command (the host CLI reads it
-//! from its own environment).
+//! always uses the CLI path and treats auth as host-managed.
 
 use async_trait::async_trait;
 use derrick_config::ModelDef;
