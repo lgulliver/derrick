@@ -1,21 +1,21 @@
 //! Pipeline orchestrator. See DESIGN.md §5.3 and §10.
 
-mod assay;
 mod clarify;
 mod code_review;
-mod io;
 mod manifest;
-mod names;
 mod runner;
 mod spinner;
 mod steps;
-mod template;
 
 pub use code_review::{run_code_review, CodeReviewOutcome};
+pub use derrick_assay::types::{
+    PipelineInput, RunError, RunOutcome, RunStatus, StepRecord, StepStatus,
+};
 pub use runner::Runner;
-pub use types::{PipelineInput, RunError, RunOutcome, RunStatus, StepRecord, StepStatus};
 
-pub mod types;
+/// Re-export of the shared run/step types crate. Existing call sites that
+/// reach for `derrick_flow::types::*` keep working.
+pub use derrick_assay::types;
 
 #[cfg(test)]
 mod code_review_tests {
@@ -48,13 +48,13 @@ mod code_review_tests {
 
 #[cfg(test)]
 mod tests {
-    use crate::assay::ExecutionState;
     use crate::clarify::{
         parse_clarify_questions, render_clarify_markdown, select_clarify_answer, ClarifyQuestion,
     };
-    use crate::io::FEATURE_JSON;
     use crate::runner::Runner;
-    use crate::types::{PipelineInput, RunError, RunStatus, StepStatus};
+    use derrick_assay::io::FEATURE_JSON;
+    use derrick_assay::types::{PipelineInput, RunError, RunStatus, StepStatus};
+    use derrick_assay::ExecutionState;
     use derrick_config::Config;
     use derrick_substrate_native::{NativeConfig, NativeSubstrate};
     use derrick_tools::{HostAdapter, HostError, HostRegistry, HostRequest, HostResponse};
@@ -1018,8 +1018,8 @@ fi
     #[test]
     fn resume_step_index_retries_failed_step() {
         use crate::manifest::{ManifestStep, RunManifest};
-        use crate::types::StepStatus;
         use chrono::Utc;
+        use derrick_assay::types::StepStatus;
 
         let mut manifest = RunManifest::new(
             "test".into(),
@@ -1059,8 +1059,8 @@ fi
     #[test]
     fn resume_step_index_skips_to_next_on_success() {
         use crate::manifest::{ManifestStep, RunManifest};
-        use crate::types::StepStatus;
         use chrono::Utc;
+        use derrick_assay::types::StepStatus;
 
         let mut manifest = RunManifest::new(
             "test".into(),
@@ -1090,8 +1090,8 @@ fi
     #[test]
     fn resume_step_index_retries_halted_step() {
         use crate::manifest::{ManifestStep, RunManifest};
-        use crate::types::StepStatus;
         use chrono::Utc;
+        use derrick_assay::types::StepStatus;
 
         let mut manifest = RunManifest::new(
             "test".into(),
@@ -1423,7 +1423,7 @@ state:
 
     #[test]
     fn suggested_revisions_extracts_only_block() -> TestResult {
-        use crate::assay::suggested_revisions;
+        use derrick_assay::suggested_revisions;
         let text = "## Risks\nfull prompt\n## Suggested revisions\nonly this\n## Verdict\nrevise\n";
         assert_eq!(suggested_revisions(text), Some("only this"));
         Ok(())

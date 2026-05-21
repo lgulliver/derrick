@@ -1,3 +1,5 @@
+//! Shared pipeline run/step types — see DESIGN.md §5.3 and §10.
+
 use chrono::{DateTime, Utc};
 use derrick_models::ModelError;
 use derrick_substrate::SubstrateError;
@@ -8,16 +10,16 @@ use thiserror::Error;
 
 /// Internal result of executing a single pipeline step.
 /// Used internally by step implementations before conversion to `StepRecord`.
-pub(crate) struct StepExecution {
-    pub(crate) status: StepStatus,
-    pub(crate) artifacts: Vec<PathBuf>,
-    pub(crate) tokens_in: u32,
-    pub(crate) tokens_out: u32,
-    pub(crate) message: String,
+pub struct StepExecution {
+    pub status: StepStatus,
+    pub artifacts: Vec<PathBuf>,
+    pub tokens_in: u32,
+    pub tokens_out: u32,
+    pub message: String,
 }
 
 impl StepExecution {
-    pub(crate) fn success(artifacts: Vec<PathBuf>) -> Self {
+    pub fn success(artifacts: Vec<PathBuf>) -> Self {
         Self {
             status: StepStatus::Success,
             artifacts,
@@ -27,7 +29,7 @@ impl StepExecution {
         }
     }
 
-    pub(crate) fn skipped() -> Self {
+    pub fn skipped() -> Self {
         Self {
             status: StepStatus::Skipped,
             artifacts: Vec::new(),
@@ -37,7 +39,7 @@ impl StepExecution {
         }
     }
 
-    pub(crate) fn halted(artifacts: Vec<PathBuf>, message: impl Into<String>) -> Self {
+    pub fn halted(artifacts: Vec<PathBuf>, message: impl Into<String>) -> Self {
         Self {
             status: StepStatus::Halted,
             artifacts,
@@ -47,7 +49,7 @@ impl StepExecution {
         }
     }
 
-    pub(crate) fn with_tokens(mut self, tokens_in: u32, tokens_out: u32) -> Self {
+    pub fn with_tokens(mut self, tokens_in: u32, tokens_out: u32) -> Self {
         self.tokens_in = tokens_in;
         self.tokens_out = tokens_out;
         self

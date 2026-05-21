@@ -11,12 +11,12 @@ use derrick_substrate::{
 use derrick_tools::{CopilotToolPermission, HostRegistry, HostRequest};
 use owo_colors::OwoColorize;
 
-use crate::assay::{self, ExecutionState};
 use crate::clarify;
-use crate::io::{create_dir_all, write_log};
-use crate::names::host_name;
-use crate::template::{render_template, TemplateContext};
-use crate::types::{RunError, StepExecution, StepRecord, StepStatus};
+use derrick_assay::io::{create_dir_all, write_log};
+use derrick_assay::names::host_name;
+use derrick_assay::template::{render_template, TemplateContext};
+use derrick_assay::types::{RunError, StepExecution, StepRecord, StepStatus};
+use derrick_assay::{self as assay, ExecutionState};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_step(
@@ -84,8 +84,10 @@ pub async fn execute_step(
                 )
                 .await;
             if !message.is_empty() {
-                let _ =
-                    crate::io::append_log(&log_path, &format!("\n---\nstep halted: {message}\n"));
+                let _ = derrick_assay::io::append_log(
+                    &log_path,
+                    &format!("\n---\nstep halted: {message}\n"),
+                );
             }
             Ok(StepRecord {
                 id: step.id().to_owned(),
@@ -99,7 +101,7 @@ pub async fn execute_step(
             })
         }
         Err(error) => {
-            let _ignored = crate::io::append_log(&log_path, &format!("{error}\n"));
+            let _ignored = derrick_assay::io::append_log(&log_path, &format!("{error}\n"));
             let record = StepRecord {
                 id: step.id().to_owned(),
                 status: StepStatus::Failed,
@@ -122,7 +124,7 @@ pub async fn execute_step(
                 )
                 .await;
             if let Ok(mut manifest) = crate::manifest::read_manifest(manifest_path) {
-                manifest.status = crate::types::RunStatus::Failed;
+                manifest.status = derrick_assay::types::RunStatus::Failed;
                 manifest.finished_at = Some(finished_at);
                 manifest
                     .steps
@@ -143,7 +145,7 @@ async fn execute_role_step(
     log_path: &Path,
 ) -> Result<StepExecution, RunError> {
     if let Some(host) = step.host() {
-        let command = crate::io::required_step_text(step.command(), step.id(), "command")?;
+        let command = derrick_assay::io::required_step_text(step.command(), step.id(), "command")?;
         let prompt = render_template(command, &template_context(config, state)?)?;
         let prompt = inject_clarify_answers_for_plan(step.id(), state, repo_root, prompt)?;
         let host_name = host_name(host);
@@ -171,7 +173,9 @@ async fn execute_role_step(
             })?;
         write_log(log_path, &response.stdout, &response.stderr)?;
         if step.id() == "specify" {
-            state.feature_dir = Some(crate::io::read_feature_dir(working_dir(state, repo_root))?);
+            state.feature_dir = Some(derrick_assay::io::read_feature_dir(working_dir(
+                state, repo_root,
+            ))?);
         }
         Ok(StepExecution::success(detect_artifacts(
             step.id(),
@@ -179,7 +183,7 @@ async fn execute_role_step(
             repo_root,
         )))
     } else {
-        let role = crate::io::required_step_text(step.role(), step.id(), "role")?;
+        let role = derrick_assay::io::required_step_text(step.role(), step.id(), "role")?;
         let prompt = step
             .command()
             .map_or_else(|| state.prompt.clone(), ToOwned::to_owned);
@@ -345,7 +349,7 @@ async fn execute_bridge(
     eprintln!();
 
     let mut artifacts = vec![];
-    if let Ok(rel) = crate::io::relative_to_root(repo_root, tasks_path) {
+    if let Ok(rel) = derrick_assay::io::relative_to_root(repo_root, tasks_path) {
         artifacts.push(rel);
     }
     Ok(StepExecution::success(artifacts))
@@ -591,7 +595,7 @@ fn execute_human_step(
     state: &ExecutionState,
     log_path: &Path,
 ) -> Result<StepExecution, RunError> {
-    let prompt = crate::io::required_step_text(step.prompt(), step.id(), "prompt")?;
+    let prompt = derrick_assay::io::required_step_text(step.prompt(), step.id(), "prompt")?;
     let prompt = render_template(prompt, &template_context(config, state)?)?;
     write_log(log_path, &prompt, "")?;
     let mut stdout = std::io::stdout();
@@ -625,7 +629,7 @@ async fn execute_bash_step(
     log_path: &Path,
 ) -> Result<StepExecution, RunError> {
     use tokio::process::Command;
-    let command = crate::io::required_step_text(step.command(), step.id(), "command")?;
+    let command = derrick_assay::io::required_step_text(step.command(), step.id(), "command")?;
     let command = render_template(command, &template_context(config, state)?)?;
     let working_dir = working_dir(state, repo_root).to_path_buf();
     let output = Command::new("bash")
@@ -753,7 +757,7 @@ fn completion_request(
 mod tests {
     use std::path::PathBuf;
 
-    use crate::assay::ExecutionState;
+    use derrick_assay::ExecutionState;
 
     use derrick_substrate::BatchName;
 

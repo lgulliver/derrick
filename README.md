@@ -171,7 +171,8 @@ derrick gain
 | Crate | Role |
 |---|---|
 | `derrick-cli` | Binary, all subcommands |
-| `derrick-flow` | Pipeline executor, state machine, multi-reviewer assay |
+| `derrick-flow` | Pipeline executor, state machine |
+| `derrick-assay` | Multi-reviewer adversarial assay + shared pipeline types (RunError, StepExecution, io helpers) |
 | `derrick-config` | Typed schema, layered loader, 14 validation rules |
 | `derrick-scrub` | CLI noise filter — rules for git, gh, claude, codex, copilot, cargo |
 | `derrick-caveman` | Prose compressor — lite / full / ultra intensities |
@@ -179,24 +180,39 @@ derrick gain
 | `derrick-tui` | ratatui dashboard (6 tabs) |
 | `derrick-observe` | TUI wiring, stack refresh, event loop |
 | `derrick-stack` | PR stacking (native / Graphite / git-spice) |
-| `derrick-models` | Shared domain types |
+| `derrick-models` | Model trait + provider implementations (anthropic, openai-cli, opencode, shell) |
 | `derrick-adopt` | Brownfield adoption — detects AGENTS.md, writes hooks |
-| `derrick-substrate` | Host abstraction (trait) |
-| `derrick-substrate-native` | Native Rust host impl |
+| `derrick-substrate` | Substrate trait + ticket/batch/hand state types |
+| `derrick-substrate-native` | SQLite-backed substrate + foreman loop |
 | `derrick-claude` | Claude substrate |
 | `derrick-copilot` | Copilot substrate |
-| `derrick-assay` | Adversarial plan reviewer |
-| `derrick-tools` | Shared tool utilities |
+| `derrick-tools` | Host CLI adapters (claude, codex, copilot, opencode) |
 
 ---
 
 ## Supported model providers
 
-`anthropic` · `openai` · `gemini` · `bedrock` · `azure-openai` · `ollama` · `copilot-cli`
+| Provider key | Backend | Auth |
+|---|---|---|
+| `anthropic` | Anthropic Messages API (streaming SSE) | `ANTHROPIC_API_KEY` env (or AuthStore override) |
+| `openai-cli` | `codex exec` CLI (default) or OpenAI Chat API when `OPENAI_API_KEY` is set | CLI: host-delegated; API: `OPENAI_API_KEY` env (or `openai-cli` AuthStore override) |
+| `opencode` | `opencode run` CLI | Host-delegated (opencode manages its own auth) |
+| `shell` | Any shell command via `cli:` field in `derrick.yaml` | N/A (caller-managed) |
 
-**Hosts:** `claude` · `codex` · `copilot` · `opencode`
+**Hosts** (for pipeline steps that invoke a CLI tool to run a slash command):
+`claude` · `codex` · `copilot` · `opencode`
 
 Configured per pipeline step in `derrick.yaml`. Bring your own model on any step.
+
+```yaml
+models:
+  claude-opus:   { provider: anthropic,  model: "claude-opus-4-7" }
+  codex-gpt5:    { provider: openai-cli, model: "gpt-5" }           # uses codex CLI by default
+  opencode-sonnet: { provider: opencode, model: "claude-sonnet-4-5" }
+  my-local:      { provider: shell,      cli: "my-model-wrapper --model foo", model: "foo" }
+```
+
+`openai-cli` falls back to the direct OpenAI API when `OPENAI_API_KEY` is present and no `cli:` override is set, so you get token-count telemetry without needing the codex binary installed.
 
 ### Crew mode role bindings
 

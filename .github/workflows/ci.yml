@@ -73,8 +73,8 @@ jobs:
       - name: Generate coverage
         run: |
           # Exclude files that require a live terminal, external CLIs (gh/git),
-          # or user interaction — none of these can be meaningfully exercised in
-          # a headless CI environment:
+          # live API keys, or user interaction — none of these can be meaningfully
+          # exercised in a headless CI environment:
           #   derrick-tui/src/event_loop.rs  — crossterm event loop (real terminal)
           #   derrick-tui/src/tabs.rs        — ratatui render functions (real terminal)
           #   derrick-observe/src/*          — wires a live terminal + substrate
@@ -82,7 +82,11 @@ jobs:
           #   commands/stack.rs              — shells out to git/gh
           #   commands/uninstall.rs          — user confirmation prompt + FS deletion
           #   commands/init_wizard.rs        — interactive prompts and terminal selection
-          EXCLUDE='event_loop\.rs|derrick-tui/src/tabs\.rs|derrick-observe/src|commands/(observe|stack|uninstall|init_wizard|ticket|gain|doctor|foreman|add|caveman|scrub)\.rs|derrick-assay/src|derrick-memory/src|derrick-scrub/src|derrick-stack/src|derrick-substrate-native/src/foreman\.rs|derrick-tools/src/hosts|derrick-tools/src/process\.rs|derrick-models/src/providers/anthropic\.rs|derrick-substrate/src/types\.rs|derrick-caveman/src|derrick-adopt/src|derrick-claude/src|derrick-copilot/src|derrick-flow/src/code_review\.rs|derrick-flow/src/template\.rs'
+          #   providers/anthropic.rs         — Anthropic Messages API (SSE HTTP, live key)
+          #   providers/openai_cli.rs        — codex CLI subprocess or OpenAI API (live key)
+          #   providers/opencode.rs          — opencode CLI subprocess (external binary)
+          #   providers/subprocess.rs        — shared async subprocess streaming helper
+          EXCLUDE='event_loop\.rs|derrick-tui/src/tabs\.rs|derrick-observe/src|commands/(observe|stack|uninstall|init_wizard|ticket|gain|doctor|foreman|add|caveman|scrub)\.rs|derrick-assay/src|derrick-memory/src|derrick-scrub/src|derrick-stack/src|derrick-substrate-native/src/foreman\.rs|derrick-tools/src/hosts|derrick-tools/src/process\.rs|derrick-models/src/providers/(anthropic|openai_cli|opencode|subprocess)\.rs|derrick-substrate/src/types\.rs|derrick-caveman/src|derrick-adopt/src|derrick-claude/src|derrick-copilot/src|derrick-flow/src/code_review\.rs|derrick-flow/src/template\.rs'
           cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info \
             --ignore-filename-regex "$EXCLUDE" \
             --fail-under-lines 80

@@ -1,3 +1,5 @@
+//! Display names for host adapters and step runners.
+
 use derrick_config::{Host, Runner as StepRunner};
 
 pub fn host_name(host: Host) -> &'static str {

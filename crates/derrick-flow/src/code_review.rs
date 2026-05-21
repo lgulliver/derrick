@@ -3,7 +3,7 @@ use std::path::Path;
 use derrick_config::Config;
 use derrick_models::AuthStore;
 
-use crate::types::RunError;
+use derrick_assay::types::RunError;
 
 /// Outcome of a single adversarial code review pass.
 #[derive(Debug)]
