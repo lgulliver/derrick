@@ -272,7 +272,7 @@ pub(crate) enum TicketCommand {
     List,
     /// Show one ticket's full details.
     Show(TicketShowArgs),
-    /// Reject a ticket (stub — implemented in a follow-up).
+    /// Reject a ticket.
     Reject(TicketRejectArgs),
     /// Reopen a Blocked ticket back to Ready.
     Reopen(TicketReopenArgs),
