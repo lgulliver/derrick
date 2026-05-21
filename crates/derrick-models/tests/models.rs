@@ -603,7 +603,7 @@ async fn shell_provider_invalid_finish_reason_returns_provider_error() -> TestRe
 }
 
 #[test]
-fn anthropic_stub_returns_not_implemented_error() -> TestResult {
+fn anthropic_build_requires_api_key() -> TestResult {
     let config = Config::defaults();
     let model_def = config
         .models()
@@ -612,12 +612,121 @@ fn anthropic_stub_returns_not_implemented_error() -> TestResult {
     let error = ProviderRegistry::with_defaults()
         .build(model_def, &AuthStore::default())
         .err()
-        .ok_or("anthropic should be stubbed")?;
+        .ok_or("anthropic should require credentials when none are configured")?;
 
     assert!(
-        matches!(error, ModelError::Provider { provider, message, retryable: false }
-            if provider == "anthropic" && message == "not implemented in T006; see T006a")
+        matches!(error, ModelError::MissingCredential { ref provider, ref env_var }
+            if provider == "anthropic" && env_var == "ANTHROPIC_API_KEY"),
+        "expected MissingCredential, got {error:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn anthropic_builds_with_api_key_override() -> TestResult {
+    let config = Config::defaults();
+    let model_def = config
+        .models()
+        .get("claude-sonnet")
+        .ok_or("anthropic model should exist")?;
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        ("anthropic".to_owned(), "ANTHROPIC_API_KEY".to_owned()),
+        Secret::new("sk-test"),
+    );
+    let auth = AuthStore::for_testing(overrides);
+    let model = ProviderRegistry::with_defaults().build(model_def, &auth)?;
+    assert_eq!(model.provider(), "anthropic");
+    assert!(!model.host_delegated_auth());
+    assert!(model.cost_hint().is_some());
+    Ok(())
+}
+
+fn write_minimal_config(extra_models: &str, role_model: &str) -> TestResult<(TempDir, Config)> {
+    let dir = tempdir()?;
+    let path = dir.path().join("derrick.yaml");
+    fs::write(
+        &path,
+        format!(
+            r#"
+version: 1
+site:
+  name: derrick
+  prefix: drk
+models:
+{extra_models}
+roles:
+  drafter: {role_model}
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: false
+    role: drafter
+    reviewers: [drafter]
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    agent_identity: derrick-hand
+pipeline: []
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#
+        ),
+    )?;
+    let config = Config::load_from_path(&path)?;
+    Ok((dir, config))
+}
+
+#[test]
+fn opencode_builds_with_default_cli() -> TestResult {
+    let (_dir, config) =
+        write_minimal_config("  oc:\n    provider: opencode\n    model: sonnet\n", "oc")?;
+    let model_def = config.models().get("oc").ok_or("oc model")?;
+    let model = ProviderRegistry::with_defaults().build(model_def, &AuthStore::default())?;
+    assert_eq!(model.provider(), "opencode");
+    assert!(model.host_delegated_auth());
+    Ok(())
+}
+
+#[test]
+fn openai_cli_prefers_cli_when_no_key() -> TestResult {
+    let (_dir, config) = write_minimal_config(
+        "  gpt5:\n    provider: openai-cli\n    model: gpt-5\n",
+        "gpt5",
+    )?;
+    let model_def = config.models().get("gpt5").ok_or("gpt5 model")?;
+    let model = ProviderRegistry::with_defaults().build(model_def, &AuthStore::default())?;
+    assert_eq!(model.provider(), "openai-cli");
+    assert!(model.host_delegated_auth());
+    Ok(())
+}
+
+#[test]
+fn openai_cli_prefers_api_when_key_present() -> TestResult {
+    let (_dir, config) = write_minimal_config(
+        "  gpt5:\n    provider: openai-cli\n    model: gpt-4o\n",
+        "gpt5",
+    )?;
+    let model_def = config.models().get("gpt5").ok_or("gpt5 model")?;
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        ("openai-cli".to_owned(), "OPENAI_API_KEY".to_owned()),
+        Secret::new("sk-test"),
+    );
+    let auth = AuthStore::for_testing(overrides);
+    let model = ProviderRegistry::with_defaults().build(model_def, &auth)?;
+    assert!(!model.host_delegated_auth());
     Ok(())
 }
 

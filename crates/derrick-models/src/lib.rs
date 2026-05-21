@@ -351,6 +351,8 @@ impl ProviderRegistry {
         let mut registry = Self::default();
         registry.register("shell", providers::shell::build);
         registry.register("anthropic", providers::anthropic::build);
+        registry.register("openai-cli", providers::openai_cli::build);
+        registry.register("opencode", providers::opencode::build);
         registry
     }
 
