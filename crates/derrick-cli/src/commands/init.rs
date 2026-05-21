@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::path::Path;
 
 use derrick_adopt::{AdoptOptions, Adopter, ConstitutionMode};
 use derrick_config::{render_init_template, Config, InitTemplateVars};
 use derrick_substrate_native::NativeSubstrate;
 
+use crate::commands::init_wizard::{AiConfigurationStyle, WizardInput, WizardSelection};
 use crate::commands::InitArgs;
 use crate::exit_code::CliExitCode;
 use crate::{create_dir_all, current_repo_root, message, native_paths, read_config, write_file};
@@ -28,99 +31,239 @@ const IDEA_FOREMAN_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../templates/.idea/runConfigurations/derrick_foreman_start.xml"
 ));
-pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
-    let repo_root = current_repo_root()?;
-    if !args.greenfield {
-        return brownfield_init(&repo_root, args).await;
-    }
 
-    greenfield_init(&repo_root, args).await
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RoleBindings {
+    pub(crate) proposer: String,
+    pub(crate) drafter: String,
+    pub(crate) reviewer: String,
+    pub(crate) executor: String,
+    pub(crate) summariser: String,
 }
 
-async fn brownfield_init(repo_root: &Path, args: InitArgs) -> Result<CliExitCode, crate::CliError> {
-    let adopter = Adopter::new(repo_root);
-    let detection = adopter.detect()?;
+impl RoleBindings {
+    pub(crate) fn one_model(model: String) -> Self {
+        Self {
+            proposer: model.clone(),
+            drafter: model.clone(),
+            reviewer: model.clone(),
+            executor: model.clone(),
+            summariser: model,
+        }
+    }
+
+    pub(crate) fn entries(&self) -> [(&'static str, &str); 5] {
+        [
+            ("proposer", &self.proposer),
+            ("drafter", &self.drafter),
+            ("reviewer", &self.reviewer),
+            ("executor", &self.executor),
+            ("summariser", &self.summariser),
+        ]
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedInitOptions {
+    greenfield: bool,
+    mode: crate::commands::InitMode,
+    site_name: String,
+    prefix: String,
+    force: bool,
+    yes: bool,
+    dry_run: bool,
+    no_hooks: bool,
+    append_agents_md: bool,
+    constitution: ConstitutionMode,
+    vscode: bool,
+    jetbrains: bool,
+    roles: RoleBindings,
+    ai_style: AiConfigurationStyle,
+}
+
+pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
+    let repo_root = current_repo_root()?;
+    let resolved = match resolve_options(&repo_root, args)? {
+        Some(resolved) => resolved,
+        None => return Ok(CliExitCode::Success),
+    };
+
+    if resolved.greenfield {
+        greenfield_init(&repo_root, &resolved).await
+    } else {
+        brownfield_init(&repo_root, &resolved).await
+    }
+}
+
+fn resolve_options(
+    repo_root: &Path,
+    args: InitArgs,
+) -> Result<Option<ResolvedInitOptions>, crate::CliError> {
+    let mode = args.mode;
     let site_name = args
         .site
         .clone()
         .unwrap_or_else(|| default_site_name(repo_root));
-    let prefix = match args.prefix.clone() {
-        Some(prefix) => prefix,
-        None => default_prefix(&site_name),
-    };
+    let default_prefix_value = default_prefix(&site_name);
+    let prefix = args
+        .prefix
+        .clone()
+        .unwrap_or_else(|| default_prefix_value.clone());
+    let constitution = constitution_mode(&args);
+
+    if should_run_wizard(&args) {
+        let wizard_input = WizardInput {
+            repo_root,
+            has_existing_config: repo_root.join("derrick.yaml").exists(),
+            likely_existing_project: likely_existing_project(repo_root),
+            default_greenfield: args.greenfield,
+            default_site_name: site_name.clone(),
+            default_prefix: default_prefix_value,
+            default_mode: mode,
+            default_constitution: constitution,
+            default_append_agents_md: args.append_agents_md,
+            no_hooks_forced: args.no_hooks,
+            default_vscode: args.vscode,
+            default_jetbrains: args.jetbrains,
+            default_force: args.force,
+            available_models: available_model_choices(),
+        };
+        let selection = crate::commands::init_wizard::run(wizard_input)?;
+        return match selection {
+            WizardSelection::Cancelled => Ok(None),
+            WizardSelection::Proceed(selection) => {
+                validate_prefix(&selection.prefix)?;
+                validate_role_bindings(&selection.roles, &available_model_ids())?;
+                Ok(Some(ResolvedInitOptions {
+                    greenfield: selection.greenfield,
+                    mode: selection.mode,
+                    site_name: selection.site_name,
+                    prefix: selection.prefix,
+                    force: selection.force,
+                    yes: false,
+                    dry_run: false,
+                    no_hooks: selection.no_hooks,
+                    append_agents_md: selection.append_agents_md,
+                    constitution: selection.constitution,
+                    vscode: selection.vscode,
+                    jetbrains: selection.jetbrains,
+                    roles: selection.roles,
+                    ai_style: selection.ai_style,
+                }))
+            }
+        };
+    }
+
     validate_prefix(&prefix)?;
-    let constitution = if args.constitution_stub {
-        ConstitutionMode::Stub
-    } else if args.constitution_from_docs {
-        ConstitutionMode::FromDocs
-    } else {
-        ConstitutionMode::Reference
-    };
-    let opts = AdoptOptions {
+    let roles = recommended_role_bindings(mode, &available_model_ids());
+    validate_role_bindings(&roles, &available_model_ids())?;
+
+    Ok(Some(ResolvedInitOptions {
+        greenfield: args.greenfield,
+        mode,
         site_name,
-        site_prefix: prefix,
-        mode: init_mode_to_substrate(args.mode),
+        prefix,
         force: args.force,
+        yes: args.yes,
+        dry_run: args.dry_run,
         no_hooks: args.no_hooks,
         append_agents_md: args.append_agents_md,
         constitution,
+        vscode: args.vscode,
+        jetbrains: args.jetbrains,
+        roles,
+        ai_style: AiConfigurationStyle::Recommended,
+    }))
+}
+
+fn should_run_wizard(args: &InitArgs) -> bool {
+    if args.wizard {
+        if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+            return false;
+        }
+        return true;
+    }
+    if args.no_wizard || args.yes || args.dry_run {
+        return false;
+    }
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn likely_existing_project(repo_root: &Path) -> bool {
+    repo_root.join("README.md").exists()
+        || repo_root.join("Cargo.toml").exists()
+        || repo_root.join("package.json").exists()
+}
+
+async fn brownfield_init(
+    repo_root: &Path,
+    resolved: &ResolvedInitOptions,
+) -> Result<CliExitCode, crate::CliError> {
+    let adopter = Adopter::new(repo_root);
+    let detection = adopter.detect()?;
+    let opts = AdoptOptions {
+        site_name: resolved.site_name.clone(),
+        site_prefix: resolved.prefix.clone(),
+        mode: init_mode_to_substrate(resolved.mode),
+        force: resolved.force,
+        no_hooks: resolved.no_hooks,
+        append_agents_md: resolved.append_agents_md,
+        constitution: resolved.constitution,
     };
     let drafted_constitution = if opts.constitution == ConstitutionMode::FromDocs {
         Some(adopter.draft_constitution(&detection, &opts).await?)
     } else {
         None
     };
-    let plan = adopter.propose(&detection, &opts, drafted_constitution.as_deref())?;
+    let mut plan = adopter.propose(&detection, &opts, drafted_constitution.as_deref())?;
+    override_plan_yaml(&mut plan, resolved)?;
     print_plan(&plan);
     if !plan.blockers.is_empty() {
         return Ok(CliExitCode::Failure);
     }
-    if args.dry_run {
+    if resolved.dry_run {
         return Ok(CliExitCode::Success);
     }
 
     let outcome = adopter.apply(&plan).await?;
-    println!("initialised derrick site {}", opts.site_name);
+    println!("initialised derrick project {}", opts.site_name);
     println!("written      {}", join_paths(&outcome.written));
     if !outcome.bookkeeping.is_empty() {
         println!("bookkeeping  {}", join_paths(&outcome.bookkeeping));
     }
-    if args.vscode {
+    if resolved.vscode {
         write_vscode_configs(repo_root)?;
     }
-    if args.jetbrains {
+    if resolved.jetbrains {
         write_jetbrains_configs(repo_root)?;
     }
-    if !args.yes {
+    if !resolved.yes {
         println!("next         review `git status` before committing");
     }
     Ok(CliExitCode::Success)
 }
 
-async fn greenfield_init(repo_root: &Path, args: InitArgs) -> Result<CliExitCode, crate::CliError> {
+async fn greenfield_init(
+    repo_root: &Path,
+    resolved: &ResolvedInitOptions,
+) -> Result<CliExitCode, crate::CliError> {
     let config_path = repo_root.join("derrick.yaml");
-    if config_path.exists() && !args.force {
+    if config_path.exists() && !resolved.force {
         return Err(message(format!(
             "{} already exists; rerun with --force to overwrite it",
             config_path.display()
         )));
     }
 
-    let site_name = args.site.unwrap_or_else(|| default_site_name(repo_root));
-    let prefix = match args.prefix {
-        Some(prefix) => prefix,
-        None => default_prefix(&site_name),
-    };
-    validate_prefix(&prefix)?;
-
     let rendered = render_init_template(
         INIT_TEMPLATE,
         InitTemplateVars {
-            site_name: &site_name,
-            prefix: &prefix,
-            mode: args.mode.as_str(),
+            site_name: &resolved.site_name,
+            prefix: &resolved.prefix,
+            mode: resolved.mode.as_str(),
         },
     );
+    let rendered = apply_config_overrides(&rendered, resolved)?;
     write_file(&config_path, &rendered)?;
 
     let config = read_config(repo_root)?;
@@ -132,20 +275,295 @@ async fn greenfield_init(repo_root: &Path, args: InitArgs) -> Result<CliExitCode
         NativeSubstrate::open(native_paths(repo_root, &config), config.site().clone()).await?;
     substrate.close().await?;
 
-    if !args.no_hooks {
+    if !resolved.no_hooks {
         derrick_adopt::write_codex_instructions(repo_root).map_err(|e| message(e.to_string()))?;
         println!("written      .codex/instructions.md");
     }
 
-    if args.vscode {
+    if resolved.vscode {
         write_vscode_configs(repo_root)?;
     }
-    if args.jetbrains {
+    if resolved.jetbrains {
         write_jetbrains_configs(repo_root)?;
     }
 
-    print_summary(&config);
+    print_summary(&config, resolved.ai_style);
     Ok(CliExitCode::Success)
+}
+
+fn override_plan_yaml(
+    plan: &mut derrick_adopt::AdoptionPlan,
+    resolved: &ResolvedInitOptions,
+) -> Result<(), crate::CliError> {
+    if let Some(write) = plan
+        .writes
+        .iter_mut()
+        .find(|write| write.path == Path::new("derrick.yaml"))
+    {
+        write.content = apply_text_overrides(&write.content, resolved);
+    }
+    Ok(())
+}
+
+fn apply_text_overrides(rendered: &str, resolved: &ResolvedInitOptions) -> String {
+    let mut lines = rendered
+        .lines()
+        .map(std::borrow::ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if let Some(mode_index) = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("mode: "))
+    {
+        let indent = lines[mode_index]
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .collect::<String>();
+        lines[mode_index] = format!("{indent}mode: {}", resolved.mode.as_str());
+    }
+
+    if let Some(roles_start) = lines.iter().position(|line| line == "roles:") {
+        let mut roles_end = roles_start + 1;
+        while roles_end < lines.len() {
+            let line = &lines[roles_end];
+            if line.is_empty() || line.starts_with("  ") {
+                roles_end += 1;
+            } else {
+                break;
+            }
+        }
+        let replacement = vec![
+            "roles:".to_owned(),
+            format!("  proposer: {}", resolved.roles.proposer),
+            format!("  drafter: {}", resolved.roles.drafter),
+            format!("  reviewer: {}", resolved.roles.reviewer),
+            format!("  executor: {}", resolved.roles.executor),
+            format!("  summariser: {}", resolved.roles.summariser),
+        ];
+        lines.splice(roles_start..roles_end, replacement);
+    }
+
+    if matches!(resolved.mode, crate::commands::InitMode::Crew)
+        && !lines.iter().any(|line| line.trim() == "- id: bridge")
+    {
+        if let Some(guardrails_index) = lines.iter().position(|line| line == "guardrails:") {
+            let addition = vec![
+                "  - id: bridge".to_owned(),
+                "    runner: derrick".to_owned(),
+                "  - id: foreman".to_owned(),
+                "    runner: derrick".to_owned(),
+                "    executor_role: executor".to_owned(),
+            ];
+            lines.splice(guardrails_index..guardrails_index, addition);
+        }
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn apply_config_overrides(
+    rendered: &str,
+    resolved: &ResolvedInitOptions,
+) -> Result<String, crate::CliError> {
+    let mut yaml: serde_yaml::Value =
+        serde_yaml::from_str(rendered).map_err(|error| message(error.to_string()))?;
+    let root = yaml
+        .as_mapping_mut()
+        .ok_or_else(|| message("rendered config is not a mapping"))?;
+
+    let tools = nested_mapping(root, "tools")?;
+    let substrate = nested_mapping(tools, "substrate")?;
+    substrate.insert(
+        serde_yaml::Value::String("mode".to_owned()),
+        serde_yaml::Value::String(resolved.mode.as_str().to_owned()),
+    );
+
+    let roles = role_mapping_value(&resolved.roles);
+    root.insert(
+        serde_yaml::Value::String("roles".to_owned()),
+        serde_yaml::Value::Mapping(roles),
+    );
+
+    if matches!(resolved.mode, crate::commands::InitMode::Crew) {
+        ensure_crew_pipeline(root)?;
+    }
+
+    serde_yaml::to_string(&yaml).map_err(|error| message(error.to_string()))
+}
+
+fn nested_mapping<'a>(
+    mapping: &'a mut serde_yaml::Mapping,
+    key: &str,
+) -> Result<&'a mut serde_yaml::Mapping, crate::CliError> {
+    let key_value = serde_yaml::Value::String(key.to_owned());
+    if !mapping.contains_key(&key_value) {
+        mapping.insert(
+            key_value.clone(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        );
+    }
+    mapping
+        .get_mut(&key_value)
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .ok_or_else(|| message(format!("{key} is not a mapping")))
+}
+
+fn role_mapping_value(roles: &RoleBindings) -> serde_yaml::Mapping {
+    let mut mapping = serde_yaml::Mapping::new();
+    for (role, model) in roles.entries() {
+        mapping.insert(
+            serde_yaml::Value::String(role.to_owned()),
+            serde_yaml::Value::String(model.to_owned()),
+        );
+    }
+    mapping
+}
+
+fn ensure_crew_pipeline(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliError> {
+    let key = serde_yaml::Value::String("pipeline".to_owned());
+    let pipeline_value = root
+        .get_mut(&key)
+        .ok_or_else(|| message("pipeline is missing from rendered config"))?;
+    let steps = pipeline_value
+        .as_sequence_mut()
+        .ok_or_else(|| message("pipeline is not a sequence"))?;
+
+    let has_bridge = steps.iter().any(|step| step_id(step) == Some("bridge"));
+    if !has_bridge {
+        steps.push(yaml_step(&[("id", "bridge"), ("runner", "derrick")]));
+    }
+
+    let has_foreman = steps.iter().any(|step| step_id(step) == Some("foreman"));
+    if !has_foreman {
+        let mut step = yaml_step(&[("id", "foreman"), ("runner", "derrick")]);
+        if let Some(mapping) = step.as_mapping_mut() {
+            mapping.insert(
+                serde_yaml::Value::String("executor_role".to_owned()),
+                serde_yaml::Value::String("executor".to_owned()),
+            );
+        }
+        steps.push(step);
+    }
+
+    Ok(())
+}
+
+fn yaml_step(entries: &[(&str, &str)]) -> serde_yaml::Value {
+    let mut step = serde_yaml::Mapping::new();
+    for (key, value) in entries {
+        step.insert(
+            serde_yaml::Value::String((*key).to_owned()),
+            serde_yaml::Value::String((*value).to_owned()),
+        );
+    }
+    serde_yaml::Value::Mapping(step)
+}
+
+fn step_id(step: &serde_yaml::Value) -> Option<&str> {
+    let id_key = serde_yaml::Value::String("id".to_owned());
+    step.as_mapping()?.get(&id_key)?.as_str()
+}
+
+fn validate_role_bindings(
+    roles: &RoleBindings,
+    available_models: &BTreeMap<String, &'static str>,
+) -> Result<(), crate::CliError> {
+    for (role, model) in roles.entries() {
+        if !available_models.contains_key(model) {
+            return Err(message(format!(
+                "role `{role}` points to model `{model}`, but it is not configured under `models`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn recommended_role_bindings(
+    mode: crate::commands::InitMode,
+    available_models: &BTreeMap<String, &'static str>,
+) -> RoleBindings {
+    let claude_opus = pick_model(
+        available_models,
+        &["claude-opus", "claude-sonnet", "codex-gpt5", "copilot"],
+    );
+    let claude_sonnet = pick_model(
+        available_models,
+        &["claude-sonnet", "claude-opus", "codex-gpt5", "copilot"],
+    );
+    let codex = pick_model(
+        available_models,
+        &["codex-gpt5", "copilot", "claude-sonnet", "claude-opus"],
+    );
+    let copilot = pick_model(
+        available_models,
+        &["copilot", "codex-gpt5", "claude-sonnet", "claude-opus"],
+    );
+
+    match mode {
+        crate::commands::InitMode::Solo => RoleBindings {
+            proposer: claude_sonnet.clone(),
+            drafter: claude_sonnet.clone(),
+            reviewer: codex.clone(),
+            executor: copilot.clone(),
+            summariser: claude_sonnet,
+        },
+        crate::commands::InitMode::Copilot => RoleBindings {
+            proposer: claude_sonnet.clone(),
+            drafter: claude_sonnet.clone(),
+            reviewer: codex.clone(),
+            executor: copilot.clone(),
+            summariser: claude_sonnet,
+        },
+        crate::commands::InitMode::Crew => RoleBindings {
+            proposer: claude_opus,
+            drafter: claude_sonnet.clone(),
+            reviewer: codex.clone(),
+            executor: copilot,
+            summariser: claude_sonnet,
+        },
+    }
+}
+
+fn pick_model(available_models: &BTreeMap<String, &'static str>, candidates: &[&str]) -> String {
+    for candidate in candidates {
+        if available_models.contains_key(*candidate) {
+            return (*candidate).to_owned();
+        }
+    }
+    available_models
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "claude-sonnet".to_owned())
+}
+
+pub(crate) fn available_model_ids() -> BTreeMap<String, &'static str> {
+    available_model_choices()
+        .into_iter()
+        .map(|(id, description)| (id.to_owned(), description))
+        .collect()
+}
+
+pub(crate) fn available_model_choices() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("claude-opus", "good for architecture and planning"),
+        (
+            "claude-sonnet",
+            "balanced default for drafting and summaries",
+        ),
+        ("codex-gpt5", "good for code review and implementation"),
+        ("copilot", "good for Copilot CLI workflows"),
+    ]
+}
+
+fn constitution_mode(args: &InitArgs) -> ConstitutionMode {
+    if args.constitution_stub {
+        ConstitutionMode::Stub
+    } else if args.constitution_from_docs {
+        ConstitutionMode::FromDocs
+    } else {
+        ConstitutionMode::Reference
+    }
 }
 
 fn write_vscode_configs(repo_root: &Path) -> Result<(), crate::CliError> {
@@ -180,15 +598,15 @@ fn write_jetbrains_configs(repo_root: &Path) -> Result<(), crate::CliError> {
     Ok(())
 }
 
-fn default_site_name(repo_root: &Path) -> String {
+pub(crate) fn default_site_name(repo_root: &Path) -> String {
     repo_root
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("derrick-site")
+        .unwrap_or("derrick-project")
         .to_owned()
 }
 
-fn default_prefix(site_name: &str) -> String {
+pub(crate) fn default_prefix(site_name: &str) -> String {
     let prefix: String = site_name
         .chars()
         .filter(|character| character.is_ascii_alphabetic())
@@ -202,7 +620,7 @@ fn default_prefix(site_name: &str) -> String {
     }
 }
 
-fn validate_prefix(prefix: &str) -> Result<(), crate::CliError> {
+pub(crate) fn validate_prefix(prefix: &str) -> Result<(), crate::CliError> {
     if (1..=6).contains(&prefix.len()) && prefix.bytes().all(|byte| byte.is_ascii_lowercase()) {
         Ok(())
     } else {
@@ -256,19 +674,20 @@ fn join_paths(paths: &[std::path::PathBuf]) -> String {
         .join(", ")
 }
 
-fn print_summary(config: &Config) {
+fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
     let steps = config
         .pipeline()
         .iter()
         .map(|step| step.id())
         .collect::<Vec<_>>()
         .join(", ");
-    println!("initialised derrick site {}", config.site().name());
+    println!("initialised derrick project {}", config.site().name());
     println!(
         "mode         {}",
         mode_name(config.tools().substrate().mode())
     );
     println!("prefix       {}", config.site().prefix());
+    println!("ai config    {}", ai_style.label());
     println!("pipeline     {steps}");
     println!("next         run `derrick doctor` to verify the install");
 }
@@ -278,5 +697,61 @@ fn mode_name(mode: derrick_config::SubstrateMode) -> &'static str {
         derrick_config::SubstrateMode::Solo => "solo",
         derrick_config::SubstrateMode::Copilot => "copilot",
         derrick_config::SubstrateMode::Crew => "crew",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args() -> InitArgs {
+        InitArgs {
+            greenfield: false,
+            mode: crate::commands::InitMode::Solo,
+            site: None,
+            prefix: None,
+            force: false,
+            yes: false,
+            wizard: false,
+            no_wizard: false,
+            dry_run: false,
+            no_hooks: false,
+            append_agents_md: false,
+            constitution_stub: false,
+            constitution_from_docs: false,
+            vscode: false,
+            jetbrains: false,
+        }
+    }
+
+    #[test]
+    fn wizard_not_enabled_when_yes() {
+        let mut value = args();
+        value.yes = true;
+        assert!(!should_run_wizard(&value));
+    }
+
+    #[test]
+    fn wizard_not_enabled_when_dry_run() {
+        let mut value = args();
+        value.dry_run = true;
+        assert!(!should_run_wizard(&value));
+    }
+
+    #[test]
+    fn crew_recommendations_use_differentiated_roles() {
+        let roles =
+            recommended_role_bindings(crate::commands::InitMode::Crew, &available_model_ids());
+        assert_eq!(roles.proposer, "claude-opus");
+        assert_eq!(roles.drafter, "claude-sonnet");
+        assert_eq!(roles.reviewer, "codex-gpt5");
+    }
+
+    #[test]
+    fn one_model_binds_all_roles() {
+        let roles = RoleBindings::one_model("copilot".to_owned());
+        for (_, model) in roles.entries() {
+            assert_eq!(model, "copilot");
+        }
     }
 }
