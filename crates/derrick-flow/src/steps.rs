@@ -12,7 +12,7 @@ use derrick_tools::{CopilotToolPermission, HostRegistry, HostRequest};
 use owo_colors::OwoColorize;
 
 use crate::clarify;
-use derrick_assay::io::{create_dir_all, write_log};
+use derrick_assay::io::write_log;
 use derrick_assay::names::host_name;
 use derrick_assay::template::{render_template, TemplateContext};
 use derrick_assay::types::{RunError, StepExecution, StepRecord, StepStatus};
@@ -152,13 +152,13 @@ async fn execute_role_step(
         let host = hosts
             .get(host_name)
             .ok_or_else(|| RunError::Config(format!("host {host_name:?} is not registered")))?;
-        if step.id() == "specify" {
-            create_dir_all(
-                &working_dir(state, repo_root)
-                    .join(".specify")
-                    .join("features"),
-            )?;
-        }
+        let pre_specify = if step.id() == "specify" {
+            Some(derrick_assay::io::snapshot_feature_dirs(working_dir(
+                state, repo_root,
+            )))
+        } else {
+            None
+        };
         let mut request = HostRequest::new(prompt, working_dir(state, repo_root));
         request.headless = true;
         if host_name == "copilot" {
@@ -172,10 +172,12 @@ async fn execute_role_step(
                 message: source.to_string(),
             })?;
         write_log(log_path, &response.stdout, &response.stderr)?;
-        if step.id() == "specify" {
-            state.feature_dir = Some(derrick_assay::io::read_feature_dir(working_dir(
-                state, repo_root,
-            ))?);
+        if let Some(before) = pre_specify {
+            let wd = working_dir(state, repo_root);
+            let after = derrick_assay::io::snapshot_feature_dirs(wd);
+            let feature_dir = derrick_assay::io::resolve_new_feature_dir(&before, &after, wd)?;
+            derrick_assay::io::write_feature_json(wd, &feature_dir)?;
+            state.feature_dir = Some(feature_dir);
         }
         Ok(StepExecution::success(detect_artifacts(
             step.id(),

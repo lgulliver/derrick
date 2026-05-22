@@ -1139,15 +1139,14 @@ fi
     }
 
     #[tokio::test]
-    async fn specify_step_pre_creates_specify_features_dir() -> TestResult {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        struct ProbeHost {
-            dir_existed_at_invocation: Arc<AtomicBool>,
-        }
+    async fn specify_step_detects_new_feature_dir_and_writes_feature_json() -> TestResult {
+        // Verify that derrick writes feature.json after the specify step without
+        // relying on the AI host to produce it.  The host only creates the
+        // feature directory and spec.md — no feature.json.
+        struct MinimalSpecifyHost;
 
         #[async_trait::async_trait]
-        impl HostAdapter for ProbeHost {
+        impl HostAdapter for MinimalSpecifyHost {
             fn name(&self) -> &str {
                 "claude"
             }
@@ -1155,30 +1154,19 @@ fi
                 true
             }
             async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
-                let exists = request.cwd.join(".specify/features").is_dir();
-                self.dir_existed_at_invocation
-                    .store(exists, Ordering::SeqCst);
-                let feature = request.cwd.join("specs/001-test");
+                let feature = request.cwd.join("specs/my-feature");
                 std::fs::create_dir_all(&feature).map_err(|source| HostError::Io {
                     host: "claude".to_owned(),
                     source,
                 })?;
-                std::fs::write(
-                    request.cwd.join(FEATURE_JSON),
-                    r#"{"feature_directory":"specs/001-test"}"#,
-                )
-                .map_err(|source| HostError::Io {
-                    host: "claude".to_owned(),
-                    source,
-                })?;
-                std::fs::write(feature.join("spec.md"), "spec").map_err(|source| {
+                std::fs::write(feature.join("spec.md"), "spec content").map_err(|source| {
                     HostError::Io {
                         host: "claude".to_owned(),
                         source,
                     }
                 })?;
                 Ok(HostResponse {
-                    stdout: "ok\n".to_owned(),
+                    stdout: "spec written to specs/my-feature/spec.md\n".to_owned(),
                     stderr: String::new(),
                     exit_code: 0,
                     elapsed: Duration::from_millis(1),
@@ -1213,31 +1201,27 @@ fi
             config.site().clone(),
         )
         .await?;
-        let flag = Arc::new(AtomicBool::new(false));
         let mut hosts = HostRegistry::empty();
-        hosts.register(
-            "claude",
-            Box::new(ProbeHost {
-                dir_existed_at_invocation: Arc::clone(&flag),
-            }),
-        );
+        hosts.register("claude", Box::new(MinimalSpecifyHost));
         let runner = Runner::new(config, Arc::new(substrate), hosts, dir.path().to_path_buf());
         runner
             .run_pipeline(
                 ADD_FEATURE_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
-                    run_id: Some("specify-precreate".to_owned()),
+                    run_id: Some("specify-detect".to_owned()),
                     ..PipelineInput::default()
                 },
             )
             .await?;
 
+        let feature_json =
+            std::fs::read_to_string(dir.path().join(FEATURE_JSON)).expect("feature.json missing");
         assert!(
-            flag.load(Ordering::SeqCst),
-            ".specify/features must exist before the specify host runs"
+            feature_json.contains("specs/my-feature"),
+            "feature.json should point to specs/my-feature, got: {feature_json}"
         );
-        assert!(dir.path().join(".specify/features").is_dir());
+        assert!(dir.path().join("specs/my-feature/spec.md").exists());
         Ok(())
     }
 

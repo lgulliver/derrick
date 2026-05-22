@@ -185,6 +185,13 @@ pub fn default_run_id() -> String {
 
 pub const FEATURE_JSON: &str = ".specify/feature.json";
 
+/// Roots derrick scans for feature directories created by spec-kit or shims.
+///
+/// Real spec-kit writes to `specs/`; the built-in shims write to `specs/` too
+/// (after the shim update). `.specify/features/` is kept as a fallback so that
+/// repos initialised with older shims continue to work.
+pub const FEATURE_ROOTS: [&str; 2] = ["specs", ".specify/features"];
+
 pub fn read_feature_dir(repo_root: &Path) -> Result<std::path::PathBuf, RunError> {
     use serde_json::Value;
     let path = repo_root.join(FEATURE_JSON);
@@ -200,4 +207,75 @@ pub fn read_feature_dir(repo_root: &Path) -> Result<std::path::PathBuf, RunError
             RunError::Config(".specify/feature.json missing feature_directory".to_owned())
         })?;
     Ok(std::path::PathBuf::from(feature_dir))
+}
+
+/// Writes `.specify/feature.json` pointing at `feature_dir` (relative to `repo_root`).
+///
+/// Called by the pipeline runner after the `specify` step completes, so that
+/// resume and downstream steps can locate the feature directory without
+/// depending on the AI having written the file itself.
+pub fn write_feature_json(repo_root: &Path, feature_dir: &std::path::Path) -> Result<(), RunError> {
+    let dir = repo_root.join(".specify");
+    create_dir_all(&dir)?;
+    let path = repo_root.join(FEATURE_JSON);
+    let content = format!(
+        "{{\n  \"feature_directory\": \"{}\"\n}}\n",
+        feature_dir.display()
+    );
+    write_file(&path, &content)
+}
+
+/// Snapshots the immediate subdirectories of every [`FEATURE_ROOTS`] entry
+/// under `wd`, returning their paths relative to `wd`.
+pub fn snapshot_feature_dirs(wd: &Path) -> std::collections::BTreeSet<std::path::PathBuf> {
+    let mut dirs = std::collections::BTreeSet::new();
+    for root_rel in FEATURE_ROOTS {
+        let root = wd.join(root_rel);
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    dirs.insert(std::path::PathBuf::from(root_rel).join(entry.file_name()));
+                }
+            }
+        }
+    }
+    dirs
+}
+
+/// Given a before/after snapshot pair, returns the single new feature directory
+/// (relative to `wd`) created during the specify step.
+///
+/// If the snapshot diff finds no new directory (e.g. the feature dir already
+/// existed on a retry or resume), falls back to reading `feature.json` so
+/// that pipelines can recover cleanly without re-creating the directory.
+pub fn resolve_new_feature_dir(
+    before: &std::collections::BTreeSet<std::path::PathBuf>,
+    after: &std::collections::BTreeSet<std::path::PathBuf>,
+    wd: &Path,
+) -> Result<std::path::PathBuf, RunError> {
+    let new: Vec<_> = after.difference(before).collect();
+    match new.len() {
+        0 => {
+            // No new dir — fall back to feature.json for retry/resume cases.
+            read_feature_dir(wd).map_err(|_| {
+                RunError::Config(
+                    "specify step completed but no new feature directory was found in \
+                     `specs/` or `.specify/features/`, and `.specify/feature.json` is \
+                     absent or unreadable; make sure the specify step creates a \
+                     directory under `specs/`"
+                        .to_owned(),
+                )
+            })
+        }
+        1 => Ok(new[0].clone()),
+        _ => Err(RunError::Config(format!(
+            "specify step created {} new directories — expected exactly one ({}); \
+             check that the specify step creates only one feature directory per run",
+            new.len(),
+            new.iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }

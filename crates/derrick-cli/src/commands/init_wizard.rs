@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use derrick_adopt::ConstitutionMode;
@@ -7,6 +7,47 @@ use derrick_adopt::ConstitutionMode;
 use crate::commands::init::{
     available_model_ids, recommended_role_bindings, validate_prefix, RoleBindings,
 };
+
+// ─── terminal style ──────────────────────────────────────────────────────────
+
+fn is_styled() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+fn bold(s: &str) -> String {
+    if is_styled() {
+        format!("\x1b[1m{s}\x1b[0m")
+    } else {
+        s.to_owned()
+    }
+}
+
+fn dim(s: &str) -> String {
+    if is_styled() {
+        format!("\x1b[2m{s}\x1b[0m")
+    } else {
+        s.to_owned()
+    }
+}
+
+fn cyan(s: &str) -> String {
+    if is_styled() {
+        format!("\x1b[36m{s}\x1b[0m")
+    } else {
+        s.to_owned()
+    }
+}
+
+fn hr() -> String {
+    format!("  {}", "─".repeat(62))
+}
+
+fn section_rule(title: &str) -> String {
+    let fill = 62usize.saturating_sub(title.len() + 5);
+    format!("  ─── {title} {}", "─".repeat(fill))
+}
+
+// ─── types ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AiConfigurationStyle {
@@ -63,17 +104,31 @@ pub(crate) enum WizardSelection {
     Cancelled,
 }
 
+// ─── wizard entry point ───────────────────────────────────────────────────────
+
 pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliError> {
-    println!("Derrick setup wizard");
-    println!("Derrick will initialise orchestration config for this repository.");
-    println!("Repository: {}", input.repo_root.display());
+    println!();
+    println!("  {}", bold("derrick setup wizard"));
+    println!("{}", hr());
+    println!();
+    println!("  {:<9}  {}", "repo", input.repo_root.display());
     println!(
-        "Existing derrick.yaml: {}",
-        yes_no(input.has_existing_config)
+        "  {:<9}  {}",
+        "config",
+        if input.has_existing_config {
+            "found".to_owned()
+        } else {
+            dim("not found")
+        }
     );
     println!(
-        "Looks like an existing project: {}",
-        yes_no(input.likely_existing_project)
+        "  {:<9}  {}",
+        "status",
+        if input.likely_existing_project {
+            "existing project"
+        } else {
+            "new project"
+        }
     );
     println!();
 
@@ -87,12 +142,12 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
     let site_name = prompt_text("Project name", &input.default_site_name)?;
 
     let prefix = loop {
-        let value = prompt_text("Derrick prefix / Ticket prefix", &input.default_prefix)?;
+        let value = prompt_text("Ticket prefix", &input.default_prefix)?;
         match validate_prefix(&value) {
             Ok(()) => break value,
             Err(error) => {
-                eprintln!("{error}");
-                eprintln!("Please use lowercase ASCII, 1 to 6 characters.");
+                eprintln!("  {error}");
+                eprintln!("  Please use lowercase ASCII, 1 to 6 characters.");
             }
         }
     };
@@ -100,9 +155,9 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
     let mode = match prompt_select(
         "Operating mode",
         &[
-            "solo — local-first, minimal orchestration",
-            "copilot — optimised for GitHub Copilot CLI workflows",
-            "crew — richer multi-role orchestration",
+            "solo      local-first, minimal orchestration",
+            "copilot   optimised for GitHub Copilot CLI workflows",
+            "crew      richer multi-role orchestration",
         ],
         mode_to_index(input.default_mode),
     )? {
@@ -112,16 +167,16 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
     };
 
     println!();
-    println!("AI tools");
-    println!("Derrick can use different AI tools for different stages. You can keep the recommended defaults or choose per stage.");
+    println!("{}", section_rule("AI tools"));
+    println!("  Derrick can use different AI tools for different stages.");
 
     let available_model_ids = available_model_ids();
     let role_defaults = recommended_role_bindings(mode, &available_model_ids);
     let ai_mode = prompt_select(
         "How would you like to configure AI tools?",
         &[
-            "Use recommended defaults",
-            "Use one tool for all stages",
+            "Recommended defaults",
+            "One tool for all stages",
             "Choose per stage",
         ],
         0,
@@ -231,12 +286,14 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
 
     print_preview(&input, &output);
 
-    if !prompt_yes_no("Proceed with these changes?", true)? {
+    if !prompt_yes_no("Proceed?", true)? {
         return Ok(WizardSelection::Cancelled);
     }
 
     Ok(WizardSelection::Proceed(output))
 }
+
+// ─── preview ─────────────────────────────────────────────────────────────────
 
 fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
     let WizardOutput {
@@ -253,62 +310,87 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
         jetbrains,
         force,
     } = output;
+
+    let top_rule = format!("  ╭─ Preview {}", "─".repeat(52));
+    let bottom_rule = format!("  ╰{}", "─".repeat(62));
+    let blank = "  │".to_owned();
+
+    let kv = |label: &str, value: &str| -> String { format!("  │  {label:<15}  {value}") };
+    let sub_kv = |label: &str, value: &str| -> String { format!("  │    {label:<13}  {value}") };
+    let section = |title: &str| -> String { format!("  │  {}", bold(title)) };
+    let bullet = |value: &str| -> String { format!("  │    {}  {value}", dim("·")) };
+
     println!();
-    println!("Preview");
-    println!("Repository path: {}", input.repo_root.display());
+    println!("{top_rule}");
+    println!("{blank}");
     println!(
-        "Init type: {}",
-        if *greenfield {
-            "fresh project"
-        } else {
-            "existing repo"
-        }
+        "{}",
+        kv("Repository", &input.repo_root.display().to_string())
     );
-    println!("Project name: {site_name}");
-    println!("Derrick prefix / Ticket prefix: {prefix}");
-    println!("Operating mode: {}", mode.as_str());
-    println!("AI tool configuration: {}", ai_style.label());
-    println!("Role bindings:");
-    println!("  Planning: {}", roles.proposer);
-    println!("  Drafting: {}", roles.drafter);
-    println!("  Review: {}", roles.reviewer);
-    println!("  Execution: {}", roles.executor);
-    println!("  Summary: {}", roles.summariser);
+    println!(
+        "{}",
+        kv(
+            "Init type",
+            if *greenfield {
+                "fresh project"
+            } else {
+                "existing repo"
+            }
+        )
+    );
+    println!("{}", kv("Project", site_name));
+    println!("{}", kv("Prefix", prefix));
+    println!("{}", kv("Mode", mode.as_str()));
+    println!("{}", kv("AI config", ai_style.label()));
     if !greenfield {
+        println!("{}", kv("Constitution", constitution_label(*constitution)));
         println!(
-            "Constitution handling: {}",
-            constitution_label(*constitution)
-        );
-        println!(
-            "AGENTS.md guidance: {}",
-            if *append_agents_md { "yes" } else { "no" }
+            "{}",
+            kv(
+                "AGENTS.md",
+                if *append_agents_md { "append" } else { "skip" }
+            )
         );
     }
     println!(
-        "Codex instructions/hooks enabled: {}",
-        if *no_hooks { "no" } else { "yes" }
+        "{}",
+        kv("Hooks", if *no_hooks { "disabled" } else { "enabled" })
     );
-    println!("VS Code config: {}", yes_no(*vscode));
-    println!("JetBrains config: {}", yes_no(*jetbrains));
-    println!("Force overwrite enabled: {}", yes_no(*force));
-    println!("Expected writes:");
-    println!("  - derrick.yaml");
-    println!("  - .derrick/.gitignore");
-    println!("  - .derrick/derrick.db");
+    println!("{}", kv("VS Code", yes_no(*vscode)));
+    println!("{}", kv("JetBrains", yes_no(*jetbrains)));
+    println!("{}", kv("Force", yes_no(*force)));
+    println!("{blank}");
+    println!("{}", section("Role bindings"));
+    println!("{}", sub_kv("Planning", &roles.proposer));
+    println!("{}", sub_kv("Drafting", &roles.drafter));
+    println!("{}", sub_kv("Review", &roles.reviewer));
+    println!("{}", sub_kv("Execution", &roles.executor));
+    println!("{}", sub_kv("Summary", &roles.summariser));
+    println!("{blank}");
+    println!("{}", section("Files to write"));
+    println!("{}", bullet("derrick.yaml"));
+    println!("{}", bullet(".derrick/.gitignore"));
+    println!("{}", bullet(".derrick/derrick.db"));
     if !no_hooks {
-        println!("  - .codex/instructions.md");
+        println!("{}", bullet(".codex/instructions.md"));
+        println!("{}", bullet(".claude/settings.json"));
+        println!("{}", bullet(".claude/commands/speckit.*.md  (+4 others)"));
     }
     if *vscode {
-        println!("  - .vscode/tasks.json");
+        println!("{}", bullet(".vscode/tasks.json"));
     }
     if *jetbrains {
-        println!("  - .idea/runConfigurations/*.xml");
+        println!("{}", bullet(".idea/runConfigurations/*.xml"));
     }
+    println!("{blank}");
+    println!("{bottom_rule}");
     println!();
 }
 
+// ─── prompt helpers ───────────────────────────────────────────────────────────
+
 fn prompt_text(prompt: &str, default: &str) -> Result<String, crate::CliError> {
-    print!("{prompt} [{default}]: ");
+    print!("  {prompt} {}: ", dim(&format!("[{default}]")));
     io::stdout().flush().map_err(|error| crate::CliError::Io {
         path: "<stdout>".into(),
         source: error,
@@ -332,9 +414,13 @@ fn prompt_text(prompt: &str, default: &str) -> Result<String, crate::CliError> {
 }
 
 fn prompt_yes_no(prompt: &str, default_yes: bool) -> Result<bool, crate::CliError> {
-    let default_label = if default_yes { "Y/n" } else { "y/N" };
+    let hint = if default_yes {
+        format!("[{}/n]", bold("Y"))
+    } else {
+        format!("[y/{}]", bold("N"))
+    };
     loop {
-        print!("{prompt} [{default_label}]: ");
+        print!("  {prompt} {} ", dim(&hint));
         io::stdout().flush().map_err(|error| crate::CliError::Io {
             path: "<stdout>".into(),
             source: error,
@@ -359,7 +445,7 @@ fn prompt_yes_no(prompt: &str, default_yes: bool) -> Result<bool, crate::CliErro
         if matches!(answer.as_str(), "n" | "no") {
             return Ok(false);
         }
-        eprintln!("Please answer yes or no.");
+        eprintln!("  Please answer yes or no.");
     }
 }
 
@@ -368,13 +454,15 @@ fn prompt_select(
     options: &[&str],
     default_index: usize,
 ) -> Result<usize, crate::CliError> {
-    println!("{prompt}");
+    println!();
+    println!("  {}", bold(prompt));
+    println!();
     for (index, option) in options.iter().enumerate() {
-        println!("  {}. {}", index + 1, option);
+        println!("    {}  {option}", dim(&format!("{}", index + 1)));
     }
+    println!();
     loop {
-        let default_display = default_index + 1;
-        print!("Select [default {default_display}]: ");
+        print!("  {} ", cyan("›"));
         io::stdout().flush().map_err(|error| crate::CliError::Io {
             path: "<stdout>".into(),
             source: error,
@@ -398,7 +486,7 @@ fn prompt_select(
                 return Ok(choice - 1);
             }
         }
-        eprintln!("Please enter a number between 1 and {}.", options.len());
+        eprintln!("  Please enter a number between 1 and {}.", options.len());
     }
 }
 
@@ -411,13 +499,20 @@ fn prompt_model(
         .iter()
         .position(|(id, _)| *id == default_model_id)
         .unwrap_or(0);
-    println!("{prompt}");
+    println!();
+    println!("  {}", bold(prompt));
+    println!();
     for (index, (id, description)) in models.iter().enumerate() {
-        println!("  {}. {} ({})", index + 1, id, description);
+        println!(
+            "    {}  {} {}",
+            dim(&format!("{}", index + 1)),
+            id,
+            dim(&format!("({description})"))
+        );
     }
+    println!();
     loop {
-        let default_display = default + 1;
-        print!("Select [default {default_display}]: ");
+        print!("  {} ", cyan("›"));
         io::stdout().flush().map_err(|error| crate::CliError::Io {
             path: "<stdout>".into(),
             source: error,
@@ -441,9 +536,11 @@ fn prompt_model(
                 return Ok(models[choice - 1].0.to_owned());
             }
         }
-        eprintln!("Please enter a number between 1 and {}.", models.len());
+        eprintln!("  Please enter a number between 1 and {}.", models.len());
     }
 }
+
+// ─── validation ──────────────────────────────────────────────────────────────
 
 fn validate_role_models(
     roles: &RoleBindings,
@@ -458,6 +555,8 @@ fn validate_role_models(
     }
     Ok(())
 }
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
 
 fn mode_to_index(mode: crate::commands::InitMode) -> usize {
     match mode {
@@ -478,10 +577,10 @@ fn constitution_to_index(mode: ConstitutionMode) -> usize {
 
 fn constitution_label(mode: ConstitutionMode) -> &'static str {
     match mode {
-        ConstitutionMode::Reference => "Reference existing docs",
-        ConstitutionMode::Stub => "Generate stub",
-        ConstitutionMode::FromDocs => "Draft from docs",
-        _ => "Reference existing docs",
+        ConstitutionMode::Reference => "reference existing docs",
+        ConstitutionMode::Stub => "generate stub",
+        ConstitutionMode::FromDocs => "draft from docs",
+        _ => "reference existing docs",
     }
 }
 
@@ -492,6 +591,8 @@ fn yes_no(value: bool) -> &'static str {
         "no"
     }
 }
+
+// ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

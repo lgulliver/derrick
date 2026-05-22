@@ -47,11 +47,16 @@ const DERRICK_BLOCK_START: &str = "<!-- derrick:start -->";
 const DERRICK_BLOCK_END: &str = "<!-- derrick:end -->";
 const DRAFT_BANNER_PREFIX: &str = "<!-- DERRICK-DRAFT:";
 const CLAUDE_MATCHERS: [&str; 6] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"];
-const COMMAND_NAMES: [&str; 4] = [
+const COMMAND_NAMES: [&str; 9] = [
     "add-feature.md",
     "derrick-status.md",
     "derrick-doctor.md",
     "derrick-resume.md",
+    "speckit.specify.md",
+    "speckit.clarify.md",
+    "speckit.plan.md",
+    "speckit.analyze.md",
+    "speckit.tasks.md",
 ];
 const AGENT_NAMES: [&str; 2] = ["foreman.md", "hand-copilot.md"];
 const CONSTITUTION_CANDIDATES: [&str; 8] = [
@@ -1208,6 +1213,26 @@ fn command_template(name: &str) -> String {
         "derrick-resume.md" => {
             "# /derrick-resume\n\nRun `derrick run add-feature --resume-from \"$ARGUMENTS\"`.\n"
         }
+        "speckit.specify.md" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.claude/commands/speckit.specify.md"
+        )),
+        "speckit.clarify.md" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.claude/commands/speckit.clarify.md"
+        )),
+        "speckit.plan.md" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.claude/commands/speckit.plan.md"
+        )),
+        "speckit.analyze.md" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.claude/commands/speckit.analyze.md"
+        )),
+        "speckit.tasks.md" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.claude/commands/speckit.tasks.md"
+        )),
         _ => "# Derrick command\n",
     }
     .to_owned()
@@ -1253,6 +1278,107 @@ pub fn write_codex_instructions(repo_root: &Path) -> Result<(), AdoptError> {
     };
     fs::write(&path, content).map_err(|source| AdoptError::Io { path, source })?;
     Ok(())
+}
+
+/// Writes `.claude/settings.json` with derrick's scrub and caveman hooks.
+///
+/// - If the file does not exist, creates it from scratch.
+/// - If the file exists, merges derrick's hooks in without clobbering user entries
+///   (same semantics as the adopt path).
+/// - `force` controls whether to prepend over conflicting hook entries.
+///
+/// Called by the greenfield init path; the brownfield adopt path drives the
+/// same write through [`AdoptionPlan`].
+pub fn write_claude_settings(repo_root: &Path, force: bool) -> Result<(), AdoptError> {
+    let dir = repo_root.join(".claude");
+    fs::create_dir_all(&dir).map_err(|source| AdoptError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let path = dir.join("settings.json");
+    let mut root = if path.exists() {
+        let contents = fs::read_to_string(&path).map_err(|source| AdoptError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        serde_json::from_str::<Value>(&contents).map_err(|error| {
+            AdoptError::InvalidOptions(format!("{} is corrupt JSON: {error}", path.display()))
+        })?
+    } else {
+        json!({})
+    };
+    if !root.is_object() {
+        return Err(AdoptError::InvalidOptions(
+            ".claude/settings.json must contain a JSON object".to_owned(),
+        ));
+    }
+
+    let hooks = root
+        .as_object_mut()
+        .and_then(|object| {
+            object
+                .entry("hooks")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        })
+        .ok_or_else(|| {
+            AdoptError::InvalidOptions(".claude/settings.json hooks must be an object".to_owned())
+        })?;
+
+    let mut blockers = Vec::new();
+    let mut warnings = Vec::new();
+    merge_stage_hooks(
+        hooks,
+        "PreToolUse",
+        "derrick:scrub",
+        force,
+        &mut blockers,
+        &mut warnings,
+    );
+    merge_stage_hooks(
+        hooks,
+        "PostToolUse",
+        "derrick:caveman",
+        force,
+        &mut blockers,
+        &mut warnings,
+    );
+    if !blockers.is_empty() {
+        return Err(AdoptError::InvalidOptions(blockers.join("; ")));
+    }
+    let _ = warnings;
+    let content = serde_json::to_string_pretty(&root)?;
+    fs::write(&path, format!("{content}\n")).map_err(|source| AdoptError::Io { path, source })?;
+    Ok(())
+}
+
+/// Writes derrick's Claude Code command files to `<repo_root>/.claude/commands/`.
+///
+/// Skips any command file that already exists so user-customised versions are
+/// not clobbered. Pass `force = true` to overwrite existing files.
+///
+/// Called by the greenfield init path; the brownfield adopt path drives the
+/// same writes through [`AdoptionPlan`].
+pub fn write_claude_commands(repo_root: &Path, force: bool) -> Result<Vec<String>, AdoptError> {
+    let dir = repo_root.join(".claude").join("commands");
+    fs::create_dir_all(&dir).map_err(|source| AdoptError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let mut written = Vec::new();
+    for name in COMMAND_NAMES {
+        let path = dir.join(name);
+        if path.exists() && !force {
+            continue;
+        }
+        let content = command_template(name);
+        fs::write(&path, content).map_err(|source| AdoptError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        written.push(format!(".claude/commands/{name}"));
+    }
+    Ok(written)
 }
 
 /// Removes the derrick block from `<repo_root>/.codex/instructions.md`.

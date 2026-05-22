@@ -230,7 +230,7 @@ fn greenfield_init_in_empty_repo_creates_files() -> TestResult {
         .stdout
         .clone();
 
-    assert_contains(&output, "initialised derrick project test")?;
+    assert_contains(&output, "test  ready")?;
     assert!(dir.path().join("derrick.yaml").exists());
     assert!(dir.path().join(".derrick/derrick.db").exists());
     Ok(())

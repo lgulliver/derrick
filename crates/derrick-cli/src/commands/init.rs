@@ -226,10 +226,23 @@ async fn brownfield_init(
     }
 
     let outcome = adopter.apply(&plan).await?;
-    println!("initialised derrick project {}", opts.site_name);
-    println!("written      {}", join_paths(&outcome.written));
+    println!();
+    if is_styled() {
+        println!(
+            "  \x1b[32m✓\x1b[0m  \x1b[1m{}\x1b[0m  ready",
+            opts.site_name
+        );
+    } else {
+        println!("  ✓  {}  ready", opts.site_name);
+    }
+    println!();
+    for path in &outcome.written {
+        print_written(&path.display().to_string());
+    }
     if !outcome.bookkeeping.is_empty() {
-        println!("bookkeeping  {}", join_paths(&outcome.bookkeeping));
+        for path in &outcome.bookkeeping {
+            print_written(&path.display().to_string());
+        }
     }
     if resolved.vscode {
         write_vscode_configs(repo_root)?;
@@ -238,8 +251,14 @@ async fn brownfield_init(
         write_jetbrains_configs(repo_root)?;
     }
     if !resolved.yes {
-        println!("next         review `git status` before committing");
+        println!();
+        if is_styled() {
+            println!("  \x1b[36m›\x1b[0m  review `git status` before committing");
+        } else {
+            println!("  ›  review `git status` before committing");
+        }
     }
+    println!();
     Ok(CliExitCode::Success)
 }
 
@@ -277,7 +296,15 @@ async fn greenfield_init(
 
     if !resolved.no_hooks {
         derrick_adopt::write_codex_instructions(repo_root).map_err(|e| message(e.to_string()))?;
-        println!("written      .codex/instructions.md");
+        derrick_adopt::write_claude_settings(repo_root, resolved.force)
+            .map_err(|e| message(e.to_string()))?;
+        let written_commands = derrick_adopt::write_claude_commands(repo_root, resolved.force)
+            .map_err(|e| message(e.to_string()))?;
+        print_written(".codex/instructions.md");
+        print_written(".claude/settings.json");
+        for path in &written_commands {
+            print_written(path);
+        }
     }
 
     if resolved.vscode {
@@ -572,9 +599,9 @@ fn write_vscode_configs(repo_root: &Path) -> Result<(), crate::CliError> {
     let path = dir.join("tasks.json");
     if !path.exists() {
         write_file(&path, VSCODE_TASKS_TEMPLATE)?;
-        println!("written      .vscode/tasks.json");
+        print_written(".vscode/tasks.json");
     } else {
-        println!("skipped      .vscode/tasks.json (already exists)");
+        print_skipped(".vscode/tasks.json");
     }
     Ok(())
 }
@@ -590,9 +617,9 @@ fn write_jetbrains_configs(repo_root: &Path) -> Result<(), crate::CliError> {
         let path = dir.join(filename);
         if !path.exists() {
             write_file(&path, content)?;
-            println!("written      .idea/runConfigurations/{filename}");
+            print_written(&format!(".idea/runConfigurations/{filename}"));
         } else {
-            println!("skipped      .idea/runConfigurations/{filename} (already exists)");
+            print_skipped(&format!(".idea/runConfigurations/{filename}"));
         }
     }
     Ok(())
@@ -674,6 +701,26 @@ fn join_paths(paths: &[std::path::PathBuf]) -> String {
         .join(", ")
 }
 
+fn print_written(path: &str) {
+    if is_styled() {
+        println!("  \x1b[32m·\x1b[0m  {path}");
+    } else {
+        println!("  ·  {path}");
+    }
+}
+
+fn print_skipped(path: &str) {
+    if is_styled() {
+        println!("  \x1b[2m·  {path}  (skipped, already exists)\x1b[0m");
+    } else {
+        println!("  ·  {path}  (skipped, already exists)");
+    }
+}
+
+fn is_styled() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
 fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
     let steps = config
         .pipeline()
@@ -681,15 +728,28 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
         .map(|step| step.id())
         .collect::<Vec<_>>()
         .join(", ");
-    println!("initialised derrick project {}", config.site().name());
-    println!(
-        "mode         {}",
-        mode_name(config.tools().substrate().mode())
-    );
-    println!("prefix       {}", config.site().prefix());
-    println!("ai config    {}", ai_style.label());
-    println!("pipeline     {steps}");
-    println!("next         run `derrick doctor` to verify the install");
+    let name = config.site().name();
+    let mode = mode_name(config.tools().substrate().mode());
+    let prefix = config.site().prefix();
+    let ai = ai_style.label();
+    println!();
+    if is_styled() {
+        println!("  \x1b[32m✓\x1b[0m  \x1b[1m{name}\x1b[0m  ready");
+    } else {
+        println!("  ✓  {name}  ready");
+    }
+    println!();
+    println!("  {:<11}  {mode}", "mode");
+    println!("  {:<11}  {prefix}", "prefix");
+    println!("  {:<11}  {ai}", "ai config");
+    println!("  {:<11}  {steps}", "pipeline");
+    println!();
+    if is_styled() {
+        println!("  \x1b[36m›\x1b[0m  run `derrick doctor` to verify the install");
+    } else {
+        println!("  ›  run `derrick doctor` to verify the install");
+    }
+    println!();
 }
 
 fn mode_name(mode: derrick_config::SubstrateMode) -> &'static str {
