@@ -2,127 +2,191 @@
   "hooks": {
     "PostToolUse": [
       {
+        "matcher": "Bash",
         "hooks": [
           {
-            "command": "derrick caveman --intensity lite",
-            "description": "derrick:caveman",
-            "type": "command"
+            "type": "command",
+            "command": "derrick caveman --intensity lite"
           }
-        ],
-        "matcher": "Bash"
+        ]
       },
       {
+        "matcher": "Read",
         "hooks": [
           {
-            "command": "derrick caveman --intensity lite",
-            "description": "derrick:caveman",
-            "type": "command"
+            "type": "command",
+            "command": "derrick caveman --intensity lite"
           }
-        ],
-        "matcher": "Read"
+        ]
       },
       {
+        "matcher": "Write",
         "hooks": [
           {
-            "command": "derrick caveman --intensity lite",
-            "description": "derrick:caveman",
-            "type": "command"
+            "type": "command",
+            "command": "derrick caveman --intensity lite"
           }
-        ],
-        "matcher": "Write"
+        ]
       },
       {
+        "matcher": "Edit",
         "hooks": [
           {
-            "command": "derrick caveman --intensity lite",
-            "description": "derrick:caveman",
-            "type": "command"
+            "type": "command",
+            "command": "derrick caveman --intensity lite"
           }
-        ],
-        "matcher": "Edit"
+        ]
       },
       {
+        "matcher": "Glob",
         "hooks": [
           {
-            "command": "derrick caveman --intensity lite",
-            "description": "derrick:caveman",
-            "type": "command"
+            "type": "command",
+            "command": "derrick caveman --intensity lite"
           }
-        ],
-        "matcher": "Glob"
+        ]
       },
       {
+        "matcher": "Grep",
         "hooks": [
           {
-            "command": "derrick caveman --intensity lite",
-            "description": "derrick:caveman",
-            "type": "command"
+            "type": "command",
+            "command": "derrick caveman --intensity lite"
           }
-        ],
-        "matcher": "Grep"
+        ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks claude-code post-task'"
+          }
+        ]
+      },
+      {
+        "matcher": "TodoWrite",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks claude-code post-todo'"
+          }
+        ]
       }
     ],
     "PreToolUse": [
       {
+        "matcher": "Bash",
         "hooks": [
           {
-            "command": "derrick scrub --tool bash",
-            "description": "derrick:scrub",
-            "type": "command"
+            "type": "command",
+            "command": "derrick scrub --tool bash"
           }
-        ],
-        "matcher": "Bash"
+        ]
       },
       {
+        "matcher": "Read",
         "hooks": [
           {
-            "command": "derrick scrub --tool read",
-            "description": "derrick:scrub",
-            "type": "command"
+            "type": "command",
+            "command": "derrick scrub --tool read"
           }
-        ],
-        "matcher": "Read"
+        ]
       },
       {
+        "matcher": "Write",
         "hooks": [
           {
-            "command": "derrick scrub --tool write",
-            "description": "derrick:scrub",
-            "type": "command"
+            "type": "command",
+            "command": "derrick scrub --tool write"
           }
-        ],
-        "matcher": "Write"
+        ]
       },
       {
+        "matcher": "Edit",
         "hooks": [
           {
-            "command": "derrick scrub --tool edit",
-            "description": "derrick:scrub",
-            "type": "command"
+            "type": "command",
+            "command": "derrick scrub --tool edit"
           }
-        ],
-        "matcher": "Edit"
+        ]
       },
       {
+        "matcher": "Glob",
         "hooks": [
           {
-            "command": "derrick scrub --tool glob",
-            "description": "derrick:scrub",
-            "type": "command"
+            "type": "command",
+            "command": "derrick scrub --tool glob"
           }
-        ],
-        "matcher": "Glob"
+        ]
       },
       {
+        "matcher": "Grep",
         "hooks": [
           {
-            "command": "derrick scrub --tool grep",
-            "description": "derrick:scrub",
-            "type": "command"
+            "type": "command",
+            "command": "derrick scrub --tool grep"
           }
-        ],
-        "matcher": "Grep"
+        ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks claude-code pre-task'"
+          }
+        ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks claude-code session-end'"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then printf \"%s\\n\" \"{\\\"systemMessage\\\":\\\"\\\\n\\\\nEntire CLI is enabled but not installed or not on PATH.\\\\nInstallation guide: https://docs.entire.io/cli/installation#installation-methods\\\"}\"; exit 0; fi; exec entire hooks claude-code session-start'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks claude-code stop'"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'if ! command -v entire >/dev/null 2>&1; then exit 0; fi; exec entire hooks claude-code user-prompt-submit'"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(./.entire/metadata/**)"
     ]
   }
 }
