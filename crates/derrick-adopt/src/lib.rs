@@ -1434,8 +1434,24 @@ pub fn write_claude_commands(repo_root: &Path, force: bool) -> Result<Vec<String
         written.push(format!(".claude/commands/{name}"));
     }
     if speckit_available {
+        // `specify init` creates .specify/ and installs the Claude integration in one shot.
+        // Use it for greenfield repos; for projects where .specify/ already exists,
+        // fall back to `specify integration install claude`.
+        let specify_dir = repo_root.join(".specify");
+        let args: &[&str] = if specify_dir.exists() {
+            &["integration", "install", "claude"]
+        } else {
+            &[
+                "init",
+                "--here",
+                "--integration",
+                "claude",
+                "--no-git",
+                "--force",
+            ]
+        };
         if let Ok(status) = std::process::Command::new("specify")
-            .args(["integration", "install", "claude"])
+            .args(args)
             .current_dir(repo_root)
             .status()
         {
