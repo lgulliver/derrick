@@ -225,7 +225,7 @@ async fn execute_derrick_step(
                 .clone()
                 .ok_or_else(|| RunError::Config("assay requires feature_dir".to_owned()))?;
             let wd = working_dir(state, repo_root).to_path_buf();
-            ensure_constitution(config, &wd)?;
+            ensure_constitution(config, &wd, hosts.clone()).await?;
             let prompt = state.prompt.clone();
             let run_id = state.run_id.clone();
             assay::execute_assay(
@@ -756,23 +756,128 @@ fn completion_request(
     }
 }
 
-fn ensure_constitution(
+async fn ensure_constitution(
     config: &derrick_config::Config,
     working_dir: &std::path::Path,
+    hosts: Arc<HostRegistry>,
 ) -> Result<(), RunError> {
     let constitution_path = config.guardrails().constitution_path();
     let full_path = working_dir.join(constitution_path);
     if full_path.exists() {
         return Ok(());
     }
-    use owo_colors::OwoColorize as _;
+
     eprintln!(
         "  {}  No constitution found at {}",
         "⚠".yellow(),
         constitution_path.display()
     );
-    eprintln!("     The constitution defines project-specific rules that the plan reviewer");
-    eprintln!("     enforces. Writing a starter stub — edit it to add your project's rules.");
+    eprintln!(
+        "     {}",
+        "The constitution captures durable rules that the plan reviewer enforces.".bright_black()
+    );
+    eprintln!(
+        "     {}",
+        "Describe your project's key rules, constraints, and principles below.".bright_black()
+    );
+    eprintln!(
+        "     {}",
+        "End with a blank line to submit (or just a blank line to skip and write a stub)."
+            .bright_black()
+    );
+    eprintln!();
+    eprint!("  {} ", ">".cyan());
+    std::io::stdout().flush().map_err(|source| RunError::Io {
+        path: PathBuf::from("<stdout>"),
+        source,
+    })?;
+
+    let mut description = String::new();
+    let stdin = std::io::stdin();
+    loop {
+        let mut line = String::new();
+        let n = stdin.read_line(&mut line).map_err(|source| RunError::Io {
+            path: PathBuf::from("<stdin>"),
+            source,
+        })?;
+        if n == 0 {
+            // EOF
+            break;
+        }
+        if line.trim().is_empty() {
+            break;
+        }
+        description.push_str(&line);
+        eprint!("  {} ", ">".cyan());
+        std::io::stdout().flush().map_err(|source| RunError::Io {
+            path: PathBuf::from("<stdout>"),
+            source,
+        })?;
+    }
+
+    let description = description.trim().to_owned();
+
+    if description.is_empty() {
+        eprintln!(
+            "  {}  No description provided — writing a starter stub instead.",
+            "·".yellow()
+        );
+        derrick_adopt::write_constitution_stub(working_dir, constitution_path).map_err(|e| {
+            RunError::Io {
+                path: full_path.clone(),
+                source: std::io::Error::other(e.to_string()),
+            }
+        })?;
+        eprintln!("  {}  {}", "·".green(), constitution_path.display());
+        return Ok(());
+    }
+
+    // Write the speckit.constitution shim into the *target* repo's .claude/commands/
+    // so the host can invoke /speckit.constitution.
+    let commands_dir = working_dir.join(".claude").join("commands");
+    std::fs::create_dir_all(&commands_dir).map_err(|source| RunError::Io {
+        path: commands_dir.clone(),
+        source,
+    })?;
+    let shim_path = commands_dir.join("speckit.constitution.md");
+    if !shim_path.exists() {
+        std::fs::write(&shim_path, derrick_adopt::SPECKIT_CONSTITUTION_SHIM).map_err(|source| {
+            RunError::Io {
+                path: shim_path.clone(),
+                source,
+            }
+        })?;
+    }
+
+    eprintln!(
+        "  {}  Generating constitution via claude /speckit.constitution …",
+        "·".cyan()
+    );
+
+    let host = hosts.get("claude").ok_or_else(|| {
+        RunError::Config("constitution authoring requires the claude host adapter".to_owned())
+    })?;
+    let prompt = format!("/speckit.constitution {description}");
+    let mut request = HostRequest::new(prompt, working_dir);
+    request.headless = true;
+    let _ = host
+        .run(request)
+        .await
+        .map_err(|source| RunError::StepFailed {
+            id: "assay".to_owned(),
+            message: format!("claude /speckit.constitution failed: {source}"),
+        })?;
+
+    // Verify the host actually produced the file; if not, fall back to the stub.
+    if full_path.exists() {
+        eprintln!("  {}  {}", "·".green(), constitution_path.display());
+        return Ok(());
+    }
+
+    eprintln!(
+        "  {}  Host did not write the constitution — falling back to stub.",
+        "⚠".yellow()
+    );
     derrick_adopt::write_constitution_stub(working_dir, constitution_path).map_err(|e| {
         RunError::Io {
             path: full_path,

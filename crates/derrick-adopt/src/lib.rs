@@ -34,6 +34,12 @@ const CODEX_INSTRUCTIONS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../templates/codex-instructions.md"
 ));
+/// The `/speckit.constitution` Claude command shim. Written into target repos
+/// during `derrick init` so the constitution can be generated interactively.
+pub const SPECKIT_CONSTITUTION_SHIM: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../.claude/commands/speckit.constitution.md"
+));
 const PRE_TOOL_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../templates/hooks/claude-pre-tool-use.json"
@@ -47,7 +53,7 @@ const DERRICK_BLOCK_START: &str = "<!-- derrick:start -->";
 const DERRICK_BLOCK_END: &str = "<!-- derrick:end -->";
 const DRAFT_BANNER_PREFIX: &str = "<!-- DERRICK-DRAFT:";
 const CLAUDE_MATCHERS: [&str; 6] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"];
-const COMMAND_NAMES: [&str; 9] = [
+const COMMAND_NAMES: [&str; 10] = [
     "add-feature.md",
     "derrick-status.md",
     "derrick-doctor.md",
@@ -57,6 +63,7 @@ const COMMAND_NAMES: [&str; 9] = [
     "speckit.plan.md",
     "speckit.analyze.md",
     "speckit.tasks.md",
+    "speckit.constitution.md",
 ];
 const AGENT_NAMES: [&str; 2] = ["foreman.md", "hand-copilot.md"];
 const CONSTITUTION_CANDIDATES: [&str; 8] = [
@@ -1232,6 +1239,10 @@ fn command_template(name: &str) -> String {
         "speckit.tasks.md" => include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../.claude/commands/speckit.tasks.md"
+        )),
+        "speckit.constitution.md" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.claude/commands/speckit.constitution.md"
         )),
         _ => "# Derrick command\n",
     }
