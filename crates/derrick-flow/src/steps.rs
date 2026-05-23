@@ -763,14 +763,23 @@ pub(crate) async fn ensure_constitution(
     let constitution_path = config.guardrails().constitution_path();
     let full_path = working_dir.join(constitution_path);
     if full_path.exists() {
-        return Ok(());
+        let contents = std::fs::read_to_string(&full_path).unwrap_or_default();
+        if !derrick_adopt::constitution_needs_setup(&contents) {
+            return Ok(());
+        }
+        // File exists but is still an unedited placeholder — treat as missing.
+        eprintln!(
+            "  {}  Constitution at {} is an unedited template.",
+            "⚠".yellow(),
+            constitution_path.display()
+        );
+    } else {
+        eprintln!(
+            "  {}  No constitution found at {}",
+            "⚠".yellow(),
+            constitution_path.display()
+        );
     }
-
-    eprintln!(
-        "  {}  No constitution found at {}",
-        "⚠".yellow(),
-        constitution_path.display()
-    );
     eprintln!(
         "     {}",
         "The constitution captures durable rules that the plan reviewer enforces.".bright_black()

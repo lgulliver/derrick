@@ -481,6 +481,7 @@ name = "derrick-assay"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "derrick-adopt",
  "derrick-config",
  "derrick-models",
  "derrick-substrate",

@@ -1603,6 +1603,13 @@ pub fn constitution_has_draft_banner(contents: &str) -> bool {
     contents.trim_start().starts_with(DRAFT_BANNER_PREFIX)
 }
 
+/// Returns true when a constitution is an unedited placeholder that needs
+/// real content — either derrick's DERRICK-DRAFT stub or speckit's
+/// `[PROJECT_NAME]` / `[PLACEHOLDER]` template.
+pub fn constitution_needs_setup(contents: &str) -> bool {
+    constitution_has_draft_banner(contents) || contents.contains("[PROJECT_NAME]")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2024,6 +2031,19 @@ mod tests {
             "<!-- DERRICK-DRAFT: remove -->\n# Constitution"
         ));
         assert!(!constitution_has_draft_banner("# Constitution"));
+    }
+
+    #[test]
+    fn needs_setup_catches_draft_banner_and_speckit_placeholder() {
+        assert!(constitution_needs_setup(
+            "<!-- DERRICK-DRAFT: remove -->\n# Constitution"
+        ));
+        assert!(constitution_needs_setup(
+            "# [PROJECT_NAME] Constitution\n\n## Core Principles\n"
+        ));
+        assert!(!constitution_needs_setup(
+            "# My Project Constitution\n\n## Rules\n- Use zerolog\n"
+        ));
     }
 
     #[tokio::test]

@@ -327,14 +327,14 @@ pub async fn run_reviewer_rounds(
     let rounds = assay_rounds(config, step, state)?;
     let spec = read_to_string(&working_dir.join(feature_dir).join("spec.md"))?;
     let constitution = read_to_string(&working_dir.join(config.guardrails().constitution_path()))?;
-    if constitution.trim_start().starts_with("<!-- DERRICK-DRAFT:") {
+    if derrick_adopt::constitution_needs_setup(&constitution) {
         eprintln!(
-            "  {}  assay skipped — constitution at {} is a draft stub",
+            "  {}  assay skipped — constitution at {} is an unedited placeholder",
             "⚠".yellow(),
             config.guardrails().constitution_path().display()
         );
         eprintln!(
-            "     Edit {} and add real rules before re-running.",
+            "     Edit {} and add real project rules before re-running.",
             config.guardrails().constitution_path().display()
         );
         return Ok(ReviewerRoundOutcome::Skipped);
