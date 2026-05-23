@@ -831,32 +831,41 @@ pub(crate) async fn ensure_constitution(
         return Ok(());
     }
 
-    // Write the speckit.constitution shim into the *target* repo's .claude/commands/
-    // so the host can invoke /speckit.constitution.
-    let commands_dir = working_dir.join(".claude").join("commands");
-    std::fs::create_dir_all(&commands_dir).map_err(|source| RunError::Io {
-        path: commands_dir.clone(),
-        source,
-    })?;
-    let shim_path = commands_dir.join("speckit.constitution.md");
-    if !shim_path.exists() {
-        std::fs::write(&shim_path, derrick_adopt::SPECKIT_CONSTITUTION_SHIM).map_err(|source| {
-            RunError::Io {
-                path: shim_path.clone(),
-                source,
-            }
+    // Prefer the real speckit skill when `specify integration install claude` has run;
+    // otherwise write derrick's shim as a fallback.
+    let real_skill = working_dir
+        .join(".claude/skills/speckit-constitution/SKILL.md")
+        .exists();
+    let constitution_command = if real_skill {
+        "/speckit-constitution".to_owned()
+    } else {
+        let commands_dir = working_dir.join(".claude").join("commands");
+        std::fs::create_dir_all(&commands_dir).map_err(|source| RunError::Io {
+            path: commands_dir.clone(),
+            source,
         })?;
-    }
+        let shim_path = commands_dir.join("speckit.constitution.md");
+        if !shim_path.exists() {
+            std::fs::write(&shim_path, derrick_adopt::SPECKIT_CONSTITUTION_SHIM).map_err(
+                |source| RunError::Io {
+                    path: shim_path.clone(),
+                    source,
+                },
+            )?;
+        }
+        "/speckit.constitution".to_owned()
+    };
 
     eprintln!(
-        "  {}  Generating constitution via claude /speckit.constitution …",
-        "·".cyan()
+        "  {}  Generating constitution via claude {} …",
+        "·".cyan(),
+        constitution_command
     );
 
     let host = hosts.get("claude").ok_or_else(|| {
         RunError::Config("constitution authoring requires the claude host adapter".to_owned())
     })?;
-    let prompt = format!("/speckit.constitution {description}");
+    let prompt = format!("{constitution_command} {description}");
     let mut request = HostRequest::new(prompt, working_dir);
     request.headless = true;
     let _ = host

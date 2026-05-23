@@ -332,6 +332,26 @@ impl Adopter {
         let substrate = NativeSubstrate::open(native_config, config.site().clone()).await?;
         substrate.close().await?;
 
+        if plan.install_speckit_integration {
+            if let Ok(status) = std::process::Command::new("specify")
+                .args(["integration", "install", "claude"])
+                .current_dir(&self.repo_root)
+                .status()
+            {
+                if status.success() {
+                    let skills_dir = self.repo_root.join(".claude/skills");
+                    if let Ok(entries) = fs::read_dir(&skills_dir) {
+                        for entry in entries.flatten() {
+                            let skill = entry.path().join("SKILL.md");
+                            if skill.is_file() {
+                                written.push(relative_path(&skill, &self.repo_root));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut bookkeeping = vec![
             PathBuf::from(".derrick/derrick.db"),
             relative_path(&stage_dir, &self.repo_root),
@@ -631,6 +651,11 @@ impl Adopter {
     ) {
         let colliding: BTreeSet<PathBuf> = detection.claude_commands.iter().cloned().collect();
         for command in COMMAND_NAMES {
+            // When speckit is installed, its own integration provides better versions of
+            // these commands as Claude Code skills. Skip derrick's fallback shims.
+            if detection.speckit_cli_available && command.starts_with("speckit.") {
+                continue;
+            }
             let path = PathBuf::from(".claude/commands").join(command);
             if opts.force || !colliding.contains(&path) {
                 plan.writes.push(PlannedWrite {
@@ -641,6 +666,7 @@ impl Adopter {
                 });
             }
         }
+        plan.install_speckit_integration = detection.speckit_cli_available;
 
         let colliding_agents: BTreeSet<String> = detection
             .claude_agents
@@ -895,6 +921,8 @@ pub struct AdoptionPlan {
     pub warnings: Vec<String>,
     /// Fatal blockers.
     pub blockers: Vec<String>,
+    /// When true, `apply` runs `specify integration install claude` after writing files.
+    pub install_speckit_integration: bool,
 }
 
 impl AdoptionPlan {
@@ -1365,6 +1393,10 @@ pub fn write_claude_settings(repo_root: &Path, force: bool) -> Result<(), AdoptE
 
 /// Writes derrick's Claude Code command files to `<repo_root>/.claude/commands/`.
 ///
+/// When `specify` is on PATH, derrick's `speckit.*` shims are skipped and
+/// `specify integration install claude` is run instead, installing the real
+/// speckit skills to `.claude/skills/`.
+///
 /// Skips any command file that already exists so user-customised versions are
 /// not clobbered. Pass `force = true` to overwrite existing files.
 ///
@@ -1376,8 +1408,13 @@ pub fn write_claude_commands(repo_root: &Path, force: bool) -> Result<Vec<String
         path: dir.clone(),
         source,
     })?;
+    let speckit_available = which::which("specify").is_ok();
     let mut written = Vec::new();
     for name in COMMAND_NAMES {
+        // When speckit is installed, its integration provides better versions of these commands.
+        if speckit_available && name.starts_with("speckit.") {
+            continue;
+        }
         let path = dir.join(name);
         if path.exists() && !force {
             continue;
@@ -1388,6 +1425,25 @@ pub fn write_claude_commands(repo_root: &Path, force: bool) -> Result<Vec<String
             source,
         })?;
         written.push(format!(".claude/commands/{name}"));
+    }
+    if speckit_available {
+        if let Ok(status) = std::process::Command::new("specify")
+            .args(["integration", "install", "claude"])
+            .current_dir(repo_root)
+            .status()
+        {
+            if status.success() {
+                let skills_dir = repo_root.join(".claude/skills");
+                if let Ok(entries) = fs::read_dir(&skills_dir) {
+                    for entry in entries.flatten() {
+                        let skill = entry.path().join("SKILL.md");
+                        if skill.is_file() {
+                            written.push(relative_path(&skill, repo_root).display().to_string());
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(written)
 }
