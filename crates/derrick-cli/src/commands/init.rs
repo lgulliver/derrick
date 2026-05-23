@@ -303,6 +303,9 @@ async fn greenfield_init(
         derrick_adopt::write_codex_instructions(repo_root).map_err(|e| message(e.to_string()))?;
         derrick_adopt::write_claude_settings(repo_root, resolved.force)
             .map_err(|e| message(e.to_string()))?;
+        if which::which("specify").is_err() {
+            ensure_speckit(resolved.yes)?;
+        }
         let written_commands = derrick_adopt::write_claude_commands(repo_root, resolved.force)
             .map_err(|e| message(e.to_string()))?;
         print_written(".codex/instructions.md");
@@ -767,6 +770,81 @@ fn ensure_git_repo(yes: bool) -> Result<std::path::PathBuf, crate::CliError> {
     }
 
     Ok(cwd)
+}
+
+fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
+    if is_styled() {
+        eprintln!(
+            "  \x1b[33m⚠\x1b[0m  \x1b[1mspeckit\x1b[0m (\x1b[1mspecify\x1b[0m) is not installed."
+        );
+        eprintln!(
+            "     \x1b[90mSpeckit provides richer Claude Code skills for specify/plan/constitution.\x1b[0m"
+        );
+        eprintln!(
+            "     \x1b[90mWithout it derrick will write minimal fallback shims instead.\x1b[0m"
+        );
+    } else {
+        eprintln!("  ⚠  speckit (specify) is not installed.");
+        eprintln!("     Speckit provides richer Claude Code skills for specify/plan/constitution.");
+        eprintln!("     Without it derrick will write minimal fallback shims instead.");
+    }
+
+    let install = if yes {
+        true
+    } else if std::io::stdin().is_terminal() {
+        if is_styled() {
+            eprint!("  \x1b[36m›\x1b[0m  Install speckit now (\x1b[1muv tool install specify-cli\x1b[0m)? [Y/n] ");
+        } else {
+            eprint!("  ›  Install speckit now (uv tool install specify-cli)? [Y/n] ");
+        }
+        use std::io::Write as _;
+        let _ = std::io::stderr().flush();
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|source| crate::CliError::Io {
+                path: std::path::PathBuf::from("<stdin>"),
+                source,
+            })?;
+        !matches!(input.trim().to_ascii_lowercase().as_str(), "n" | "no")
+    } else {
+        false
+    };
+
+    if !install {
+        if is_styled() {
+            eprintln!("  \x1b[33m·\x1b[0m  Skipping speckit install — using fallback shims.");
+        } else {
+            eprintln!("  ·  Skipping speckit install — using fallback shims.");
+        }
+        return Ok(());
+    }
+
+    let status = std::process::Command::new("uv")
+        .args(["tool", "install", "specify-cli"])
+        .status()
+        .map_err(|source| crate::CliError::Io {
+            path: std::path::PathBuf::from("uv"),
+            source,
+        })?;
+
+    if !status.success() {
+        if is_styled() {
+            eprintln!("  \x1b[33m⚠\x1b[0m  speckit install failed — falling back to shims.");
+            eprintln!("     Run \x1b[1muv tool install specify-cli\x1b[0m manually and re-run \x1b[1mderrick init\x1b[0m.");
+        } else {
+            eprintln!("  ⚠  speckit install failed — falling back to shims.");
+            eprintln!("     Run `uv tool install specify-cli` manually and re-run `derrick init`.");
+        }
+        return Ok(());
+    }
+
+    if is_styled() {
+        println!("  \x1b[32m·\x1b[0m  speckit installed");
+    } else {
+        println!("  ·  speckit installed");
+    }
+    Ok(())
 }
 
 fn print_written(path: &str) {

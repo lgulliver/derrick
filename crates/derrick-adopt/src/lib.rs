@@ -735,6 +735,13 @@ impl Adopter {
         opts: &AdoptOptions,
         warnings: &mut BTreeSet<String>,
     ) {
+        if !detection.speckit_cli_available {
+            warnings.insert(
+                "speckit (`specify`) not found; derrick wrote fallback shims to `.claude/commands/`. \
+                 Install speckit for richer skills: `uv tool install specify-cli`, then re-run `derrick init`."
+                    .to_owned(),
+            );
+        }
         if detection.specify_extensions_derrick.is_some() {
             warnings.insert(
                 "existing `.specify/extensions/derrick/` will be merged file-by-file; review the diff before committing."
