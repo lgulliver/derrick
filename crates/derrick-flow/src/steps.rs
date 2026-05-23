@@ -225,7 +225,6 @@ async fn execute_derrick_step(
                 .clone()
                 .ok_or_else(|| RunError::Config("assay requires feature_dir".to_owned()))?;
             let wd = working_dir(state, repo_root).to_path_buf();
-            ensure_constitution(config, &wd, hosts.clone()).await?;
             let prompt = state.prompt.clone();
             let run_id = state.run_id.clone();
             assay::execute_assay(
@@ -756,7 +755,7 @@ fn completion_request(
     }
 }
 
-async fn ensure_constitution(
+pub(crate) async fn ensure_constitution(
     config: &derrick_config::Config,
     working_dir: &std::path::Path,
     hosts: Arc<HostRegistry>,

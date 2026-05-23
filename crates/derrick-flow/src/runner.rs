@@ -174,6 +174,9 @@ impl Runner {
             pipeline_id.cyan(),
             format!("run {run_id}").bright_black()
         );
+        steps::ensure_constitution(&self.config, self.working_dir(&state), self.hosts.clone())
+            .await?;
+
         let tail = &self.config.pipeline()[start_index..];
         let mut idx = 0usize;
         'outer: while idx < tail.len() {
