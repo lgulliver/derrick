@@ -70,6 +70,8 @@ pub(crate) struct WizardInput<'a> {
     pub(crate) repo_root: &'a Path,
     pub(crate) has_existing_config: bool,
     pub(crate) likely_existing_project: bool,
+    /// When true the wizard skips the init-type question and assumes greenfield.
+    pub(crate) force_greenfield: bool,
     pub(crate) default_greenfield: bool,
     pub(crate) default_site_name: String,
     pub(crate) default_prefix: String,
@@ -132,12 +134,22 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
     );
     println!();
 
-    let init_type = prompt_select(
-        "What are you setting up?",
-        &["Adopt existing repo", "Start fresh"],
-        if input.default_greenfield { 1 } else { 0 },
-    )?;
-    let greenfield = init_type == 1;
+    let greenfield = if input.force_greenfield {
+        println!(
+            "  {:<9}  {}",
+            "init type",
+            dim("fresh repo — greenfield assumed")
+        );
+        println!();
+        true
+    } else {
+        let init_type = prompt_select(
+            "What are you setting up?",
+            &["Adopt existing repo", "Start fresh"],
+            if input.default_greenfield { 1 } else { 0 },
+        )?;
+        init_type == 1
+    };
 
     let site_name = prompt_text("Project name", &input.default_site_name)?;
 

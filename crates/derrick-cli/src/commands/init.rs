@@ -82,11 +82,11 @@ struct ResolvedInitOptions {
 }
 
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
-    let repo_root = match current_repo_root() {
-        Ok(root) => root,
-        Err(_) => ensure_git_repo(args.yes)?,
+    let (repo_root, fresh_git_init) = match current_repo_root() {
+        Ok(root) => (root, false),
+        Err(_) => (ensure_git_repo(args.yes)?, true),
     };
-    let resolved = match resolve_options(&repo_root, args)? {
+    let resolved = match resolve_options(&repo_root, args, fresh_git_init)? {
         Some(resolved) => resolved,
         None => return Ok(CliExitCode::Success),
     };
@@ -101,6 +101,7 @@ pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliErr
 fn resolve_options(
     repo_root: &Path,
     args: InitArgs,
+    fresh_git_init: bool,
 ) -> Result<Option<ResolvedInitOptions>, crate::CliError> {
     let mode = args.mode;
     let site_name = args
@@ -119,7 +120,8 @@ fn resolve_options(
             repo_root,
             has_existing_config: repo_root.join("derrick.yaml").exists(),
             likely_existing_project: likely_existing_project(repo_root),
-            default_greenfield: args.greenfield,
+            force_greenfield: fresh_git_init,
+            default_greenfield: args.greenfield || fresh_git_init,
             default_site_name: site_name.clone(),
             default_prefix: default_prefix_value,
             default_mode: mode,
@@ -162,7 +164,7 @@ fn resolve_options(
     validate_role_bindings(&roles, &available_model_ids())?;
 
     Ok(Some(ResolvedInitOptions {
-        greenfield: args.greenfield,
+        greenfield: args.greenfield || fresh_git_init,
         mode,
         site_name,
         prefix,
