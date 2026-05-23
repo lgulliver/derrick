@@ -1381,6 +1381,29 @@ pub fn write_claude_commands(repo_root: &Path, force: bool) -> Result<Vec<String
     Ok(written)
 }
 
+/// Writes the constitution stub to `<repo_root>/<constitution_path>` if it
+/// does not already exist.
+///
+/// Returns `true` if the file was created, `false` if it already existed.
+pub fn write_constitution_stub(
+    repo_root: &Path,
+    constitution_path: &std::path::Path,
+) -> Result<bool, AdoptError> {
+    let path = repo_root.join(constitution_path);
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| AdoptError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::write(&path, CONSTITUTION_STUB_TEMPLATE)
+        .map_err(|source| AdoptError::Io { path, source })?;
+    Ok(true)
+}
+
 /// Removes the derrick block from `<repo_root>/.codex/instructions.md`.
 ///
 /// If the file ends up empty (or whitespace-only) after stripping, the file

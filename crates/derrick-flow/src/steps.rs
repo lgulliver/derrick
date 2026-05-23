@@ -225,6 +225,7 @@ async fn execute_derrick_step(
                 .clone()
                 .ok_or_else(|| RunError::Config("assay requires feature_dir".to_owned()))?;
             let wd = working_dir(state, repo_root).to_path_buf();
+            ensure_constitution(config, &wd)?;
             let prompt = state.prompt.clone();
             let run_id = state.run_id.clone();
             assay::execute_assay(
@@ -753,6 +754,33 @@ fn completion_request(
         temperature: Some(0.2),
         timeout: Duration::from_secs(600),
     }
+}
+
+fn ensure_constitution(
+    config: &derrick_config::Config,
+    working_dir: &std::path::Path,
+) -> Result<(), RunError> {
+    let constitution_path = config.guardrails().constitution_path();
+    let full_path = working_dir.join(constitution_path);
+    if full_path.exists() {
+        return Ok(());
+    }
+    use owo_colors::OwoColorize as _;
+    eprintln!(
+        "  {}  No constitution found at {}",
+        "⚠".yellow(),
+        constitution_path.display()
+    );
+    eprintln!("     The constitution defines project-specific rules that the plan reviewer");
+    eprintln!("     enforces. Writing a starter stub — edit it to add your project's rules.");
+    derrick_adopt::write_constitution_stub(working_dir, constitution_path).map_err(|e| {
+        RunError::Io {
+            path: full_path,
+            source: std::io::Error::other(e.to_string()),
+        }
+    })?;
+    eprintln!("  {}  {}", "·".green(), constitution_path.display());
+    Ok(())
 }
 
 #[cfg(test)]
