@@ -82,7 +82,10 @@ struct ResolvedInitOptions {
 }
 
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
-    let repo_root = current_repo_root()?;
+    let repo_root = match current_repo_root() {
+        Ok(root) => root,
+        Err(_) => ensure_git_repo(args.yes)?,
+    };
     let resolved = match resolve_options(&repo_root, args)? {
         Some(resolved) => resolved,
         None => return Ok(CliExitCode::Success),
@@ -699,6 +702,69 @@ fn join_paths(paths: &[std::path::PathBuf]) -> String {
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn ensure_git_repo(yes: bool) -> Result<std::path::PathBuf, crate::CliError> {
+    let cwd = std::env::current_dir().map_err(|source| crate::CliError::Io {
+        path: std::path::PathBuf::from("."),
+        source,
+    })?;
+
+    if is_styled() {
+        eprintln!("  \x1b[33m⚠\x1b[0m  No git repository found in this directory or any parent.");
+    } else {
+        eprintln!("  ⚠  No git repository found in this directory or any parent.");
+    }
+
+    let confirmed = if yes {
+        true
+    } else if std::io::stdin().is_terminal() {
+        if is_styled() {
+            eprint!(
+                "  \x1b[36m›\x1b[0m  Run \x1b[1mgit init\x1b[0m in {}? [Y/n] ",
+                cwd.display()
+            );
+        } else {
+            eprint!("  ›  Run `git init` in {}? [Y/n] ", cwd.display());
+        }
+        use std::io::Write as _;
+        let _ = std::io::stderr().flush();
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|source| crate::CliError::Io {
+                path: std::path::PathBuf::from("<stdin>"),
+                source,
+            })?;
+        !matches!(input.trim().to_ascii_lowercase().as_str(), "n" | "no")
+    } else {
+        false
+    };
+
+    if !confirmed {
+        return Err(message("derrick init must be run inside a git repo"));
+    }
+
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(&cwd)
+        .status()
+        .map_err(|source| crate::CliError::Io {
+            path: cwd.join(".git"),
+            source,
+        })?;
+
+    if !status.success() {
+        return Err(message("git init failed"));
+    }
+
+    if is_styled() {
+        println!("  \x1b[32m·\x1b[0m  git repository initialised");
+    } else {
+        println!("  ·  git repository initialised");
+    }
+
+    Ok(cwd)
 }
 
 fn print_written(path: &str) {
