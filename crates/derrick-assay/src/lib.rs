@@ -327,6 +327,18 @@ pub async fn run_reviewer_rounds(
     let rounds = assay_rounds(config, step, state)?;
     let spec = read_to_string(&working_dir.join(feature_dir).join("spec.md"))?;
     let constitution = read_to_string(&working_dir.join(config.guardrails().constitution_path()))?;
+    if constitution.trim_start().starts_with("<!-- DERRICK-DRAFT:") {
+        eprintln!(
+            "  {}  assay skipped — constitution at {} is a draft stub",
+            "⚠".yellow(),
+            config.guardrails().constitution_path().display()
+        );
+        eprintln!(
+            "     Edit {} and add real rules before re-running.",
+            config.guardrails().constitution_path().display()
+        );
+        return Ok(ReviewerRoundOutcome::Skipped);
+    }
     let auto_execute = config.tools().assay().auto_execute();
 
     let codex_fallback = detect_codex_fallback(config, reviewer_role).await?;
@@ -497,7 +509,7 @@ pub async fn run_reviewer_rounds(
 
         let objection_count = count_objects(&response_text);
         let objection_snippet =
-            extract_first_objection(&response_text).map(|s| s.chars().take(60).collect::<String>());
+            extract_first_objection(&response_text).map(|s| truncate_elide(&s, 60));
 
         eprint!("\r                                            \r");
         match verdict {
@@ -1116,7 +1128,7 @@ fn extract_first_objection(text: &str) -> Option<String> {
                 && !l.starts_with("Let me")
                 && l.len() > 20
         })
-        .map(|l| l.chars().take(80).collect())
+        .map(|l| truncate_elide(l, 80))
 }
 
 fn extract_bold_numbered(text: &str) -> Option<String> {
@@ -1141,7 +1153,7 @@ fn extract_bold_numbered(text: &str) -> Option<String> {
     if result.is_empty() {
         None
     } else {
-        Some(result.chars().take(80).collect())
+        Some(truncate_elide(result, 80))
     }
 }
 
@@ -1156,7 +1168,7 @@ fn extract_any_bold(text: &str) -> Option<String> {
     if result.is_empty() || result.len() < 10 {
         return None;
     }
-    Some(result.chars().take(80).collect())
+    Some(truncate_elide(result, 80))
 }
 
 /// Count the number of objection items in a reviewer response.
@@ -1349,6 +1361,19 @@ impl ExecutionState {
             feature_dir: None,
             worktree_path: None,
         }
+    }
+}
+
+/// Truncate a string to at most `max` characters (by `char` count), appending
+/// an ellipsis (`…`) when truncation occurs. Returns the input unchanged when
+/// it already fits.
+fn truncate_elide(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
     }
 }
 
