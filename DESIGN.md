@@ -299,55 +299,132 @@ Script does, in order:
 
 No repo touched at this stage.
 
-### 5.2 Init (one-time, per repo)
+### 5.2 Init — the setup wizard (one-time, per repo)
 
 ```
 $ cd ~/repos/my-project
 $ derrick init
 ```
 
-Brownfield-first by default. Interactive but flag/file-driven for CI.
-See §5.6 for the full brownfield adoption contract; the short version:
+`derrick init` is a **full interactive wizard**. On first run it shows the
+derrick splash screen (the logo, version, tagline), then walks the user
+through seven steps. UX target: the same polish and terminal aesthetic as the
+speckit install experience — styled prompts, colour, spinner states, progress
+markers. Users should feel like they're using a well-made product (Railway CLI
+/ Vercel CLI quality bar).
 
-1. **Adoption pass.** Walk the repo for existing AGENTS.md,
-   CLAUDE.md, `.claude/`, constitution-like docs, trackers. Classify
-   each as *adopt as-is*, *reference*, or *augment*.
-2. **Identify.** Detect or ask for: project name, ticket prefix,
-   primary language(s), preferred provider/host for each role.
-3. **Propose.** Print the proposed `derrick.yaml` and the list of
-   files derrick would create or append to. Nothing is moved or
-   rewritten unless the user opts in.
-4. **Constitution comes from speckit, not from derrick.** Derrick
-   does *not* ship a constitution template. If no constitution
-   exists, init runs speckit's own constitution flow
-   (`/speckit.constitution` via the detected host CLI, or
-   `specify init --here` if a host CLI isn't available — see §5.2.1
-   for the detect-then-defer logic). Brownfield repos with an
-   existing constitution-like doc are referenced via
-   `guardrails.constitution_path` instead. Either way the
-   constitution belongs to speckit; derrick only points at it.
-5. **Bootstrap (only after confirm)**:
-   - `derrick.yaml` from template, pointing at *existing* paths
-     wherever they were found.
-   - `.specify/` only if speckit isn't already present (handled
-     by the detect-then-defer logic above).
-   - `.specify/extensions/derrick/scripts/tasks-to-tickets.sh`.
-   - `.claude/commands/add-feature.md` — refuses to overwrite an
-     existing command of the same name without `--force`.
-   - `.claude/agents/` *additions*, never replacements. Names that
-     collide with the user's existing agents are skipped.
-   - `CLAUDE.md` block appended only with `--append-agents-md` or
-     the equivalent confirm.
-6. Register the site with the substrate (native SQLite), unless
-   `--no-substrate`.
-7. Write host hooks so scrub+caveman fire at every model boundary
-   (D29): `.claude/settings.json` gets `PreToolUse` and
-   `PostToolUse` entries that pipe tool I/O through `derrick scrub`
-   and `derrick caveman --intensity lite`. Codex equivalent
-   is deferred per D34; T011 writes only `.codex/instructions.md`.
-   Brownfield repos: refuse to overwrite existing hook entries;
-   surface a merge plan instead. `--no-hooks` opts out entirely.
-8. `derrick doctor` on the freshly initialised repo.
+The wizard never writes anything until the user confirms at the end of each
+phase. Every step that would mutate state shows a dry-run preview first.
+`--dry-run` globally opts out of writes for scripting.
+
+See §5.6 for the full brownfield adoption contract; the wizard honours it in
+full.
+
+#### Step 1 — Prerequisite check
+
+Derrick checks for every required tool before doing anything else:
+
+- `git` — required.
+- `gh` — required for GitHub features (Issues, PRs, squash-merge check).
+- `speckit` / `specify` CLI — required for the pipeline.
+- Any AI provider CLI the user intends to use (`claude`, `codex`, `copilot`,
+  `opencode`, etc.) — checked against what the user selects in step 3.
+
+**If anything is missing:** print exactly what is missing, the canonical
+install command for each, and exit. Do not continue. The user must install the
+missing tools and re-run `derrick init`. There is no partial-init mode that
+skips a failing prerequisite.
+
+#### Step 2 — Git repo check
+
+If the current directory is not inside a git repository:
+
+> *"This directory is not a git repository. Would you like Derrick to
+> initialise one here?"*
+
+- **Yes** → run `git init`, then run the correct `speckit init` command for a
+  fresh repo (per speckit's own documented init flow — derrick does not
+  invent speckit commands). Continue to step 3.
+- **No** → print a polite cancellation message and exit. Derrick never
+  operates outside a git repo.
+
+#### Step 3 — Provider configuration
+
+Show which AI providers are currently installed / available (detected from
+PATH + known API key env vars). For each pipeline role (`proposer`, `drafter`,
+`reviewer`, `executor`, `summariser`) show:
+
+- Which providers are available.
+- A recommended default per role with a one-line rationale (e.g. "Opus for
+  proposer — this is the planning role; heavy reasoning matters here").
+- A terminal radio-button or multi-select UI for the user to confirm or
+  override the recommendation for each role.
+
+Write the resolved role → model → provider bindings into `derrick.yaml` once
+the user confirms.
+
+#### Step 4 — Commit and branching conventions
+
+Ask two questions with sensible defaults:
+
+1. *"Use conventional commits?"* (yes / no, default: yes)
+2. *"Branch naming prefix?"* (text input, default: `feat/`; accepts e.g.
+   `fix/`, `chore/`, empty for no prefix)
+
+Use the answers to configure speckit accordingly (write into
+`.specify/` config — do not invent speckit config keys; use the ones speckit
+actually supports).
+
+#### Step 5 — Constitution creation
+
+Guide the user through creating the speckit constitution **without leaving
+derrick**. Derrick drives the speckit constitution flow in-process or via the
+detected host CLI — the user never needs to know which underlying command is
+running.
+
+- If `speckit` is installed and a host CLI is available: run
+  `/speckit.constitution` via the host. Stream output back to the user's
+  terminal. Wait for completion before continuing.
+- If `speckit` is installed but no host CLI is detected: run
+  `specify constitution --here` (or the equivalent documented speckit command)
+  directly.
+- If neither is available: this step was caught in step 1; it cannot be
+  reached.
+
+Brownfield repos with an existing constitution-like file (`PRINCIPLES.md`,
+`STYLE.md`, `CONTRIBUTING.md`, an existing `.specify/memory/constitution.md`):
+skip this step; reference the existing file via `guardrails.constitution_path`
+and tell the user which file was adopted.
+
+#### Step 6 — Bootstrap (write everything)
+
+Only after the user confirms the full plan:
+
+- `derrick.yaml` from template, pointing at existing paths wherever found.
+- `.specify/extensions/derrick/scripts/tasks-to-tickets.sh`.
+- `.claude/commands/add-feature.md` — refuses to overwrite without `--force`.
+- `.claude/agents/` additions only — names that collide with existing agents
+  are skipped and reported.
+- `CLAUDE.md` block appended only with `--append-agents-md` or explicit
+  confirm in the wizard.
+- Register the site with the native SQLite substrate (`--no-substrate` opts
+  out).
+- Write host hooks for scrub + caveman at every model boundary (D29):
+  `.claude/settings.json` PreToolUse / PostToolUse. Codex hooks deferred
+  (D34); T011 writes `.codex/instructions.md` only. Brownfield: refuse to
+  overwrite existing hook entries, surface a merge plan instead. `--no-hooks`
+  opts out entirely.
+
+#### Step 7 — Completion
+
+Print a success screen showing what was written, then show the next step:
+
+```
+  derrick add "your first feature"
+```
+
+Run `derrick doctor` automatically to confirm the environment is healthy before
+the user leaves init.
 
 ### 5.2.1 Speckit detect-then-defer
 
@@ -364,56 +441,150 @@ See §5.6 for the full brownfield adoption contract; the short version:
 `derrick init --greenfield` is the opt-in for an empty repo where
 derrick may write authoritatively.
 
-### 5.3 `/add-feature` (the primary UX)
+### 5.3 `derrick add` — the feature pipeline
 
-What the user types in Claude Code:
+```
+derrick add "build a webhook ingest endpoint with idempotent dedupe"
+```
+
+Or via Claude Code:
 
 ```
 /add-feature build a webhook ingest endpoint with idempotent dedupe
 ```
 
-What happens (this is the load-bearing flow):
+The slash command resolves to `derrick run add-feature --prompt "..."`. The
+user never sees the underlying tools. All output and questions are in
+**derrick's voice**.
 
-1. The slash command body resolves to `derrick run add-feature --prompt "..."`.
-2. Derrick walks the `pipeline:` from `derrick.yaml`.
-3. Each step:
-   - Logs to `.derrick/runs/<utc-ts>/step-<id>.log`.
-   - On `host: claude` (or `codex`/`copilot`), goes through
-     a `derrick-tools` host adapter that shells to the host
-     CLI with the step's command/prompt and the current cwd
-     (e.g. `claude --print "<command>"`, `codex exec
-     --skip-git-repo-check "<command>"`, `copilot -p
-     "<command>" --add-dir <cwd>`). The host loads its own
-     context (D30).
-   - On `runner: gt`/`bash`, shells out and streams output.
-   - On interactive `runner: derrick` steps (for example `clarify`), prompts
-     on stdout and reads stdin.
-4. After `specify`, derrick reads `.specify/feature.json` to pin
-    `feature_dir` for subsequent steps, solving the
-    "stale feature.json" bug.
-5. Failure of any step halts the pipeline with a numbered error and the
-   exact resume command (`derrick run add-feature --resume-from plan`).
+The pipeline runs eight stages in sequence. Each stage that surfaces output
+to the user does so in a clean, styled terminal UI — same quality bar as
+§5.2's wizard. Stages that block on user input wait indefinitely; stages that
+run autonomously show a spinner and then a summary.
 
-Variants exposed as slash commands or flags:
+Every step logs to `.derrick/runs/<utc-ts>/step-<id>.log`. On host-backed
+steps, the host adapter in `derrick-tools` shells to the host CLI with the
+step's command and current working directory (D30). The host loads its own
+context. Failure of any step halts the pipeline with a numbered error and the
+exact resume command (`derrick run add-feature --resume-from <step>`).
+
+#### Stage 1 — Specify
+
+Run `speckit specify` internally. When complete, show the user a clean summary
+of what derrick understood from the prompt:
+
+> *"Here is what I understood. Is this correct?"*
+
+Wait for an explicit **yes** or **no** before continuing. If no: accept
+free-text correction and re-run specify with the correction appended. If yes:
+proceed. Derrick reads `.specify/feature.json` after this stage to pin
+`feature_dir` for subsequent steps (solves the stale feature.json bug).
+
+#### Stage 2 — Plan
+
+Run `speckit plan` internally. Show the user a brief human-readable summary of
+the plan (not the raw speckit output). No confirmation required at this stage —
+the assay in stage 5 is the formal gate.
+
+#### Stage 3 — Clarify
+
+Run `speckit clarify` interactively. Stream the questions to the user's
+terminal and capture their answers in-session. The user types answers directly;
+no special UI required — plain readline input is fine.
+
+#### Stage 4 — Apply clarifications
+
+Apply the user's clarification answers to the plan. This is an in-process
+derrick step (no host CLI invocation). Show the user a diff-style summary of
+what changed in the plan as a result of their answers.
+
+#### Stage 5 — Assay
+
+Run cross-model adversarial review (courtroom internally). Show the user a live
+view of:
+
+1. **Current state** — the plan being reviewed.
+2. **Objections raised** — what the reviewer found, and why.
+3. **Rebuttals** — how the proposer responded.
+4. **Verdict** — accept / reject, with a one-paragraph rationale.
+
+If the assay rejects after the configured number of rounds: halt and surface the
+final report to the user. Do not proceed automatically on a rejection.
+
+#### Stage 6 — Summary and confirmation
+
+Show a clean, human-readable summary of the final accepted plan. Ask:
+
+> *"Shall I proceed and begin implementation?"*
+
+Wait for an explicit **yes** or **no**. This is the last human checkpoint
+before autonomous work begins. If no: exit cleanly with the plan saved so the
+user can resume later.
+
+#### Stage 7 — Task and agent generation
+
+On yes:
+
+1. **Generate tasks** — run `speckit tasks` internally. Show a numbered list
+   of the generated tasks.
+
+2. **Generate sub-agent files** — write appropriate host-specific agent `.md`
+   files for the providers and hosts selected during `derrick init`. This
+   means creating or updating `.claude/agents/`, `.codex/agents/`,
+   `.opencode/agents/`, `.github/agents/` entries for any hosts the user has
+   configured. File content is derived from the ticket context and the role
+   definitions in `derrick.yaml`.
+
+3. **GitHub Issues (optional)** — if a GitHub remote is detected and `gh` is
+   available, ask:
+
+   > *"Would you like these tasks created as GitHub Issues?"*
+
+   If yes: create one issue per task via `gh issue create`. Link each issue
+   back to the batch in the substrate. If no: skip silently.
+
+#### Stage 8 — Begin work (detachable)
+
+Start the foreman and dispatch hands to begin executing tickets:
+
+- Show a live progress feed: which tickets are in-flight, which hands are
+  running, what just completed.
+- **Always commit as tickets complete.** Each completed ticket results in a
+  commit on the feature branch before the hand transitions to the next ticket.
+  Never leave completed work uncommitted.
+- **The process is detachable.** The user can `Ctrl-C` or close the terminal
+  at any point without killing the foreman or the hands in flight. Work
+  continues in the background. The user can re-attach at any time with
+  `derrick observe` or check status with `derrick status`.
+
+Detachment is explicit: when the user hits `Ctrl-C`, derrick prints:
+
+> *"Work is continuing in the background. Run `derrick observe` to re-attach
+> or `derrick status` for a snapshot."*
+
+It does not ask "are you sure?" — detach is always safe because the foreman
+owns the process.
+
+#### Flags
 
 | Flag | Behaviour |
 |---|---|
-| `--no-clarify` | Skip the clarify step |
-| `--no-assay` | Skip cross-model adversarial review |
-| `--dry-run` | Run through tasks; do not create beads or start mayor |
-| `--phase <label>` | Apply a phase label to every bead |
-| `--resume-from <step>` | Restart from a given pipeline step |
+| `--no-clarify` | Skip stage 3 (clarify) and stage 4 (apply) |
+| `--no-assay` | Skip stage 5 (adversarial review) |
+| `--dry-run` | Run through task generation (stages 1–7); do not start foreman or create tickets |
+| `--phase <label>` | Apply a phase label to every ticket in the batch |
+| `--resume-from <step>` | Restart from a given pipeline stage |
+| `--no-github-issues` | Skip the GitHub Issues offer in stage 7 |
+| `--detach` | Skip the live progress feed in stage 8; go straight to background |
 
 ### 5.4 `derrick doctor`
 
 Inspects the local install + the current repo and prints a coloured
 checklist:
 
-- Binaries: `claude`, `codex`, `gh`, `gt`, `bd`, `git` (versions + paths).
+- Binaries: `claude`, `codex`, `copilot`, `opencode`, `gh`, `git`, `speckit`/`specify` (versions + paths). Any provider CLIs configured in `derrick.yaml` are also checked.
 - Claude Code plugin presence and version.
-- Repo: `derrick.yaml` valid, `.specify/memory/constitution.md` exists
-  and non-empty, gastown rig registered, dolt server reachable if
-  gastown enabled.
+- Repo: `derrick.yaml` valid, constitution file exists and is non-empty, substrate healthy, foreman state consistent.
 - Exit code is the count of failing checks (handy for CI).
 
 ### 5.5 Observability — derrick as the front door for "what's going on?"
