@@ -38,10 +38,6 @@ fn cyan(s: &str) -> String {
     }
 }
 
-fn hr() -> String {
-    format!("  {}", "─".repeat(62))
-}
-
 fn section_rule(title: &str) -> String {
     let fill = 62usize.saturating_sub(title.len() + 5);
     format!("  ─── {title} {}", "─".repeat(fill))
@@ -99,20 +95,43 @@ pub(crate) struct WizardOutput {
     pub(crate) vscode: bool,
     pub(crate) jetbrains: bool,
     pub(crate) force: bool,
+    pub(crate) conventional_commits: bool,
+    pub(crate) branch_prefix: String,
 }
 
 pub(crate) enum WizardSelection {
-    Proceed(WizardOutput),
+    Proceed(Box<WizardOutput>),
     Cancelled,
 }
 
 // ─── wizard entry point ───────────────────────────────────────────────────────
 
+fn print_splash() {
+    let styled = is_styled();
+    println!();
+    if styled {
+        println!("  \x1b[1m╭─────────────────────────────────────────────────────────────╮\x1b[0m");
+        println!("  \x1b[1m│\x1b[0m                                                             \x1b[1m│\x1b[0m");
+        println!("  \x1b[1m│   ██████╗ ███████╗██████╗ ██████╗ ██╗ ██████╗██╗  ██╗      │\x1b[0m");
+        println!("  \x1b[1m│   ██╔══██╗██╔════╝██╔══██╗██╔══██╗██║██╔════╝██║ ██╔╝      │\x1b[0m");
+        println!("  \x1b[1m│   ██║  ██║█████╗  ██████╔╝██████╔╝██║██║     █████╔╝       │\x1b[0m");
+        println!("  \x1b[1m│   ██║  ██║██╔══╝  ██╔══██╗██╔══██╗██║██║     ██╔═██╗       │\x1b[0m");
+        println!("  \x1b[1m│   ██████╔╝███████╗██║  ██║██║  ██║██║╚██████╗██║  ██╗      │\x1b[0m");
+        println!("  \x1b[1m│   ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝╚═╝  ╚═╝     │\x1b[0m");
+        println!("  \x1b[1m│\x1b[0m                                                             \x1b[1m│\x1b[0m");
+        println!("  \x1b[1m│\x1b[0m  \x1b[1msetup wizard\x1b[0m  \x1b[2m·  the load-bearing tower over an oil well\x1b[0m    \x1b[1m│\x1b[0m");
+        println!("  \x1b[1m│\x1b[0m                                                             \x1b[1m│\x1b[0m");
+        println!("  \x1b[1m╰─────────────────────────────────────────────────────────────╯\x1b[0m");
+    } else {
+        println!("  DERRICK  setup wizard");
+        println!("  The load-bearing tower over an oil well");
+        println!("  {}", "─".repeat(62));
+    }
+    println!();
+}
+
 pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliError> {
-    println!();
-    println!("  {}", bold("derrick setup wizard"));
-    println!("{}", hr());
-    println!();
+    print_splash();
     println!("  {:<9}  {}", "repo", input.repo_root.display());
     println!(
         "  {:<9}  {}",
@@ -163,6 +182,13 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
             }
         }
     };
+
+    println!();
+    println!("{}", section_rule("commit & branching conventions"));
+
+    let conventional_commits = prompt_yes_no("Use conventional commits?", true)?;
+
+    let branch_prefix = prompt_text("Branch naming prefix", "feat/")?;
 
     let mode = match prompt_select(
         "Operating mode",
@@ -294,6 +320,8 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         vscode,
         jetbrains,
         force,
+        conventional_commits,
+        branch_prefix,
     };
 
     print_preview(&input, &output);
@@ -302,7 +330,7 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         return Ok(WizardSelection::Cancelled);
     }
 
-    Ok(WizardSelection::Proceed(output))
+    Ok(WizardSelection::Proceed(Box::new(output)))
 }
 
 // ─── preview ─────────────────────────────────────────────────────────────────
@@ -321,6 +349,8 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
         vscode,
         jetbrains,
         force,
+        conventional_commits,
+        branch_prefix,
     } = output;
 
     let top_rule = format!("  ╭─ Preview {}", "─".repeat(52));
@@ -371,6 +401,8 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
     println!("{}", kv("VS Code", yes_no(*vscode)));
     println!("{}", kv("JetBrains", yes_no(*jetbrains)));
     println!("{}", kv("Force", yes_no(*force)));
+    println!("{}", kv("Conv. commits", yes_no(*conventional_commits)));
+    println!("{}", kv("Branch prefix", branch_prefix));
     println!("{blank}");
     println!("{}", section("Role bindings"));
     println!("{}", sub_kv("Planning", &roles.proposer));

@@ -79,9 +79,12 @@ struct ResolvedInitOptions {
     jetbrains: bool,
     roles: RoleBindings,
     ai_style: AiConfigurationStyle,
+    conventional_commits: bool,
+    branch_prefix: String,
 }
 
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
+    check_prerequisites()?;
     let (repo_root, fresh_git_init) = match current_repo_root() {
         Ok(root) => (root, false),
         Err(_) => (ensure_git_repo(args.yes)?, true),
@@ -154,6 +157,8 @@ fn resolve_options(
                     jetbrains: selection.jetbrains,
                     roles: selection.roles,
                     ai_style: selection.ai_style,
+                    conventional_commits: selection.conventional_commits,
+                    branch_prefix: selection.branch_prefix,
                 }))
             }
         };
@@ -178,6 +183,8 @@ fn resolve_options(
         jetbrains: args.jetbrains,
         roles,
         ai_style: AiConfigurationStyle::Recommended,
+        conventional_commits: true,
+        branch_prefix: "feat/".to_owned(),
     }))
 }
 
@@ -878,6 +885,7 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
     let mode = mode_name(config.tools().substrate().mode());
     let prefix = config.site().prefix();
     let ai = ai_style.label();
+
     println!();
     if is_styled() {
         println!("  \x1b[32m✓\x1b[0m  \x1b[1m{name}\x1b[0m  ready");
@@ -891,11 +899,115 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
     println!("  {:<11}  {steps}", "pipeline");
     println!();
     if is_styled() {
-        println!("  \x1b[36m›\x1b[0m  run `derrick doctor` to verify the install");
+        println!("  \x1b[2m{}\x1b[0m", "─".repeat(62));
+        println!();
+        println!("  \x1b[36m›\x1b[0m  run \x1b[1mderrick doctor\x1b[0m to verify the install");
+        println!("  \x1b[36m›\x1b[0m  start your first feature:");
+        println!();
+        println!("      \x1b[1mderrick add\x1b[0m \x1b[2m\"describe your feature\"\x1b[0m");
     } else {
+        println!("  {}", "─".repeat(62));
+        println!();
         println!("  ›  run `derrick doctor` to verify the install");
+        println!("  ›  start your first feature:");
+        println!();
+        println!("      derrick add \"describe your feature\"");
     }
     println!();
+}
+
+/// Check that every required tool is present on PATH.
+/// Returns `Err` with a styled message listing every missing tool.
+fn check_prerequisites() -> Result<(), crate::CliError> {
+    struct Tool {
+        name: &'static str,
+        bins: &'static [&'static str],
+        install: &'static str,
+        required: bool,
+    }
+
+    let tools = [
+        Tool {
+            name: "git",
+            bins: &["git"],
+            install: "https://git-scm.com/downloads",
+            required: true,
+        },
+        Tool {
+            name: "gh (GitHub CLI)",
+            bins: &["gh"],
+            install: "https://cli.github.com",
+            required: true,
+        },
+        Tool {
+            name: "speckit / specify",
+            bins: &["specify", "speckit"],
+            install: "uv tool install specify-cli",
+            required: true,
+        },
+    ];
+
+    let ai_tools: &[(&str, &str)] = &[
+        ("claude", "https://claude.ai/download"),
+        ("codex", "https://github.com/openai/codex"),
+        ("copilot", "https://github.com/features/copilot"),
+        ("opencode", "https://opencode.ai"),
+    ];
+
+    let mut missing: Vec<String> = Vec::new();
+
+    for tool in &tools {
+        let found = tool.bins.iter().any(|b| which::which(b).is_ok());
+        if !found && tool.required {
+            if is_styled() {
+                missing.push(format!(
+                    "  \x1b[31m✗\x1b[0m  \x1b[1m{}\x1b[0m\n     install: \x1b[2m{}\x1b[0m",
+                    tool.name, tool.install
+                ));
+            } else {
+                missing.push(format!(
+                    "  ✗  {}\n     install: {}",
+                    tool.name, tool.install
+                ));
+            }
+        }
+    }
+
+    // At least one AI CLI must be available
+    let any_ai = ai_tools.iter().any(|(bin, _)| which::which(bin).is_ok());
+    if !any_ai {
+        let list = ai_tools
+            .iter()
+            .map(|(bin, url)| format!("           {bin}  {url}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if is_styled() {
+            missing.push(format!(
+                "  \x1b[31m✗\x1b[0m  \x1b[1mAI provider CLI\x1b[0m  (need at least one)\n{list}"
+            ));
+        } else {
+            missing.push(format!("  ✗  AI provider CLI  (need at least one)\n{list}"));
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut message = String::new();
+    if is_styled() {
+        message.push_str(
+            "\x1b[1mMissing required tools — install them and re-run `derrick init`:\x1b[0m\n\n",
+        );
+    } else {
+        message.push_str("Missing required tools — install them and re-run `derrick init`:\n\n");
+    }
+    for item in &missing {
+        message.push_str(item);
+        message.push('\n');
+    }
+
+    Err(crate::message(message))
 }
 
 fn mode_name(mode: derrick_config::SubstrateMode) -> &'static str {
