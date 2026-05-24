@@ -54,12 +54,13 @@ Every byte across a model boundary earns its place.
 
 | What | How | Typical saving |
 |---|---|---|
-| **Scrub** | Strips CLI noise (progress bars, spinners, ANSI codes) before tool output reaches the model | **88% on `git fetch`**, 94% on `cargo build` |
+| **Scrub** (`derrick-scrub`) | Strips CLI noise (progress bars, spinners, ANSI codes) before tool output reaches the model. Records `bytes_raw`/`bytes_saved` per step. | **88% on `git fetch`**, 94% on `cargo build` |
+| **Roughneck** (`derrick-roughneck`) | LLM output compression via prompt injection — model emits a compressed form of its own output before handoff. Three levels: lite (~30%), full (~65%, default), ultra (~75%). | **~65% at Full** on typical model output |
 | **Caveman** | Compresses verbose prose in inter-step handoffs (lite / full / ultra) | **62% at Full** on typical AI-generated text |
 | **Model tiering** | Routes cheap steps to lighter models; expensive reasoning to frontier models | Configurable per pipeline step |
 | **Prompt caching** | Anthropic cache headers on repeated context | Up to 90% on repeated prefixes |
 
-Scrub and caveman fire automatically at every model boundary via Claude Code / Codex hooks written by `derrick init`.
+Scrub and caveman fire automatically at every model boundary via Claude Code / Codex hooks written by `derrick init`. Roughneck fires at every model step via prompt injection; configure via `tools.roughneck` in `derrick.yaml`.
 
 ### 🔀 Parallelism
 Independent work runs concurrently. Each `/add-feature` run gets an isolated git worktree. The foreman dispatches multiple hands (agents) in parallel. Multi-reviewer assay runs reviewers sequentially today (true fan-out once the executor is `Arc`-wrapped, §9.C.5).
@@ -124,6 +125,8 @@ derrick <COMMAND>
 PIPELINE
   add          Run the full pipeline — prompt is a positional argument
   init         Adopt a repo (brownfield-safe, VS Code / JetBrains opt-in)
+  switch       Upgrade a solo-mode repo to crew (or copilot) mode
+  upgrade      [reserved] Binary self-update (not yet implemented)
   run          add-feature — canonical form of `add` (scripts / CI)
   foreman      start / stop / tick the dispatch loop
 
@@ -174,7 +177,8 @@ derrick gain
 | `derrick-flow` | Pipeline executor, state machine |
 | `derrick-assay` | Multi-reviewer adversarial assay + shared pipeline types (RunError, StepExecution, io helpers) |
 | `derrick-config` | Typed schema, layered loader, 14 validation rules |
-| `derrick-scrub` | CLI noise filter — rules for git, gh, claude, codex, copilot, cargo |
+| `derrick-scrub` | CLI noise filter — rules for git, gh, claude, codex, copilot, cargo; records bytes_raw/bytes_saved per step |
+| `derrick-roughneck` | LLM output compressor via prompt injection — lite / full / ultra; records roughneck_tokens_saved per step |
 | `derrick-caveman` | Prose compressor — lite / full / ultra intensities |
 | `derrick-memory` | Tiered retrieval, tag index, lesson curation |
 | `derrick-tui` | ratatui dashboard (6 tabs) |
@@ -237,7 +241,7 @@ You can override any role binding in `roles`.
 
 ## Status
 
-**Active development.** Architecture and 41 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 53 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -248,8 +252,16 @@ What's landed and tested:
 - ✅ `derrick ticket code-review` — adversarial pre-PR code review with auto-remediation loop
 - ✅ Per-run isolated git worktrees (`.derrick/worktrees/<run-id>/`) for parallel safety
 - ✅ Token tracking per pipeline step + cost estimates — `derrick gain --run <id>` for per-step breakdown
-- ✅ `derrick scrub` with 80%+ reduction on git and cargo output
+- ✅ `derrick scrub` with 80%+ reduction on git and cargo output; bytes_raw/bytes_saved in run manifests
+- ✅ `derrick-roughneck` — LLM output compression via prompt injection (lite/full/ultra); roughneck_tokens_saved in manifests
 - ✅ `derrick caveman` with 60%+ reduction at Full intensity on verbose prose
+- ✅ Run resume — `prompt_key`-based idempotent retry; `--force` for fresh start; `resume_of` lineage in manifests
+- ✅ Bridge auto-remediation — terminal ticket delete+recreate, active ticket skip
+- ✅ Assay headless mode — CI-safe; only `reject` blocks the pipeline
+- ✅ `derrick switch` — solo → crew upgrade command
+- ✅ Constitution seeding in `derrick init` wizard
+- ✅ `derrick init` initial commit fix — creates HEAD before first `derrick add`
+- ✅ Pipeline step order fix — `tasks` before `analyze`
 - ✅ `derrick observe` — live ratatui dashboard
 - ✅ Tiered memory with tag index and lesson retrieval
 - ✅ `derrick init` — brownfield-safe, VS Code + JetBrains opt-in, Codex instructions
@@ -279,7 +291,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 41 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 53 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 

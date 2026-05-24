@@ -121,7 +121,8 @@ modules can be tested, profiled, and (later) ported in isolation.
 | Tool adapters | `crates/derrick-tools` | Thin wrappers around `claude`, `codex`, `copilot`, `specify` (tokio::process) |
 | Assay | `crates/derrick-assay` | Adversarial plan review; calls the reviewer role(s) directly (see §7) |
 | Memory | `crates/derrick-memory` | Seeds host memory files on init + per-step context budgets |
-| Scrubber | `crates/derrick-scrub` | Subprocess output filter (RTK-equivalent), pure functions, zero-copy where possible |
+| Scrubber | `crates/derrick-scrub` | Subprocess output filter; rules-based sanitizer for cargo/git/gh/claude/opencode output before writing to step logs. Reduces context bytes fed to the LLM in subsequent steps. Per-tool rule sets in `src/rules/<tool>.rs`. Pure functions, zero-copy where possible. |
+| Roughneck | `crates/derrick-roughneck` | LLM output compression via prompt injection. Three levels: `lite` (~30% savings), `full` (~65%, default), `ultra` (~75%). Fires after every model boundary to compress the response before it enters the next step's context. |
 | Caveman | `crates/derrick-caveman` | Text compressor for inter-step handoff, pure functions |
 | Copilot | `crates/derrick-copilot` | Dispatches steps or tickets to Copilot agents (CLI + Workspace API) |
 | Models | `crates/derrick-models` | Provider trait; adapters for API providers, local runtimes, CLI shells (see §6.5) |
@@ -206,6 +207,12 @@ tools:
     enabled: true
     agent_identity: derrick-hand
   # No external rtk/caveman dependency — derrick ships its own (see §9).
+  roughneck:
+    enabled: true
+    level: full                  # lite | full | ultra (see §9.B.2a)
+    compress_memory: true        # also compress per-run memory digests
+  output_compression:
+    enabled: true                # derrick-scrub subprocess filters (see §9.B.2)
 
 # /add-feature pipeline. Steps run in order; any can be skipped via flag.
 # Each step names a role (resolved via `roles:` above) or runner: derrick / human.
@@ -226,18 +233,25 @@ pipeline:
     inputs: [{{feature_dir}}/spec.md, {{feature_dir}}/plan.md]
     rounds: "{{tools.assay.rounds}}"
     on_reject: halt               # halt | warn — fail closed by default
-  - id: analyze
-    role: proposer
-    host: claude
-    command: "/speckit.analyze"
+    # Headless mode: when stdin is not a TTY, assay runs without interactive
+    # prompts. Only a `reject` verdict blocks the pipeline; `revise` and
+    # `accept` are both treated as pass. Allows CI/automated runs.
   - id: tasks
     role: drafter
     host: claude
     command: "/speckit.tasks"
+  - id: analyze
+    role: proposer
+    host: claude
+    command: "/speckit.analyze"
   - id: bridge
     runner: derrick               # creates tickets in the substrate
     inputs: [{{tasks_md}}]
     batch: "{{batch}}"
+    # Bridge auto-remediation: if a ticket for this feature already exists
+    # in a terminal state (Done/Cancelled), bridge deletes and recreates it.
+    # If an active (non-terminal) ticket already exists for the feature,
+    # bridge skips creation to avoid duplicates.
   - id: foreman
     runner: derrick               # starts the foreman loop
     executor_role: executor       # which role hands run as
@@ -396,6 +410,15 @@ Brownfield repos with an existing constitution-like file (`PRINCIPLES.md`,
 skip this step; reference the existing file via `guardrails.constitution_path`
 and tell the user which file was adopted.
 
+**Constitution seeding**: when no existing constitution is found and speckit
+is not available for interactive authoring, the wizard prompts the user
+directly for their team constitution content (coding standards, review
+expectations, commit conventions, out-of-scope guardrails). The entered text
+is written verbatim to `.specify/constitution.md`. The banner stub is **not**
+used — a seeded constitution is real content and the pipeline accepts it
+immediately. `derrick init --constitution-stub` still writes the banner stub
+for users who prefer to author it separately.
+
 #### Step 6 — Bootstrap (write everything)
 
 Only after the user confirms the full plan:
@@ -423,6 +446,12 @@ Print a success screen showing what was written, then show the next step:
   derrick add "your first feature"
 ```
 
+**Initial commit**: after writing all files, if the repo has no commits yet
+(no `HEAD` ref), the wizard runs `git add -A && git commit -m "chore: derrick
+init"` automatically. This ensures the repo has a valid `HEAD` before the
+first `derrick add` run, which requires a commit to create a worktree. The
+commit message follows the conventional-commits setting chosen in step 4.
+
 Run `derrick doctor` automatically to confirm the environment is healthy before
 the user leaves init.
 
@@ -440,6 +469,32 @@ the user leaves init.
 
 `derrick init --greenfield` is the opt-in for an empty repo where
 derrick may write authoritatively.
+
+### 5.2.2 `derrick switch` — upgrade solo mode to crew
+
+```
+$ derrick switch
+```
+
+Upgrades a repo that was initialised in `mode: solo` to `mode: crew`
+without wiping the existing config. It:
+
+1. Verifies the current mode is `solo` (errors if already `crew` or
+   `copilot`).
+2. Adds a `peers:` stanza to `derrick.yaml` prompting the user to
+   list collaborating sites/machines (optional but common in crew mode).
+3. Patches `tools.substrate.mode` from `solo` to `crew` in
+   `derrick.yaml`.
+4. Registers the site with the native substrate if it was not
+   registered (no-op if already present — idempotent).
+5. Writes (or updates) the foreman configuration block in
+   `derrick.yaml` with crew-appropriate defaults
+   (`tools.foreman.poll_interval`, `hand_ttl`, `in_review_ttl`).
+6. Prints a summary of what changed and the next step
+   (`derrick foreman start`).
+
+`--dry-run` previews the yaml diff without writing it.
+`--mode copilot` switches to `copilot` mode instead of `crew`.
 
 ### 5.3 `derrick add` — the feature pipeline
 
@@ -760,7 +815,9 @@ can't damage state.
    (substrate `events` table). Filter by ticket, hand, run id.
 5. **Tokens** — `derrick gain --pillars` rendered live. Per-step
    cost, model-tier breakdown, savings attribution to each of
-   §9.B's seven knobs.
+   §9.B's knobs. Roughneck savings (`roughneck_tokens_saved`) and
+   scrub savings (`bytes_saved`) are shown per step alongside the
+   standard caveman/tiering/caching breakdown.
 6. **Memory** — current site's memory entries (project /
    reference / feedback / lessons). Lets the user spot stale or
    wrong entries; `d` flags one for deletion (writes to a queue,
@@ -1006,6 +1063,22 @@ Same shape courtroom popularised, compressed:
 Progress is streamed in real-time to stderr showing round number,
 verdict per round, and replying status — no spinner.
 
+### Headless mode
+
+When derrick detects `!isatty(stdin)` (CI, background subprocess,
+automated `derrick add`), assay runs without blocking for interactive
+input. Behaviour changes:
+
+- Only a `reject` verdict halts the pipeline. `revise` and `accept`
+  are both treated as pass.
+- Round exhaustion without a `reject` logs a warning and continues.
+- The user is never prompted to extend rounds or override — the
+  configured `tools.assay.rounds` limit is hard.
+
+This allows fully unattended `derrick add` runs in CI pipelines. For
+interactive sessions the behaviour is unchanged — `revise` and
+`reject` both surface to the user.
+
 ### Why a second-family reviewer
 
 Assay's value is *different-family scrutiny*. The default
@@ -1172,6 +1245,26 @@ read-only against its own substrate):
 | `derrick batch close <name>` | Force-close a batch |
 
 Reads (status, tickets, ticket, batch, etc.) are §5.5 already.
+
+### 8.2.1 Bridge auto-remediation
+
+The `bridge` step creates substrate tickets from `tasks.md`. Two
+idempotency rules that fire before any ticket is created:
+
+1. **Terminal ticket delete+recreate**: if a ticket for the same
+   feature already exists in a terminal state (`Done` or `Cancelled`),
+   bridge deletes it and recreates it so the new run starts fresh.
+   This handles the common case where a feature was completed in a
+   prior run and is now being reopened or revised.
+
+2. **Active ticket skip**: if a ticket for the same feature already
+   exists in a non-terminal state (`Ready`, `InFlight`, `InReview`,
+   `Blocked`), bridge skips creation entirely and reuses the existing
+   ticket. This prevents duplicate tickets when `derrick add` is
+   re-run for a prompt that was already in progress.
+
+Both rules fire per-ticket (not per-batch) so a partial batch
+(some tickets completed, some not) is handled correctly.
 
 ### 8.3 Modes
 
@@ -1517,14 +1610,57 @@ Every byte across a model boundary earns its place. Seven knobs:
 | `runner: copilot` steps | `executor` | copilot | Mechanical at Copilot rates |
 | Inter-step summary | `summariser` | claude-sonnet (or `ollama` local) | Hot path; local is free |
 
+Note: `tasks` runs before `analyze` in the pipeline. This is intentional —
+task generation depends on the accepted plan but not on codebase analysis;
+`analyze` then has the full task list available as context. The sequential
+spine is `specify → clarify → plan → tasks → analyze → assay → bridge → foreman`.
+
 Re-binding a role re-routes every step that uses it. BYOM means
 you can bind `proposer` to a Bedrock-hosted Claude, or `reviewer`
 to Gemini, without touching the pipeline.
 
-**9.B.2 Scrubber (derrick-native, §3.1).** Per-tool output filters
+**9.B.2 Scrubber (`derrick-scrub`, §3.1).** Per-tool output filters
 strip CLI noise before the next step sees it. Target 60–90%
 reduction on subprocess noise. Rules per tool in
 `crates/derrick-scrub/src/rules/<tool>.rs`. `--raw` opts out.
+
+Config:
+
+```yaml
+tools:
+  output_compression:
+    enabled: true              # default true; false disables all scrub filters
+```
+
+Per-step manifest fields: `bytes_raw` (bytes before scrubbing),
+`bytes_saved` (bytes removed). `derrick gain` uses these to
+report context reduction per step.
+
+**9.B.2a Roughneck (`derrick-roughneck`, §3.1).** LLM output
+compression via prompt injection. After every model step, derrick
+appends a short instruction to the model's context asking it to
+produce a compressed version of its own output before handing off
+to the next step. Three levels:
+
+| Level | Technique | Typical saving |
+|---|---|---|
+| `lite` | Drop filler phrases, redundant headers, verbose preamble | ~30% |
+| `full` | Fragment-style output ok, abbreviate known patterns | ~65% (default) |
+| `ultra` | Telegraphic; structured data only; no prose | ~75% |
+
+Config:
+
+```yaml
+tools:
+  roughneck:
+    enabled: true
+    level: full                # lite | full | ultra
+    compress_memory: true      # also compress per-run memory digests
+```
+
+Per-step manifest field: `roughneck_tokens_saved` (estimated tokens
+saved vs. uncompressed output). The TUI Tokens tab surfaces roughneck
+savings alongside scrub savings.
 
 **Where scrub fires (D29):** at every boundary where CLI-shaped
 output crosses to a model context, not only derrick's own
@@ -1576,8 +1712,26 @@ caveman pre-compresses and the verdict notes the compression.
 
 **9.B.7 Telemetry.** `derrick run --tokens` prints per-step token
 estimate after the run. `derrick gain` shows aggregate savings:
-raw estimate, what scrubber/caveman/tiering/caching/memory each
-saved, actual usage.
+raw estimate, what scrubber/caveman/roughneck/tiering/caching/memory
+each saved, actual usage.
+
+Per-step manifest fields:
+
+| Field | Source |
+|---|---|
+| `tokens_in` | See below for correction logic |
+| `tokens_out` | Model-reported output tokens |
+| `roughneck_tokens_saved` | Roughneck estimated saving vs. uncompressed output |
+| `bytes_raw` | Raw subprocess bytes before scrub |
+| `bytes_saved` | Bytes removed by scrub |
+
+**`tokens_in` correction**: `claude --output-format json` under-reports
+input tokens because it counts only the direct message, not the full
+session context (cached prefixes, sub-agent turns, memory). Fix: derrick
+stores the raw reported value *and* computes `prompt_len / 4` from the
+serialised prompt and takes `max(cli_reported, prompt_len / 4)` as the
+canonical `tokens_in`. The estimate is conservative but prevents
+systematically under-counting cached-prefix sessions.
 
 Sub-agents and skills invoked *inside* a host step (Claude
 spawning Explore via Agent, a skill triggering caveman, etc.)
@@ -1592,8 +1746,9 @@ transcript is available (codex, copilot, raw API).
 ### 9.C — Parallelism
 
 The pipeline has a sequential spine (`specify → plan → assay →
-tasks`), but everything *around* and *after* it is parallel by
-default. Derrick treats serial work as a justified exception.
+tasks → analyze`), but everything *around* and *after* it is
+parallel by default. Derrick treats serial work as a justified
+exception.
 
 **9.C.1 Batch fan-out.** Independent tickets in a batch run
 concurrently. The substrate's foreman (native in-process loop,
@@ -1633,11 +1788,11 @@ returns in the slowest read, not the sum.
 
 **9.C.4 Parallel pipeline steps.** Steps with no data dependency
 on each other can be marked `parallel_group: <name>` in the yaml
-and derrick will fan them out. v1 ships this for `analyze` and any
-side-channel checks the user adds (lint, type-check, schema
-validation). v1 does **not** parallelise `specify → plan → assay
-→ tasks` — that chain stays sequential because each consumes the
-previous.
+and derrick will fan them out. v1 ships this for any side-channel
+checks the user adds (lint, type-check, schema validation). v1
+does **not** parallelise `specify → plan → assay → tasks → analyze`
+— that chain stays sequential because each step consumes the
+previous step's output.
 
 **9.C.5 Multi-feature parallelism — git worktrees.** Two
 `/add-feature` invocations against the same repo, at the same
@@ -1704,12 +1859,48 @@ Per-repo derrick state lives in `.derrick/`:
       …
 ```
 
-Re-running `/add-feature` with the same prompt does **not** dedupe — the
-user is in charge. `--resume-from` reads `manifest.json` from the most
-recent run unless `--run <id>` is passed.
-
 `.derrick/runs/` is gitignored by default (init writes a `.gitignore`
 entry). `state.json` is gitignored too. The yaml is committed.
+
+### 10.1 Run manifest fields
+
+`manifest.json` includes all pipeline metadata. Relevant fields added
+since the initial design:
+
+| Field | Type | Description |
+|---|---|---|
+| `prompt_key` | `String` | 12-hex SHA-256 prefix of the normalised prompt (whitespace-collapsed, lowercased). Used for auto-resume. |
+| `resume_of` | `Option<RunId>` | Set when this run was auto-resumed from an earlier incomplete run for the same `prompt_key`. Tracks lineage. |
+| Per step: `tokens_in` | `u64` | Corrected input token count (see §9.B.7). |
+| Per step: `tokens_out` | `u64` | Model-reported output tokens. |
+| Per step: `roughneck_tokens_saved` | `u64` | Estimated tokens saved by roughneck compression. |
+| Per step: `bytes_raw` | `u64` | Raw subprocess output bytes before scrub. |
+| Per step: `bytes_saved` | `u64` | Bytes removed by scrub filters. |
+
+### 10.2 Run resume — idempotent retry
+
+When `derrick add "<prompt>"` is invoked, the runner computes the
+`prompt_key` and checks `.derrick/runs/` for the most recent run
+with the same key that exited in a non-terminal state (i.e. failed
+or was interrupted mid-pipeline). If found, derrick **auto-resumes**
+from the last successful step rather than starting fresh. The resumed
+run sets `resume_of` to the original run's id.
+
+```
+# Same prompt, pipeline incomplete from yesterday → auto-resumes
+derrick add "build a webhook ingest endpoint"
+
+# Force a fresh run even if an incomplete one exists
+derrick add "build a webhook ingest endpoint" --force
+```
+
+`--force` discards any incomplete prior run for the same key and
+always starts from `specify`. Completed runs (all steps `ok`) are
+never resumed — `--force` is a no-op against them; derrick starts
+fresh as before.
+
+The `resume_of` lineage chain can be traced via `derrick run <id>`
+to reconstruct the full history of a prompt across retries.
 
 ---
 
@@ -1719,6 +1910,14 @@ entry). `state.json` is gitignored too. The yaml is committed.
 
 - `derrick init`, `derrick run add-feature`, `derrick doctor`,
   `derrick config`, `derrick uninstall` (reverses init cleanly).
+- `derrick switch` — upgrades a solo-mode repo to crew mode; patches
+  `tools.substrate.mode`, adds `peers:` stanza, writes foreman defaults
+  (see §5.2.2).
+- `derrick upgrade` — **name reserved** for binary self-update (checks
+  GitHub releases, downloads, and replaces the running binary). Not yet
+  implemented; the subcommand exists and prints "upgrade not yet available,
+  re-run the install script" so users get a clear signal rather than a
+  "command not found" error.
 - Observability surface (§5.5): `derrick status`, `tickets`,
   `ticket`, `batch`, `foreman`, `activity`, `hands`, `orphans`,
   `runs`.
@@ -1829,10 +2028,21 @@ links back to the section where it lives.
 | D39 | **Adversarial code review fires before every PR, not after.** `derrick ticket code-review <id> --branch <branch> --round N` diffs `origin/<base>...<branch>` (three-dot), passes the diff + ticket requirements to a configured reviewer role, and exits 0 (pass) or 3 (issues found). Hands must call this and get a pass before calling `derrick ticket review`. Auto-remediation is hand-driven: the hand reads `.derrick/reviews/<id>/round-N.md`, fixes, and retries up to `tools.code_review.rounds` times. Beyond that, the hand surfaces the report to the human. Exit code 3 (not 1) lets hands distinguish "fix needed" from infrastructure errors. Disabled by default (`tools.code_review.enabled: false`). | §8.6 / AGENTS.md hand protocol |
 | D41 | **OpenCode is a first-class host.** `derrick-tools` gains an `OpencodeHost` adapter that invokes `opencode run "<prompt>" --dir <cwd> [--dangerously-skip-permissions]`. `derrick-scrub` gains an `opencode` rule set that strips the startup banner, tool-use progress lines, spinner frames, thinking markers, and cost footers. Specialist sub-agents are published under `.opencode/agents/` with opencode frontmatter (`mode: agent`). The `HostRegistry` default set now includes `opencode` alongside `claude`, `codex`, and `copilot`. | §6.5 / `derrick-tools` / `derrick-scrub` |
 | D42 | **Full courtroom pattern: adversarial cross-model deliberation with auto-revise loop.** Assay implements the structured Claude-prosecutes / Codex-cross-examines / Claude-rebuts / Codex-deliberates cycle from the courtroom pattern. Default rounds: 10. Constitution violations are parsed and enforced as non-negotiable gates (override requires human approval). When the revise loop exhausts configured rounds, derrick prompts the user to continue or halt. Progress is streamed in real-time (round N/M, verdict, phase name) instead of a spinner. The loop switches from a `for` to a `while` to allow dynamic round extension at user request. | §7 / `derrick-flow/src/assay.rs` |
+| D43 | **Roughneck: LLM output compression via prompt injection.** A new crate `derrick-roughneck` appends a compression instruction to every model request, asking the model to emit a compressed form of its output before handoff. Three levels: `lite` (~30%), `full` (~65%, default), `ultra` (~75%). Config: `tools.roughneck.{enabled,level,compress_memory}`. Per-step manifest field `roughneck_tokens_saved` records estimated savings. TUI Tokens tab surfaces roughneck savings alongside scrub. | §3.1 / §9.B.2a / §10.1 |
+| D44 | **`derrick-scrub` records bytes_raw and bytes_saved per step in the manifest.** The scrub crate already existed; this decision adds structured telemetry so `derrick gain` and the TUI can show per-step context reduction, not just a binary "scrub on/off". Config: `tools.output_compression.enabled`. | §9.B.2 / §10.1 |
+| D45 | **`tokens_in` correction: `max(cli_reported, prompt_len/4)`.** `claude --output-format json` under-reports input tokens (direct message only, not full session context). Fix: derrick records the CLI value and a character-count estimate and stores the larger. Conservative but prevents systematic under-counting on cached-prefix sessions. | §9.B.7 / §10.1 |
+| D46 | **Run resume via `prompt_key`: idempotent retry for incomplete runs.** Each run computes a 12-hex SHA-256 prefix of the normalised prompt (`prompt_key`). `derrick add` auto-resumes the most recent incomplete run with the same key instead of starting fresh. `--force` overrides. `resume_of` in the manifest tracks lineage. Completed runs are never auto-resumed. | §10.2 |
+| D47 | **Bridge auto-remediation: terminal ticket delete+recreate; active ticket skip.** When creating tickets, bridge checks for existing tickets with the same feature identity. Terminal-state tickets (Done/Cancelled) are deleted and recreated. Non-terminal tickets are reused (skipped). Both rules fire per-ticket so partial batches are handled correctly. | §8.2.1 |
+| D48 | **Assay headless mode: only `reject` blocks the pipeline.** When `!isatty(stdin)`, assay runs without interactive prompts. `revise` and `accept` are both treated as pass; round exhaustion without `reject` logs a warning and continues. The hard rounds limit applies. Enables fully unattended CI runs. | §7 headless / §4 assay step |
+| D49 | **Constitution seeding in `derrick init` wizard.** When no existing constitution is found and speckit is unavailable for interactive authoring, the wizard prompts the user to enter constitution content directly. The text is written to `.specify/constitution.md` as real content (no banner stub). `--constitution-stub` still writes the banner for users who prefer to author separately. | §5.2 Step 5 |
+| D50 | **`derrick init` creates an initial commit when the repo has no HEAD.** After writing all init files, if the repo has no commits yet, the wizard runs `git add -A && git commit -m "chore: derrick init"`. Required because `derrick add` creates git worktrees, which require at least one commit. | §5.2 Step 7 |
+| D51 | **Pipeline step order fix: `tasks` runs before `analyze`.** Task generation depends on the accepted plan but not on codebase analysis. `analyze` then has the full task list available as context. Canonical order: `specify → clarify → plan → tasks → analyze → assay → bridge → foreman`. All pipeline config, step descriptions, and the §9.B.1 table updated to match. | §4 pipeline yaml / §9.B.1 / §9.C |
+| D52 | **`derrick switch`: solo → crew upgrade command.** New subcommand upgrades a repo from `mode: solo` to `mode: crew` (or `copilot` via `--mode`). Patches `tools.substrate.mode`, adds `peers:` stanza, writes foreman defaults. Idempotent. `--dry-run` previews the yaml diff. | §5.2.2 / §11 |
+| D53 | **`derrick upgrade` name reserved for binary self-update.** The subcommand is registered in the CLI but not yet implemented. It prints a clear "not yet available" message rather than a "command not found" error, preserving the name for the future self-update feature (check GitHub releases, download, replace running binary). | §11 |
 
 ### Remaining open questions
 
-None blocking. All v1 design questions resolved (D1–D41).
+None blocking. All v1 design questions resolved (D1–D53).
 
 New questions raised during implementation will be tracked as
 GitHub issues with the `design-question` label, and locked-in
