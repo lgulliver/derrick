@@ -84,7 +84,9 @@ struct ResolvedInitOptions {
 }
 
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
-    check_prerequisites()?;
+    if !args.dry_run {
+        check_prerequisites()?;
+    }
     let (repo_root, fresh_git_init) = match current_repo_root() {
         Ok(root) => (root, false),
         Err(_) => (ensure_git_repo(args.yes)?, true),
