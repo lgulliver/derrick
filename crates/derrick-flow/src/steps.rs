@@ -167,12 +167,29 @@ async fn execute_role_step(
         let host = hosts
             .get(host_name)
             .ok_or_else(|| RunError::Config(format!("host {host_name:?} is not registered")))?;
-        let pre_specify = if step.id() == "specify" {
-            Some(derrick_assay::io::snapshot_feature_dirs(working_dir(
-                state, repo_root,
-            )))
+        // For the `specify` step, pre-scaffold `specs/<NNN>-<slug>/spec.md`
+        // and `.specify/feature.json` BEFORE invoking the LLM. This removes
+        // the model's responsibility for inventing a path and creating the
+        // directory — empirically, the model frequently writes a flat file
+        // (e.g. `spec.md` at repo root) which broke the old snapshot-diff
+        // resolver. The prompt is amended to include the exact target path.
+        let (prompt, pre_specify_dir) = if step.id() == "specify" {
+            let wd = working_dir(state, repo_root);
+            let feature_dir = derrick_assay::io::prescaffold_feature_dir(wd, &state.prompt)?;
+            let target = feature_dir.join("spec.md");
+            let amended = format!(
+                "Write the spec to: {target_display}\n\
+                 The file already exists as a stub — overwrite it with the full spec. \
+                 Do not create a different directory or a flat file at the repo root.\n\n\
+                 {prompt}",
+                target_display = target.display(),
+            );
+            // Make the new feature_dir visible to template_context for downstream
+            // re-renders and to detect_artifacts below.
+            state.feature_dir = Some(feature_dir.clone());
+            (amended, Some(feature_dir))
         } else {
-            None
+            (prompt, None)
         };
         let prompt_len = prompt.len();
         let mut request = HostRequest::new(prompt, working_dir(state, repo_root));
@@ -195,12 +212,17 @@ async fn execute_role_step(
             .max((prompt_len as u32).saturating_div(4));
         let step_tokens_out = response.tokens_out;
         write_log(log_path, &response.stdout, &response.stderr)?;
-        if let Some(before) = pre_specify {
+        if let Some(feature_dir) = pre_specify_dir {
+            // Post-step check: the LLM must have overwritten the pre-scaffolded
+            // stub with real content. feature.json is already in place from
+            // the pre-scaffold, so resume/retry semantics still work.
             let wd = working_dir(state, repo_root);
-            let after = derrick_assay::io::snapshot_feature_dirs(wd);
-            let feature_dir = derrick_assay::io::resolve_new_feature_dir(&before, &after, wd)?;
-            derrick_assay::io::write_feature_json(wd, &feature_dir)?;
-            state.feature_dir = Some(feature_dir);
+            derrick_assay::io::verify_spec_written(wd, &feature_dir).map_err(|e| {
+                RunError::StepFailed {
+                    id: step.id().to_owned(),
+                    message: e.to_string(),
+                }
+            })?;
         }
         let roughneck_saved = if config.tools().roughneck().enabled() {
             derrick_roughneck::estimate_tokens_saved(

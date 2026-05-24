@@ -279,3 +279,308 @@ pub fn resolve_new_feature_dir(
         ))),
     }
 }
+
+/// Derives a short kebab-case slug from a free-form feature prompt.
+///
+/// Lowercases, splits on non-alphanumerics, keeps at most `max_words`
+/// words, joins with `-`, and truncates to `max_len` characters.
+pub fn prompt_to_slug(prompt: &str, max_words: usize, max_len: usize) -> String {
+    let joined: String = prompt
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(max_words)
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug: String = joined.chars().take(max_len).collect();
+    // Avoid trailing hyphen if truncation lands on one.
+    slug.trim_end_matches('-').to_owned()
+}
+
+/// Returns the next sequential 3-digit prefix for a new directory under
+/// `specs_dir`. Returns 1 if the directory does not exist or is empty.
+///
+/// Scans existing entries, extracts the leading numeric prefix from each name
+/// (e.g. `001-foo` → 1) and returns `max + 1`. Non-numeric names are ignored.
+pub fn next_feature_prefix(specs_dir: &Path) -> u32 {
+    if !specs_dir.exists() {
+        return 1;
+    }
+    let max = std::fs::read_dir(specs_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy().into_owned();
+            s.split('-').next().and_then(|n| n.parse::<u32>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    max + 1
+}
+
+/// Marker line written into the placeholder `spec.md` stub. Used by the
+/// post-step check to detect that the LLM did not actually overwrite the file.
+pub const SPEC_STUB_MARKER: &str = "<!-- derrick: specify pending -->";
+
+/// Pre-scaffolds a feature directory before the LLM `specify` step runs.
+///
+/// Creates `specs/<NNN>-<slug>/spec.md` (with a stub marker) and writes
+/// `.specify/feature.json` pointing at it. Returns the new feature directory
+/// path relative to `wd`.
+///
+/// This eliminates the need for the LLM to invent a path and create the
+/// directory itself — the model is then told exactly where to write.
+pub fn prescaffold_feature_dir(wd: &Path, prompt: &str) -> Result<std::path::PathBuf, RunError> {
+    let specs_root = wd.join("specs");
+    create_dir_all(&specs_root)?;
+    let slug = prompt_to_slug(prompt, 6, 30);
+    let slug = if slug.is_empty() {
+        "feature".to_owned()
+    } else {
+        slug
+    };
+    // If a directory already exists for the same slug (idempotent re-run /
+    // resume), reuse it rather than allocating a new NNN prefix. This keeps
+    // re-runs on the same prompt from polluting `specs/` with empty stubs.
+    let existing = std::fs::read_dir(&specs_root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy().into_owned();
+            // Match `NNN-<slug>` exactly (slug after first hyphen).
+            let (_prefix, rest) = s.split_once('-')?;
+            if rest == slug.as_str() {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .min(); // deterministic: earliest numeric prefix wins
+    let dir_name = match existing {
+        Some(name) => name,
+        None => {
+            let prefix = next_feature_prefix(&specs_root);
+            format!("{prefix:03}-{slug}")
+        }
+    };
+    let feature_rel = std::path::PathBuf::from("specs").join(&dir_name);
+    let feature_abs = wd.join(&feature_rel);
+    create_dir_all(&feature_abs)?;
+    let spec_path = feature_abs.join("spec.md");
+    if !spec_path.exists() {
+        let stub = format!("# {slug}\n\n{SPEC_STUB_MARKER}\n");
+        write_file(&spec_path, &stub)?;
+    }
+    write_feature_json(wd, &feature_rel)?;
+    Ok(feature_rel)
+}
+
+/// Verifies that the LLM actually overwrote the pre-scaffolded spec stub with
+/// real content. Returns `Ok(())` if the file exists, is non-empty, and no
+/// longer contains the [`SPEC_STUB_MARKER`].
+pub fn verify_spec_written(wd: &Path, feature_dir: &Path) -> Result<(), RunError> {
+    let spec_path = wd.join(feature_dir).join("spec.md");
+    let contents = read_to_string(&spec_path).map_err(|_| {
+        RunError::Config(format!(
+            "specify step did not produce {}; expected the LLM to overwrite \
+             the pre-scaffolded stub",
+            spec_path.display()
+        ))
+    })?;
+    if contents.trim().is_empty() {
+        return Err(RunError::Config(format!(
+            "specify step left {} empty; expected the LLM to write the full spec",
+            spec_path.display()
+        )));
+    }
+    if contents.contains(SPEC_STUB_MARKER) {
+        return Err(RunError::Config(format!(
+            "specify step did not overwrite the pre-scaffolded stub at {}; \
+             the LLM appears not to have written a real specification",
+            spec_path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn prompt_to_slug_basic() {
+        assert_eq!(
+            prompt_to_slug("Add a greet command with flags", 6, 30),
+            "add-a-greet-command-with-flags"
+        );
+    }
+
+    #[test]
+    fn prompt_to_slug_strips_punctuation_and_lowercases() {
+        assert_eq!(
+            prompt_to_slug("OAuth2: integrate, with API!", 6, 30),
+            "oauth2-integrate-with-api"
+        );
+    }
+
+    #[test]
+    fn prompt_to_slug_respects_word_limit() {
+        let s = prompt_to_slug("one two three four five six seven eight", 3, 50);
+        assert_eq!(s, "one-two-three");
+    }
+
+    #[test]
+    fn prompt_to_slug_respects_char_limit_and_trims_trailing_hyphen() {
+        // Truncation at exactly a hyphen position should not leave a dangling -
+        let s = prompt_to_slug("alpha beta gamma", 6, 10);
+        // "alpha-beta-gamma" -> take 10 -> "alpha-beta"
+        assert_eq!(s, "alpha-beta");
+    }
+
+    #[test]
+    fn prompt_to_slug_empty_input() {
+        assert_eq!(prompt_to_slug("!!! ??? ...", 6, 30), "");
+    }
+
+    #[test]
+    fn next_feature_prefix_returns_one_for_missing_dir() {
+        let tmp = tempdir().unwrap();
+        let specs = tmp.path().join("does-not-exist");
+        assert_eq!(next_feature_prefix(&specs), 1);
+    }
+
+    #[test]
+    fn next_feature_prefix_returns_one_for_empty_dir() {
+        let tmp = tempdir().unwrap();
+        let specs = tmp.path().join("specs");
+        std::fs::create_dir_all(&specs).unwrap();
+        assert_eq!(next_feature_prefix(&specs), 1);
+    }
+
+    #[test]
+    fn next_feature_prefix_finds_next_after_existing() {
+        let tmp = tempdir().unwrap();
+        let specs = tmp.path().join("specs");
+        std::fs::create_dir_all(specs.join("001-alpha")).unwrap();
+        std::fs::create_dir_all(specs.join("003-gamma")).unwrap();
+        std::fs::create_dir_all(specs.join("not-numeric")).unwrap();
+        assert_eq!(next_feature_prefix(&specs), 4);
+    }
+
+    #[test]
+    fn prescaffold_creates_dir_stub_and_feature_json() {
+        let tmp = tempdir().unwrap();
+        let feature_dir =
+            prescaffold_feature_dir(tmp.path(), "Add a greet command with flags").unwrap();
+        assert_eq!(
+            feature_dir,
+            std::path::PathBuf::from("specs/001-add-a-greet-command-with-flags")
+        );
+        let spec = tmp.path().join(&feature_dir).join("spec.md");
+        assert!(spec.exists(), "spec.md should be created");
+        let content = std::fs::read_to_string(&spec).unwrap();
+        assert!(content.contains(SPEC_STUB_MARKER));
+
+        let json_path = tmp.path().join(FEATURE_JSON);
+        assert!(json_path.exists(), "feature.json should be created");
+        let json = std::fs::read_to_string(&json_path).unwrap();
+        assert!(
+            json.contains("specs/001-add-a-greet-command-with-flags"),
+            "feature.json should point at the new dir, got: {json}"
+        );
+    }
+
+    #[test]
+    fn prescaffold_increments_when_existing_dirs_present() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("specs/001-existing")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("specs/002-another")).unwrap();
+        let feature_dir = prescaffold_feature_dir(tmp.path(), "Something new").unwrap();
+        assert!(
+            feature_dir
+                .to_string_lossy()
+                .starts_with("specs/003-something-new"),
+            "got {}",
+            feature_dir.display()
+        );
+    }
+
+    #[test]
+    fn prescaffold_reuses_existing_dir_with_same_slug() {
+        let tmp = tempdir().unwrap();
+        // First run creates 001-test.
+        let first = prescaffold_feature_dir(tmp.path(), "test").unwrap();
+        assert_eq!(first, std::path::PathBuf::from("specs/001-test"));
+        // Simulate the LLM overwriting the stub.
+        std::fs::write(
+            tmp.path().join(&first).join("spec.md"),
+            "# Real\n\nContent.\n",
+        )
+        .unwrap();
+        // Second run with same prompt should reuse the directory.
+        let second = prescaffold_feature_dir(tmp.path(), "test").unwrap();
+        assert_eq!(second, first);
+        // Stub should not have been re-written over the real content.
+        let content = std::fs::read_to_string(tmp.path().join(&second).join("spec.md")).unwrap();
+        assert!(!content.contains(SPEC_STUB_MARKER));
+        assert!(content.contains("Real"));
+    }
+
+    #[test]
+    fn prescaffold_falls_back_to_feature_when_slug_empty() {
+        let tmp = tempdir().unwrap();
+        let feature_dir = prescaffold_feature_dir(tmp.path(), "!!! ???").unwrap();
+        assert_eq!(feature_dir, std::path::PathBuf::from("specs/001-feature"));
+    }
+
+    #[test]
+    fn verify_spec_written_rejects_untouched_stub() {
+        let tmp = tempdir().unwrap();
+        let feature_dir = prescaffold_feature_dir(tmp.path(), "Hello world").unwrap();
+        let err = verify_spec_written(tmp.path(), &feature_dir).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("did not overwrite"),
+            "expected stub-not-overwritten error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_spec_written_accepts_real_content() {
+        let tmp = tempdir().unwrap();
+        let feature_dir = prescaffold_feature_dir(tmp.path(), "Hello world").unwrap();
+        std::fs::write(
+            tmp.path().join(&feature_dir).join("spec.md"),
+            "# Hello World\n\n## Overview\n\nReal spec content here.\n",
+        )
+        .unwrap();
+        verify_spec_written(tmp.path(), &feature_dir).unwrap();
+    }
+
+    #[test]
+    fn verify_spec_written_rejects_missing_file() {
+        let tmp = tempdir().unwrap();
+        let err = verify_spec_written(tmp.path(), Path::new("specs/missing")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("did not produce"),
+            "expected missing-file error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_spec_written_rejects_empty_file() {
+        let tmp = tempdir().unwrap();
+        let feature_dir = prescaffold_feature_dir(tmp.path(), "Empty test").unwrap();
+        std::fs::write(tmp.path().join(&feature_dir).join("spec.md"), "   \n").unwrap();
+        let err = verify_spec_written(tmp.path(), &feature_dir).unwrap_err();
+        assert!(format!("{err}").contains("empty"));
+    }
+}

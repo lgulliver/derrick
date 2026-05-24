@@ -1302,10 +1302,10 @@ fi
     }
 
     #[tokio::test]
-    async fn specify_step_detects_new_feature_dir_and_writes_feature_json() -> TestResult {
-        // Verify that derrick writes feature.json after the specify step without
-        // relying on the AI host to produce it.  The host only creates the
-        // feature directory and spec.md — no feature.json.
+    async fn specify_step_prescaffolds_and_writes_feature_json() -> TestResult {
+        // Verify that derrick pre-scaffolds the feature directory and writes
+        // feature.json before invoking the host, then the host overwrites the
+        // stub spec.md with real content.
         struct MinimalSpecifyHost;
 
         #[async_trait::async_trait]
@@ -1317,19 +1317,17 @@ fi
                 true
             }
             async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
-                let feature = request.cwd.join("specs/my-feature");
-                std::fs::create_dir_all(&feature).map_err(|source| HostError::Io {
-                    host: "claude".to_owned(),
-                    source,
-                })?;
-                std::fs::write(feature.join("spec.md"), "spec content").map_err(|source| {
-                    HostError::Io {
+                // The pre-scaffold step has already created specs/001-test/.
+                // A well-behaved host overwrites the stub spec.md.
+                let feature = request.cwd.join("specs/001-test");
+                std::fs::write(feature.join("spec.md"), "# Real spec\n\nFull content.\n").map_err(
+                    |source| HostError::Io {
                         host: "claude".to_owned(),
                         source,
-                    }
-                })?;
+                    },
+                )?;
                 Ok(HostResponse {
-                    stdout: "spec written to specs/my-feature/spec.md\n".to_owned(),
+                    stdout: "spec written to specs/001-test/spec.md\n".to_owned(),
                     stderr: String::new(),
                     exit_code: 0,
                     elapsed: Duration::from_millis(1),
@@ -1383,10 +1381,15 @@ fi
         let feature_json =
             std::fs::read_to_string(dir.path().join(FEATURE_JSON)).expect("feature.json missing");
         assert!(
-            feature_json.contains("specs/my-feature"),
-            "feature.json should point to specs/my-feature, got: {feature_json}"
+            feature_json.contains("specs/001-test"),
+            "feature.json should point to specs/001-test, got: {feature_json}"
         );
-        assert!(dir.path().join("specs/my-feature/spec.md").exists());
+        assert!(dir.path().join("specs/001-test/spec.md").exists());
+        let spec = std::fs::read_to_string(dir.path().join("specs/001-test/spec.md"))?;
+        assert!(
+            !spec.contains(derrick_assay::io::SPEC_STUB_MARKER),
+            "host should have overwritten the stub, got: {spec}"
+        );
         Ok(())
     }
 

@@ -71,19 +71,30 @@ fn mock_flow_path(dir: &Path) -> TestResult<PathBuf> {
 # --dangerously-skip-permissions etc. precede it.
 prompt=""
 for arg in "$@"; do prompt="$arg"; done
-/bin/mkdir -p specs/001-test .specify
+# For specify, derrick pre-scaffolds the feature dir and amends the prompt
+# with `Write the spec to: specs/<NNN>-<slug>/spec.md`. Extract that path so
+# the mock writes to the same location derrick expects.
+target=$(printf '%s' "$prompt" | /usr/bin/awk '/Write the spec to:/ { for (i=1;i<=NF;i++) if ($i ~ /^specs\//) { sub(/\/spec\.md$/, "", $i); print $i; exit } }')
+if [ -z "$target" ]; then
+  # Plan/tasks/etc — read feature.json for the feature dir.
+  if [ -f .specify/feature.json ]; then
+    target=$(/usr/bin/sed -n 's/.*"feature_directory"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' .specify/feature.json | /usr/bin/head -1)
+  fi
+fi
+if [ -z "$target" ]; then target="specs/001-test"; fi
+/bin/mkdir -p "$target" .specify
 case "$prompt" in
   *speckit.specify*)
-    printf '{"feature_directory":"specs/001-test"}' > .specify/feature.json
-    printf 'spec' > specs/001-test/spec.md
+    printf '{"feature_directory":"%s"}' "$target" > .specify/feature.json
+    printf 'spec' > "$target/spec.md"
     printf 'ok'
     ;;
   *speckit.plan*)
-    printf 'plan' > specs/001-test/plan.md
+    printf 'plan' > "$target/plan.md"
     printf 'ok'
     ;;
   *speckit.tasks*)
-    printf 'tasks' > specs/001-test/tasks.md
+    printf 'tasks' > "$target/tasks.md"
     printf 'ok'
     ;;
   *Verdict*|*Plan:*)
@@ -770,10 +781,13 @@ fn run_add_feature_smoke_writes_real_artifacts() -> TestResult {
         .clone();
 
     assert_contains(&output, "smoke")?;
-    assert!(dir.path().join("specs/001-test/spec.md").exists());
-    assert!(dir.path().join("specs/001-test/plan.md").exists());
-    assert!(dir.path().join("specs/001-test/tasks.md").exists());
-    assert!(dir.path().join("specs/001-test/assay/verdict.md").exists());
+    // derrick now pre-scaffolds the feature dir from the prompt slug
+    // ("hello" → 001-hello). The mock claude binary reads the target path
+    // from the amended prompt and writes there.
+    assert!(dir.path().join("specs/001-hello/spec.md").exists());
+    assert!(dir.path().join("specs/001-hello/plan.md").exists());
+    assert!(dir.path().join("specs/001-hello/tasks.md").exists());
+    assert!(dir.path().join("specs/001-hello/assay/verdict.md").exists());
     assert!(dir
         .path()
         .join(".derrick/runs/smoke/manifest.json")
