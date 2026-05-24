@@ -11,8 +11,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{BarChart, Block, Borders, Cell, List, ListItem, Paragraph, Row, Table};
 use ratatui::Frame;
 
-use crate::app::App;
-use crate::data::Tab;
+use crate::app::{App, TicketSort};
+use crate::data::{Tab, TicketRow};
 
 /// Format a duration in seconds as a compact human-readable string
 /// (`"14m"`, `"2h03m"`, `"5s"`).
@@ -234,9 +234,65 @@ fn render_overview(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(ready_table, chunks[2]);
 }
 
+// ---------------------------------------------------------------------------
+// Ticket sort helpers
+// ---------------------------------------------------------------------------
+
+/// Maps a ticket state string to a display priority (lower = more urgent).
+/// Keeps the table operationally useful: active work at the top.
+fn state_priority(state: &str) -> u8 {
+    match state {
+        "in_flight" => 0,
+        "in_review" => 1,
+        "ready" => 2,
+        "blocked" => 3,
+        "done" => 4,
+        "rejected" => 5,
+        _ => 6,
+    }
+}
+
+/// Compare two ticket ids with numeric-suffix awareness so that `tst-2`
+/// sorts before `tst-10` rather than after it lexicographically.
+fn compare_ticket_id(a: &str, b: &str) -> std::cmp::Ordering {
+    fn split(s: &str) -> (&str, Option<u64>) {
+        match s.rfind('-') {
+            Some(i) => (&s[..i], s[i + 1..].parse::<u64>().ok()),
+            None => (s, None),
+        }
+    }
+    let (ap, an) = split(a);
+    let (bp, bn) = split(b);
+    ap.cmp(bp).then_with(|| match (an, bn) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        _ => a.cmp(b),
+    })
+}
+
+/// Sort a slice of `TicketRow` references in-place according to `sort`.
+fn sort_ticket_rows(rows: &mut Vec<&TicketRow>, sort: TicketSort) {
+    match sort {
+        // Newest-updated first; `None` (no timestamp) sorts last.
+        // `Reverse` flips the `Option<DateTime>` order so `Some(newest)`
+        // sorts first while `None` (which is less than any Some) ends up last.
+        TicketSort::Updated => {
+            rows.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
+        }
+        TicketSort::State => rows.sort_by_key(|t| state_priority(&t.state)),
+        TicketSort::Id => rows.sort_by(|a, b| compare_ticket_id(&a.id, &b.id)),
+        TicketSort::Title => rows.sort_by(|a, b| {
+            a.title
+                .to_ascii_lowercase()
+                .cmp(&b.title.to_ascii_lowercase())
+        }),
+    }
+}
+
 fn render_tickets(frame: &mut Frame, area: Rect, app: &App) {
     let q = app.filter.query().to_ascii_lowercase();
-    let rows: Vec<Row> = app
+
+    // Collect filtered references, then sort.
+    let mut filtered: Vec<&TicketRow> = app
         .data
         .tickets
         .iter()
@@ -248,6 +304,11 @@ fn render_tickets(frame: &mut Frame, area: Rect, app: &App) {
                 || t.title.to_ascii_lowercase().contains(&q)
                 || t.id.to_ascii_lowercase().contains(&q)
         })
+        .collect();
+    sort_ticket_rows(&mut filtered, app.ticket_sort);
+
+    let rows: Vec<Row> = filtered
+        .iter()
         .enumerate()
         .map(|(i, t)| {
             let style = if i == app.selected_row {
@@ -271,10 +332,13 @@ fn render_tickets(frame: &mut Frame, area: Rect, app: &App) {
         .constraints([Constraint::Min(5), Constraint::Length(3)])
         .split(area);
 
-    let title = if q.is_empty() {
-        "Tickets".to_owned()
-    } else {
-        format!("Tickets (filter: {q})")
+    // Title encodes filter and active sort so the user can see both at a
+    // glance without opening the help overlay.
+    let sort_label = app.ticket_sort.label();
+    let title = match (q.is_empty(), app.filter.is_active()) {
+        (true, _) => format!("Tickets  sort:{sort_label}  s:cycle"),
+        (false, true) => format!("Tickets  sort:{sort_label}  filter:{q}_"),
+        (false, false) => format!("Tickets  sort:{sort_label}  filter:{q}"),
     };
     let table = Table::new(
         rows,
@@ -293,13 +357,17 @@ fn render_tickets(frame: &mut Frame, area: Rect, app: &App) {
     .block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(table, chunks[0]);
 
-    let filter_line = if app.filter.is_active() {
-        format!("/ {}_", app.filter.query())
+    // Status bar: shows filter prompt and a reminder that s cycles the sort.
+    let status_line = if app.filter.is_active() {
+        format!(
+            "/ {}_  |  sort: {sort_label}  (s to cycle)",
+            app.filter.query()
+        )
     } else {
-        "press / to filter".to_owned()
+        format!("press / to filter  |  sort: {sort_label}  (s to cycle)")
     };
     frame.render_widget(
-        Paragraph::new(filter_line).block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(status_line).block(Block::default().borders(Borders::ALL)),
         chunks[1],
     );
 }
@@ -500,10 +568,96 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
         r     refresh\n\
         1-6   switch tab\n\
         ↑/↓   navigate rows\n\
-        ⏎     toggle detail\n\
+        ⏎     toggle detail / open PR (Stack)\n\
         /     filter\n\
+        s     cycle sort order (Tickets tab)\n\
+        d     flag memory entry for deletion (Memory tab)\n\
         Esc   close detail / cancel filter\n\
         ?     toggle this help";
     let p = Paragraph::new(body).block(Block::default().title("Help").borders(Borders::ALL));
     frame.render_widget(p, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::*;
+    use crate::data::TicketRow;
+
+    fn row(
+        id: &str,
+        state: &str,
+        title: &str,
+        updated_at: Option<chrono::DateTime<Utc>>,
+    ) -> TicketRow {
+        TicketRow {
+            id: id.to_owned(),
+            state: state.to_owned(),
+            title: title.to_owned(),
+            batch: None,
+            owner: None,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn sort_by_id_uses_numeric_suffix() {
+        let r1 = row("tst-1", "ready", "a", None);
+        let r2 = row("tst-2", "ready", "b", None);
+        let r10 = row("tst-10", "ready", "c", None);
+        let mut rows = vec![&r10, &r2, &r1];
+        sort_ticket_rows(&mut rows, TicketSort::Id);
+        assert_eq!(rows[0].id, "tst-1");
+        assert_eq!(rows[1].id, "tst-2");
+        assert_eq!(rows[2].id, "tst-10");
+    }
+
+    #[test]
+    fn sort_by_state_puts_inflight_first() {
+        let r_done = row("t1", "done", "d", None);
+        let r_blocked = row("t2", "blocked", "b", None);
+        let r_inflight = row("t3", "in_flight", "i", None);
+        let r_ready = row("t4", "ready", "r", None);
+        let mut rows = vec![&r_done, &r_blocked, &r_inflight, &r_ready];
+        sort_ticket_rows(&mut rows, TicketSort::State);
+        assert_eq!(rows[0].id, "t3", "in_flight should be first");
+        assert_eq!(rows[1].id, "t4", "ready should follow");
+        assert_eq!(rows[2].id, "t2", "blocked should follow ready");
+        assert_eq!(rows[3].id, "t1", "done should be last");
+    }
+
+    #[test]
+    fn sort_by_title_is_case_insensitive() {
+        let r_z = row("t1", "ready", "Zebra", None);
+        let r_a = row("t2", "ready", "apple", None);
+        let r_m = row("t3", "ready", "Mango", None);
+        let mut rows = vec![&r_z, &r_a, &r_m];
+        sort_ticket_rows(&mut rows, TicketSort::Title);
+        assert_eq!(rows[0].id, "t2"); // apple
+        assert_eq!(rows[1].id, "t3"); // Mango
+        assert_eq!(rows[2].id, "t1"); // Zebra
+    }
+
+    #[test]
+    fn sort_by_updated_newest_first_and_none_last() {
+        let newer = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
+        let older = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let r_none = row("t1", "ready", "no timestamp", None);
+        let r_old = row("t2", "ready", "old", Some(older));
+        let r_new = row("t3", "ready", "new", Some(newer));
+        let mut rows = vec![&r_none, &r_old, &r_new];
+        sort_ticket_rows(&mut rows, TicketSort::Updated);
+        assert_eq!(rows[0].id, "t3", "newest should be first");
+        assert_eq!(rows[1].id, "t2", "older should follow");
+        assert_eq!(rows[2].id, "t1", "None updated_at should be last");
+    }
+
+    #[test]
+    fn compare_ticket_id_handles_same_prefix_different_numbers() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_ticket_id("tst-2", "tst-10"), Ordering::Less);
+        assert_eq!(compare_ticket_id("tst-10", "tst-2"), Ordering::Greater);
+        assert_eq!(compare_ticket_id("tst-5", "tst-5"), Ordering::Equal);
+    }
 }

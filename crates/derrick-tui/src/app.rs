@@ -9,6 +9,49 @@ use crossterm::event::KeyCode;
 
 use crate::data::{DataModel, Tab};
 
+// ---------------------------------------------------------------------------
+// Ticket sort
+// ---------------------------------------------------------------------------
+
+/// Sort order for the Tickets tab table. Cycles with the `s` key.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TicketSort {
+    /// Most-recently-updated first. Default — mirrors the substrate query
+    /// order so the view is stable without any extra sorting overhead.
+    #[default]
+    Updated,
+    /// Lifecycle state in operational priority order:
+    /// in-flight → in-review → ready → blocked → done → rejected.
+    State,
+    /// Lexicographic ticket id with numeric-suffix awareness
+    /// (`tst-2` < `tst-10`).
+    Id,
+    /// Case-insensitive title.
+    Title,
+}
+
+impl TicketSort {
+    /// Returns the next sort in the cycle.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Updated => Self::State,
+            Self::State => Self::Id,
+            Self::Id => Self::Title,
+            Self::Title => Self::Updated,
+        }
+    }
+
+    /// Short label shown in the Tickets block title.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Updated => "updated",
+            Self::State => "state",
+            Self::Id => "id",
+            Self::Title => "title",
+        }
+    }
+}
+
 /// Search filter state. `Inactive` means the filter bar is not focused; the
 /// stored string is the live query buffer when `Active`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -47,6 +90,8 @@ pub struct App {
     pub selected_row: usize,
     /// Search filter state for the active tab.
     pub filter: FilterState,
+    /// Active sort order for the Tickets tab. Cycled with `s`.
+    pub ticket_sort: TicketSort,
     /// `true` when a detail/preview pane is open over the active tab.
     pub detail_open: bool,
     /// Latest data snapshot pulled from the substrate.
@@ -74,6 +119,7 @@ impl App {
             scroll_offset: 0,
             selected_row: 0,
             filter: FilterState::Inactive,
+            ticket_sort: TicketSort::default(),
             detail_open: false,
             data,
             quit: false,
@@ -149,6 +195,12 @@ impl App {
                 if let Some(entry) = self.data.memory_entries.get(self.selected_row) {
                     self.pending_prune_slug = Some(entry.slug.clone());
                 }
+            }
+            // `s` cycles the sort order on the Tickets tab; resets the
+            // selected-row index so it doesn't point into a stale position.
+            KeyCode::Char('s') if self.active_tab == Tab::Tickets => {
+                self.ticket_sort = self.ticket_sort.cycle();
+                self.selected_row = 0;
             }
             KeyCode::Char(c @ '1'..='6') => {
                 let idx = (c as u8 - b'1') as usize;
@@ -302,5 +354,52 @@ mod tests {
         // Any key dismisses help — but doesn't quit on that same press.
         assert!(!a.show_help);
         assert!(!a.quit);
+    }
+
+    // ------------------------------------------------------------------
+    // TicketSort tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn ticket_sort_cycles_through_all_variants_and_wraps() {
+        let mut s = TicketSort::default();
+        assert_eq!(s, TicketSort::Updated);
+        s = s.cycle();
+        assert_eq!(s, TicketSort::State);
+        s = s.cycle();
+        assert_eq!(s, TicketSort::Id);
+        s = s.cycle();
+        assert_eq!(s, TicketSort::Title);
+        s = s.cycle();
+        assert_eq!(s, TicketSort::Updated, "should wrap back to Updated");
+    }
+
+    #[test]
+    fn key_s_on_tickets_tab_cycles_sort_and_resets_row() {
+        let mut a = app();
+        a.active_tab = Tab::Tickets;
+        a.selected_row = 5;
+        assert_eq!(a.ticket_sort, TicketSort::Updated);
+        a.handle_key(KeyCode::Char('s'));
+        assert_eq!(a.ticket_sort, TicketSort::State);
+        assert_eq!(a.selected_row, 0, "sort change must reset selected row");
+        a.handle_key(KeyCode::Char('s'));
+        assert_eq!(a.ticket_sort, TicketSort::Id);
+        a.handle_key(KeyCode::Char('s'));
+        assert_eq!(a.ticket_sort, TicketSort::Title);
+        a.handle_key(KeyCode::Char('s'));
+        assert_eq!(a.ticket_sort, TicketSort::Updated);
+    }
+
+    #[test]
+    fn key_s_outside_tickets_tab_is_ignored() {
+        let mut a = app();
+        // active_tab is Overview (default)
+        a.handle_key(KeyCode::Char('s'));
+        assert_eq!(
+            a.ticket_sort,
+            TicketSort::Updated,
+            "s outside Tickets tab must not change sort"
+        );
     }
 }

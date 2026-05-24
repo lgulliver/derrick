@@ -11,7 +11,7 @@ pub mod data;
 pub mod event_loop;
 pub mod tabs;
 
-pub use app::{App, FilterState};
+pub use app::{App, FilterState, TicketSort};
 pub use data::{
     DataModel, EventRow, ForemanStatusSnapshot, LastAssaySnapshot, MemoryEntry, OverviewData,
     ParseTabError, StackNode, StackSummary, StepTokenSummary, Tab, TicketRow, TokenSummary,
