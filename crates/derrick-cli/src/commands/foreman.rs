@@ -151,6 +151,8 @@ fn build_dispatcher(
             base_branch: "main".to_owned(),
             agent_identity: config.tools().copilot().agent_identity().to_owned(),
             branch_prefix: config.tools().git().branch_prefix().to_owned(),
+            roughneck_enabled: config.tools().roughneck().enabled(),
+            roughneck_level: config.tools().roughneck().level().to_owned(),
         };
         let branch_creator = Arc::new(GitBranchCreator::new(repo_root.to_path_buf()))
             as Arc<dyn derrick_copilot::BranchCreator>;
@@ -174,6 +176,8 @@ fn build_dispatcher(
             branch_prefix: config.tools().git().branch_prefix().to_owned(),
             queue_dir: repo_root.join(claude_cfg.queue_dir()),
             base_branch: "main".to_owned(),
+            roughneck_enabled: config.tools().roughneck().enabled(),
+            roughneck_level: config.tools().roughneck().level().to_owned(),
         };
         multi = multi.register(Box::new(ClaudeHandDispatcher::new(
             Arc::clone(substrate),

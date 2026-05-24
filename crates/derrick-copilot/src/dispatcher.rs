@@ -42,6 +42,11 @@ pub struct CopilotHandDispatcherConfig {
     /// batch and id to form `<prefix>/<batch>/<ticket-id>`. Sourced from
     /// `tools.git.branch_prefix`; defaults to `"derrick"`.
     pub branch_prefix: String,
+    /// Whether to prepend Roughneck instructions to the issue body submitted
+    /// to Copilot.
+    pub roughneck_enabled: bool,
+    /// Roughneck level: "lite", "full", or "ultra".
+    pub roughneck_level: String,
 }
 
 impl Default for CopilotHandDispatcherConfig {
@@ -52,6 +57,8 @@ impl Default for CopilotHandDispatcherConfig {
             base_branch: "main".to_owned(),
             agent_identity: "derrick-hand".to_owned(),
             branch_prefix: "derrick".to_owned(),
+            roughneck_enabled: true,
+            roughneck_level: "full".to_owned(),
         }
     }
 }
@@ -158,9 +165,14 @@ impl HandDispatcher for CopilotHandDispatcher {
         // 3. File the Copilot task. If this fails the hand exists but no
         //    work has been dispatched — record a note and surface the
         //    error so the foreman can re-queue.
+        let issue_body = if self.config.roughneck_enabled {
+            derrick_roughneck::inject_prompt(&ticket.body, &self.config.roughneck_level)
+        } else {
+            ticket.body.clone()
+        };
         let task = match self
             .client
-            .create_task(&branch, &ticket.title, &ticket.body)
+            .create_task(&branch, &ticket.title, &issue_body)
             .await
         {
             Ok(task) => task,
@@ -403,6 +415,8 @@ mod tests {
             base_branch: "main".to_owned(),
             agent_identity: "copilot-test".to_owned(),
             branch_prefix: "derrick".to_owned(),
+            roughneck_enabled: false,
+            roughneck_level: "full".to_owned(),
         }
     }
 
@@ -551,6 +565,8 @@ mod tests {
             base_branch: "main".to_owned(),
             agent_identity: "copilot-test".to_owned(),
             branch_prefix: "derrick".to_owned(),
+            roughneck_enabled: false,
+            roughneck_level: "full".to_owned(),
         };
         let dispatcher = CopilotHandDispatcher::new(
             Arc::clone(&substrate),

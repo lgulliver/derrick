@@ -49,6 +49,10 @@ pub struct ClaudeHandDispatcherConfig {
     /// Default base branch when the foreman does not supply a parent (kept
     /// for symmetry with the Copilot dispatcher; unused in dispatch).
     pub base_branch: String,
+    /// Whether to prepend Roughneck instructions to the queue file prompt.
+    pub roughneck_enabled: bool,
+    /// Roughneck level: "lite", "full", or "ultra".
+    pub roughneck_level: String,
 }
 
 impl Default for ClaudeHandDispatcherConfig {
@@ -61,6 +65,8 @@ impl Default for ClaudeHandDispatcherConfig {
             branch_prefix: "derrick".to_owned(),
             queue_dir: PathBuf::from(".derrick/queue"),
             base_branch: "main".to_owned(),
+            roughneck_enabled: true,
+            roughneck_level: "full".to_owned(),
         }
     }
 }
@@ -163,6 +169,8 @@ impl HandDispatcher for ClaudeHandDispatcher {
             &ticket.body,
             &branch,
             &ctx.parent_branch,
+            self.config.roughneck_enabled,
+            &self.config.roughneck_level,
         );
         let queue_file = self
             .config
@@ -204,6 +212,8 @@ impl HandDispatcher for ClaudeHandDispatcher {
                 queue_file: queue_file.clone(),
                 poll_interval: self.config.poll_interval,
                 poll_timeout: self.config.poll_timeout,
+                roughneck_enabled: self.config.roughneck_enabled,
+                roughneck_level: self.config.roughneck_level.clone(),
             };
             tokio::spawn(task.run());
         }
@@ -223,6 +233,8 @@ struct PollTask {
     queue_file: PathBuf,
     poll_interval: Duration,
     poll_timeout: Duration,
+    roughneck_enabled: bool,
+    roughneck_level: String,
 }
 
 impl PollTask {
@@ -247,6 +259,8 @@ impl PollTask {
 
         let mut child = match Command::new("claude")
             .arg("--print")
+            .arg("--output-format")
+            .arg("json")
             .stdin(Stdio::from(stdin_handle))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -260,6 +274,16 @@ impl PollTask {
                 return;
             }
         };
+
+        // Drain stdout concurrently so the pipe never blocks the child.
+        let stdout_handle = child.stdout.take().map(|mut stdout| {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = Vec::new();
+                let _ = stdout.read_to_end(&mut buf).await;
+                buf
+            })
+        });
 
         // Heartbeat loop interleaved with process wait.
         let deadline = tokio::time::Instant::now() + self.poll_timeout;
@@ -300,6 +324,11 @@ impl PollTask {
                                 ticket = %self.ticket_id,
                                 "claude --print exited successfully"
                             );
+                            let stdout_bytes = match stdout_handle {
+                                Some(handle) => handle.await.unwrap_or_default(),
+                                None => Vec::new(),
+                            };
+                            self.record_hand_stats(&stdout_bytes).await;
                             self.check_terminal_state().await;
                             return;
                         }
@@ -328,6 +357,54 @@ impl PollTask {
                     // Loop back around for another heartbeat and timeout check.
                 }
             }
+        }
+    }
+
+    async fn record_hand_stats(&self, stdout_bytes: &[u8]) {
+        let bytes_raw = stdout_bytes.len() as u32;
+        let scrubber = derrick_scrub::Scrubber::with_defaults();
+        let (_scrubbed, scrub_stats) = scrubber.scrub("claude", stdout_bytes);
+        let bytes_saved = scrub_stats
+            .bytes_in
+            .saturating_sub(scrub_stats.bytes_out)
+            .min(u64::from(u32::MAX)) as u32;
+
+        let (tokens_in, tokens_out) =
+            match serde_json::from_slice::<serde_json::Value>(stdout_bytes) {
+                Ok(value) => {
+                    let usage = value.get("usage");
+                    let tokens_in = usage
+                        .and_then(|u| u.get("input_tokens"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as u32;
+                    let tokens_out = usage
+                        .and_then(|u| u.get("output_tokens"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as u32;
+                    (tokens_in, tokens_out)
+                }
+                Err(_) => (0, 0),
+            };
+
+        let roughneck_saved = if self.roughneck_enabled {
+            derrick_roughneck::estimate_tokens_saved(tokens_out, &self.roughneck_level)
+        } else {
+            0
+        };
+
+        let body = format!(
+            "hand stats: tokens_in={tokens_in} tokens_out={tokens_out} \
+             roughneck_saved={roughneck_saved} bytes_raw={bytes_raw} bytes_saved={bytes_saved}"
+        );
+        if let Err(error) = self
+            .substrate
+            .record_typed_event(
+                EventScope::Ticket(self.ticket_id.clone()),
+                EventKind::Note { body },
+            )
+            .await
+        {
+            warn!(?error, ticket = %self.ticket_id, "failed to record hand stats note");
         }
     }
 
@@ -441,6 +518,8 @@ mod tests {
             branch_prefix: "derrick".to_owned(),
             queue_dir,
             base_branch: "main".to_owned(),
+            roughneck_enabled: false,
+            roughneck_level: "full".to_owned(),
         }
     }
 
@@ -461,6 +540,8 @@ mod tests {
             "body",
             "derrick/ad-hoc/drk-100",
             "main",
+            false,
+            "full",
         );
         assert!(body.contains("derrick/ad-hoc/drk-100"));
         assert!(body.contains("main"));
@@ -515,6 +596,61 @@ mod tests {
             .find(|h| h.id == result.hand)
             .unwrap_or_else(|| panic!("hand present"));
         assert_eq!(registered.kind, HandKind::Claude);
+    }
+
+    #[tokio::test]
+    async fn roughneck_injection_enabled() {
+        let tempdir = tempfile::tempdir()
+            .map_err(|error| format!("tempdir: {error}"))
+            .unwrap_or_else(|message| panic!("{message}"));
+        let substrate = open_substrate(&tempdir).await;
+        let ticket = make_ticket(&substrate, "drk-103").await;
+        let queue_dir = tempdir.path().join("queue");
+        let mut cfg = dispatcher_config(queue_dir.clone());
+        cfg.roughneck_enabled = true;
+        cfg.roughneck_level = "full".to_owned();
+        let dispatcher = ClaudeHandDispatcher::new(Arc::clone(&substrate), cfg);
+
+        dispatcher
+            .dispatch(&ctx(&ticket, tempdir.path()))
+            .await
+            .map_err(|error| format!("dispatch: {error}"))
+            .unwrap_or_else(|message| panic!("{message}"));
+
+        let body = tokio::fs::read_to_string(queue_dir.join("drk-103.md"))
+            .await
+            .map_err(|error| format!("read queue: {error}"))
+            .unwrap_or_else(|message| panic!("{message}"));
+        assert!(
+            body.starts_with("[ROUGHNECK:FULL]"),
+            "expected queue body to begin with ROUGHNECK header, got: {}",
+            &body[..body.len().min(80)]
+        );
+    }
+
+    #[tokio::test]
+    async fn roughneck_injection_disabled() {
+        let tempdir = tempfile::tempdir()
+            .map_err(|error| format!("tempdir: {error}"))
+            .unwrap_or_else(|message| panic!("{message}"));
+        let substrate = open_substrate(&tempdir).await;
+        let ticket = make_ticket(&substrate, "drk-104").await;
+        let queue_dir = tempdir.path().join("queue");
+        let mut cfg = dispatcher_config(queue_dir.clone());
+        cfg.roughneck_enabled = false;
+        let dispatcher = ClaudeHandDispatcher::new(Arc::clone(&substrate), cfg);
+
+        dispatcher
+            .dispatch(&ctx(&ticket, tempdir.path()))
+            .await
+            .map_err(|error| format!("dispatch: {error}"))
+            .unwrap_or_else(|message| panic!("{message}"));
+
+        let body = tokio::fs::read_to_string(queue_dir.join("drk-104.md"))
+            .await
+            .map_err(|error| format!("read queue: {error}"))
+            .unwrap_or_else(|message| panic!("{message}"));
+        assert!(!body.starts_with("[ROUGHNECK:"));
     }
 
     #[tokio::test]

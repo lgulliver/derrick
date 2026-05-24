@@ -10,6 +10,7 @@ repository.workspace = true
 async-trait = { workspace = true }
 chrono = { workspace = true }
 derrick-config = { path = "../derrick-config" }
+derrick-roughneck = { path = "../derrick-roughneck" }
 derrick-substrate = { path = "../derrick-substrate" }
 derrick-substrate-native = { path = "../derrick-substrate-native" }
 serde_json = { workspace = true }

@@ -13,6 +13,7 @@
 /// The last step is mandatory — it transitions the ticket to `InReview` and
 /// triggers the foreman's verifier.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn render_queue_file(
     ticket_id: &str,
     batch: Option<&str>,
@@ -20,6 +21,8 @@ pub fn render_queue_file(
     body: &str,
     branch: &str,
     parent_branch: &str,
+    roughneck_enabled: bool,
+    roughneck_level: &str,
 ) -> String {
     let batch_display = batch.unwrap_or("(none)");
     let mut out = String::new();
@@ -77,7 +80,11 @@ pub fn render_queue_file(
         "**Do not open a PR yourself** — the foreman handles PR creation when stacking\n\
          is configured.\n",
     );
-    out
+    if roughneck_enabled {
+        derrick_roughneck::inject_prompt(&out, roughneck_level)
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +100,8 @@ mod tests {
             "Do the widget thing.",
             "derrick/phase-1/drk-099",
             "main",
+            false,
+            "full",
         );
         assert!(rendered.contains("derrick/phase-1/drk-099"));
         assert!(rendered.contains("main"));
@@ -111,7 +120,41 @@ mod tests {
             "body",
             "derrick/ad-hoc/drk-001",
             "main",
+            false,
+            "full",
         );
         assert!(rendered.contains("**Batch**: (none)"));
+    }
+
+    #[test]
+    fn renders_with_roughneck_header() {
+        let rendered = render_queue_file(
+            "drk-200",
+            None,
+            "title",
+            "body",
+            "derrick/ad-hoc/drk-200",
+            "main",
+            true,
+            "full",
+        );
+        assert!(rendered.starts_with("[ROUGHNECK:FULL]"));
+        // Body is preserved after the header.
+        assert!(rendered.contains("derrick ticket review drk-200"));
+    }
+
+    #[test]
+    fn omits_roughneck_header_when_disabled() {
+        let rendered = render_queue_file(
+            "drk-201",
+            None,
+            "title",
+            "body",
+            "derrick/ad-hoc/drk-201",
+            "main",
+            false,
+            "full",
+        );
+        assert!(!rendered.starts_with("[ROUGHNECK:"));
     }
 }
