@@ -675,6 +675,200 @@ mod tests {
         assert_eq!(Tab::from_index(6), None);
     }
 
+    #[test]
+    fn tab_title_covers_all_variants() {
+        assert_eq!(Tab::Overview.title(), "Overview");
+        assert_eq!(Tab::Tickets.title(), "Tickets");
+        assert_eq!(Tab::Stack.title(), "Stack");
+        assert_eq!(Tab::Activity.title(), "Activity");
+        assert_eq!(Tab::Tokens.title(), "Tokens");
+        assert_eq!(Tab::Memory.title(), "Memory");
+    }
+
+    // -----------------------------------------------------------------------
+    // StackSummary tests
+    // -----------------------------------------------------------------------
+
+    fn make_node(state: &str) -> StackNode {
+        StackNode {
+            ticket_id: "tst-1".to_owned(),
+            branch: "feature/x".to_owned(),
+            pr_url: None,
+            pr_number: None,
+            state: state.to_owned(),
+            parent_branch: None,
+        }
+    }
+
+    #[test]
+    fn stack_summary_counts_merged_open_pending() {
+        let nodes = vec![
+            make_node("merged"),
+            make_node("merged"),
+            make_node("open"),
+            make_node("draft"),
+        ];
+        let s = StackSummary::from_nodes(&nodes);
+        assert_eq!(s.merged, 2);
+        assert_eq!(s.open, 1);
+        assert_eq!(s.pending, 1);
+        assert!(s.restack_ok);
+    }
+
+    #[test]
+    fn stack_summary_restack_false_on_conflict() {
+        let nodes = vec![make_node("open"), make_node("conflict-rebase")];
+        let s = StackSummary::from_nodes(&nodes);
+        assert!(!s.restack_ok);
+    }
+
+    #[test]
+    fn stack_summary_empty_nodes() {
+        let s = StackSummary::from_nodes(&[]);
+        assert_eq!(s.merged, 0);
+        assert_eq!(s.open, 0);
+        assert_eq!(s.pending, 0);
+        assert!(s.restack_ok);
+    }
+
+    // -----------------------------------------------------------------------
+    // EventRow::from scope extraction
+    // -----------------------------------------------------------------------
+
+    fn make_typed_event(scope: EventScope) -> TypedEvent {
+        TypedEvent {
+            id: derrick_substrate::EventId(1),
+            scope,
+            kind: EventKind::Note {
+                body: "test".to_owned(),
+            },
+            at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn event_row_from_worktree_scope_sets_run_id() {
+        let ev = make_typed_event(EventScope::Worktree {
+            run_id: "run-abc".to_owned(),
+        });
+        let row = EventRow::from(&ev);
+        assert_eq!(row.run_id.as_deref(), Some("run-abc"));
+        assert!(row.ticket.is_none());
+        assert!(row.hand.is_none());
+    }
+
+    #[test]
+    fn event_row_from_hand_scope_sets_hand() {
+        use derrick_substrate::HandId;
+        let Ok(hand_id) = HandId::new("bramble") else {
+            return; // skip if hand id validation changes
+        };
+        let ev = make_typed_event(EventScope::Hand(hand_id));
+        let row = EventRow::from(&ev);
+        assert!(row.ticket.is_none());
+        assert_eq!(row.hand.as_deref(), Some("bramble"));
+        assert!(row.run_id.is_none());
+    }
+
+    #[test]
+    fn event_row_from_site_scope_all_none() {
+        let ev = make_typed_event(EventScope::Site);
+        let row = EventRow::from(&ev);
+        assert!(row.ticket.is_none());
+        assert!(row.hand.is_none());
+        assert!(row.run_id.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // ActivityFilter mode_label for Ticket / Hand / Run
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mode_label_ticket() {
+        assert_eq!(
+            ActivityFilter::Ticket("tst-1".to_owned()).mode_label(),
+            Some("ticket:tst-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn mode_label_hand() {
+        assert_eq!(
+            ActivityFilter::Hand("bramble".to_owned()).mode_label(),
+            Some("hand:bramble".to_owned())
+        );
+    }
+
+    #[test]
+    fn mode_label_run() {
+        assert_eq!(
+            ActivityFilter::Run("abc123".to_owned()).mode_label(),
+            Some("run:abc123".to_owned())
+        );
+    }
+
+    #[test]
+    fn is_none_false_for_active_filter() {
+        assert!(!ActivityFilter::Ticket("x".to_owned()).is_none());
+        assert!(!ActivityFilter::Hand("y".to_owned()).is_none());
+        assert!(!ActivityFilter::Run("z".to_owned()).is_none());
+        assert!(!ActivityFilter::Text("q".to_owned()).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // load_token_summary
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_token_summary_returns_default_for_missing_dir() {
+        let summary = load_token_summary(std::path::Path::new("/nonexistent/path/xyzzy"));
+        assert_eq!(summary.total_in, 0);
+        assert_eq!(summary.total_out, 0);
+    }
+
+    #[test]
+    fn load_token_summary_reads_manifest_files() {
+        let tmp = std::env::temp_dir().join(format!("derrick-test-{}", std::process::id()));
+        let run_dir = tmp.join("run-001");
+        let _ = std::fs::create_dir_all(&run_dir);
+
+        let manifest = serde_json::json!({
+            "tokens_in": 1000,
+            "tokens_out": 500,
+            "started_at": chrono::Utc::now().to_rfc3339(),
+            "steps": [
+                {"id": "specify", "tokens_in": 400, "tokens_out": 200},
+                {"id": "plan",    "tokens_in": 600, "tokens_out": 300}
+            ]
+        });
+        let _ = std::fs::write(run_dir.join("manifest.json"), manifest.to_string());
+
+        let summary = load_token_summary(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(summary.total_in, 1000);
+        assert_eq!(summary.total_out, 500);
+        // Both steps started today so today_in / today_out should be set.
+        assert_eq!(summary.today_in, 1000);
+        assert_eq!(summary.today_out, 500);
+        assert_eq!(summary.per_step.len(), 2);
+        let specify = summary.per_step.iter().find(|s| s.step_id == "specify");
+        assert!(specify.is_some_and(|s| s.tokens_in == 400 && s.tokens_out == 200));
+    }
+
+    #[test]
+    fn load_token_summary_skips_malformed_manifests() {
+        let tmp = std::env::temp_dir().join(format!("derrick-test-mal-{}", std::process::id()));
+        let run_dir = tmp.join("run-bad");
+        let _ = std::fs::create_dir_all(&run_dir);
+        let _ = std::fs::write(run_dir.join("manifest.json"), "not json at all");
+
+        let summary = load_token_summary(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(summary.total_in, 0);
+    }
+
     // -----------------------------------------------------------------------
     // ActivityFilter tests
     // -----------------------------------------------------------------------
