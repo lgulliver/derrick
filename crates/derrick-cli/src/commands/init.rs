@@ -829,13 +829,30 @@ fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
         return Ok(());
     }
 
-    let status = std::process::Command::new("uv")
+    let result = std::process::Command::new("uv")
         .args(["tool", "install", "specify-cli"])
-        .status()
-        .map_err(|source| crate::CliError::Io {
-            path: std::path::PathBuf::from("uv"),
-            source,
-        })?;
+        .status();
+
+    let status = match result {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // `uv` is not on PATH — treat the same as a failed install.
+            if is_styled() {
+                eprintln!("  \x1b[33m⚠\x1b[0m  speckit install failed — `uv` not found on PATH.");
+                eprintln!("     Install uv (<https://docs.astral.sh/uv/>) then run \x1b[1muv tool install specify-cli\x1b[0m.");
+            } else {
+                eprintln!("  ⚠  speckit install failed — `uv` not found on PATH.");
+                eprintln!("     Install uv (https://docs.astral.sh/uv/) then run `uv tool install specify-cli`.");
+            }
+            return Ok(());
+        }
+        Err(source) => {
+            return Err(crate::CliError::Io {
+                path: std::path::PathBuf::from("uv"),
+                source,
+            });
+        }
+    };
 
     if !status.success() {
         if is_styled() {
