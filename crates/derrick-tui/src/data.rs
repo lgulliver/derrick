@@ -14,6 +14,63 @@ use derrick_substrate::{
     TicketFilter, TicketState, TypedEvent,
 };
 
+// ---------------------------------------------------------------------------
+// Stack summary
+// ---------------------------------------------------------------------------
+
+/// Aggregate counts derived from the current `stack_nodes` for the Overview
+/// row. Computed locally — no extra substrate round-trip required.
+#[derive(Clone, Debug, Default)]
+pub struct StackSummary {
+    /// PRs whose `state` is `"merged"`.
+    pub merged: u32,
+    /// PRs whose `state` is `"open"`.
+    pub open: u32,
+    /// Nodes not yet in a PR (state is neither merged nor open).
+    pub pending: u32,
+    /// `true` when no node carries a conflict state (state contains
+    /// `"conflict"`).
+    pub restack_ok: bool,
+}
+
+impl StackSummary {
+    fn from_nodes(nodes: &[StackNode]) -> Self {
+        let mut s = Self {
+            restack_ok: true,
+            ..Default::default()
+        };
+        for n in nodes {
+            match n.state.as_str() {
+                "merged" => s.merged += 1,
+                "open" => s.open += 1,
+                _ => s.pending += 1,
+            }
+            if n.state.contains("conflict") {
+                s.restack_ok = false;
+            }
+        }
+        s
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Last assay snapshot
+// ---------------------------------------------------------------------------
+
+/// Snapshot of the most recent `assay` pipeline step event, derived from the
+/// substrate event tail.
+#[derive(Clone, Debug)]
+pub struct LastAssaySnapshot {
+    /// Terminal status reported by the step: `"success"`, `"skipped"`,
+    /// `"halted"`, or `"failed"`.
+    pub verdict: String,
+    /// Model identifier, if known (requires run-manifest plumbing — `None`
+    /// until that is wired).
+    pub model: Option<String>,
+    /// When the step completed.
+    pub at: DateTime<Utc>,
+}
+
 /// One of the six tabs in the dashboard. The discriminant ordering matches
 /// the numeric `1`-`6` hotkeys.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -122,6 +179,10 @@ pub struct OverviewData {
     pub tickets_blocked: u32,
     /// Foreman mode and timestamps.
     pub foreman_status: Option<ForemanStatusSnapshot>,
+    /// Merged / open / pending counts derived from the stack nodes.
+    pub stack_summary: StackSummary,
+    /// Most recent `assay` pipeline step event, if any.
+    pub last_assay: Option<LastAssaySnapshot>,
 }
 
 /// Plain-data snapshot of the foreman row so renderers do not need to import
@@ -244,10 +305,14 @@ fn summarise_event(kind: &EventKind) -> String {
 /// metadata in the substrate).
 #[derive(Clone, Debug, Default)]
 pub struct TokenSummary {
-    /// Total prompt tokens.
+    /// Total prompt tokens recorded in the substrate.
     pub total_in: u64,
-    /// Total completion tokens.
+    /// Total completion tokens recorded in the substrate.
     pub total_out: u64,
+    /// Savings fraction in `[0.0, 1.0]` from the RTK token proxy
+    /// (e.g. `0.87` means 87% of raw tokens were saved). `None` until RTK
+    /// reporting is plumbed into the substrate.
+    pub savings_pct: Option<f32>,
 }
 
 /// One row in the Memory tab.
@@ -301,9 +366,31 @@ impl DataModel {
         let foreman = substrate.foreman_status().await?;
         let events = substrate.tail_typed_events(None, 100).await?;
 
+        // Derive stack summary from the already-fetched stack nodes (no
+        // extra I/O needed).
+        let stack_summary = StackSummary::from_nodes(stack_nodes);
+
+        // Scan the event tail for the most recent assay pipeline step.
+        // `tail_typed_events` returns events newest-first, so the first match
+        // is the most recent.
+        let last_assay = events.iter().find_map(|ev| {
+            if let EventKind::PipelineStepCompleted { step_id, status } = &ev.kind {
+                if step_id == "assay" {
+                    return Some(LastAssaySnapshot {
+                        verdict: status.clone(),
+                        model: None, // run-manifest plumbing deferred
+                        at: ev.at,
+                    });
+                }
+            }
+            None
+        });
+
         let mut overview = OverviewData {
             foreman_status: Some(foreman.into()),
             tickets_total: u32::try_from(tickets.len()).unwrap_or(u32::MAX),
+            stack_summary,
+            last_assay,
             ..OverviewData::default()
         };
         for t in &tickets {

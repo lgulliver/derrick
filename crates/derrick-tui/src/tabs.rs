@@ -4,6 +4,7 @@
 //! state. They are deliberately simple — `Table`, `Paragraph`, `List`,
 //! `Block` — to keep v1 maintenance cost low.
 
+use chrono::Utc;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -12,6 +13,19 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::data::Tab;
+
+/// Format a duration in seconds as a compact human-readable string
+/// (`"14m"`, `"2h03m"`, `"5s"`).
+fn fmt_secs(secs: i64) -> String {
+    let secs = secs.max(0) as u64;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
 
 /// Header line shown above all tabs.
 pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -70,28 +84,95 @@ pub fn render_active_tab(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_overview(frame: &mut Frame, area: Rect, app: &App) {
+    // Summary block: 6 content lines + top/bottom borders = 8 rows.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
-            Constraint::Min(5),
-            Constraint::Min(5),
+            Constraint::Length(8),
+            Constraint::Min(4),
+            Constraint::Min(4),
         ])
         .split(area);
 
     let o = &app.data.overview;
+
+    // ── row 1: active batch ──────────────────────────────────────────────
     let batch = o.batch_name.as_deref().unwrap_or("(no active batch)");
-    let foreman = match &o.foreman_status {
-        Some(s) => format!("foreman: {} pid={:?}", s.mode, s.pid),
-        None => "foreman: unknown".to_owned(),
+
+    // ── row 2: ticket counts ─────────────────────────────────────────────
+    let tickets_line = format!(
+        "tickets:      {}/{} done · {} in-flight · {} ready · {} blocked",
+        o.tickets_done, o.tickets_total, o.tickets_inflight, o.tickets_ready, o.tickets_blocked
+    );
+
+    // ── row 3: foreman ───────────────────────────────────────────────────
+    let foreman_line = match &o.foreman_status {
+        Some(s) => {
+            let age = s
+                .started_at
+                .map(|t| fmt_secs((Utc::now() - t).num_seconds()))
+                .unwrap_or_else(|| "?".to_owned());
+            let pid_str = s.pid.map(|p| format!(", pid {p}")).unwrap_or_default();
+            format!("foreman:      {} ({}{})", s.mode, age, pid_str)
+        }
+        None => "foreman:      unknown".to_owned(),
     };
+
+    // ── row 4: stack summary ─────────────────────────────────────────────
+    let ss = &o.stack_summary;
+    let restack_label = if ss.restack_ok { "ok" } else { "conflict!" };
+    let stack_line = format!(
+        "stack:        ● {} merged · {} open · {} pending  restack: {}",
+        ss.merged, ss.open, ss.pending, restack_label
+    );
+
+    // ── row 5: last assay ────────────────────────────────────────────────
+    let assay_line = match &o.last_assay {
+        Some(a) => {
+            let model = a.model.as_deref().unwrap_or("–");
+            format!(
+                "last assay:   {} · {} · {}",
+                a.verdict,
+                model,
+                a.at.format("%H:%M")
+            )
+        }
+        None => "last assay:   (none yet)".to_owned(),
+    };
+
+    // ── row 6: token spend ───────────────────────────────────────────────
+    let ts = &app.data.token_summary;
+    let tokens_line = if ts.total_in == 0 && ts.total_out == 0 {
+        "tokens today: (no data)".to_owned()
+    } else {
+        match ts.savings_pct {
+            Some(pct) => {
+                // savings_pct is the fraction of raw tokens saved; actual =
+                // raw * (1 - pct).
+                let raw_k = ts.total_in / 1_000;
+                let actual_k = (ts.total_in as f64 * f64::from(1.0 - pct) / 1_000.0) as u64;
+                format!(
+                    "tokens today: raw {}k → actual {}k (-{:.0}%)",
+                    raw_k,
+                    actual_k,
+                    f64::from(pct) * 100.0
+                )
+            }
+            None => format!(
+                "tokens today: {}k in · {}k out",
+                ts.total_in / 1_000,
+                ts.total_out / 1_000,
+            ),
+        }
+    };
+
     let summary = vec![
-        Line::from(format!("batch: {batch}")),
-        Line::from(format!(
-            "{}/{} done · {} in-flight · {} ready · {} blocked",
-            o.tickets_done, o.tickets_total, o.tickets_inflight, o.tickets_ready, o.tickets_blocked
-        )),
-        Line::from(foreman),
+        Line::from(format!("batch:        {batch}")),
+        Line::from(tickets_line),
+        Line::from(foreman_line),
+        Line::from(stack_line),
+        Line::from(assay_line),
+        Line::from(tokens_line),
     ];
     frame.render_widget(
         Paragraph::new(summary).block(Block::default().title("Summary").borders(Borders::ALL)),
