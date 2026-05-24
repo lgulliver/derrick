@@ -1227,9 +1227,12 @@ hooks. When `derrick run add-feature` returns, the foreman either:
   Code session.
 
 **Concurrency**: §9.C `parallelism.batch_max` caps how many hands
-run at once. The foreman honours `blocks` links strictly. Hand
-dispatch is `tokio::spawn`; completion is a `mpsc` channel back to
-the foreman.
+run at once. The foreman honours `blocks` links strictly.
+`dispatch_ready` pre-computes per-ticket branch context sequentially
+(so branch-name derivation can't race), then fans the dispatches
+out concurrently via `futures::future::join_all`. Each
+`dispatcher.dispatch(ctx)` future awaits independently; results
+are collected in-place and folded into the tick report.
 
 **Mutation API**: in-process Rust, plus a small subset of CLI
 write commands derrick *does* expose (it can't be entirely
