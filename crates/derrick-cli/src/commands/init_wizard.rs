@@ -636,6 +636,135 @@ fn yes_no(value: bool) -> &'static str {
     }
 }
 
+// ─── constitution seeding ─────────────────────────────────────────────────────
+
+/// Answers collected from the user to seed the initial constitution.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ConstitutionSeeds {
+    pub(crate) language: String,
+    pub(crate) testing: ConstitutionTestingStyle,
+    pub(crate) architecture: String,
+    pub(crate) style: String,
+}
+
+/// Testing philosophy selected during init.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ConstitutionTestingStyle {
+    #[default]
+    UnitOnly,
+    UnitAndIntegration,
+    TestDriven,
+    PropertyBased,
+}
+
+impl ConstitutionTestingStyle {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::UnitOnly => "unit tests only",
+            Self::UnitAndIntegration => "unit + integration tests",
+            Self::TestDriven => "TDD — write tests first",
+            Self::PropertyBased => "property-based / fuzzing",
+        }
+    }
+}
+
+/// Prompt the user for constitution seeds.
+///
+/// Returns defaults immediately when `yes` is `true` or stdin is not a terminal
+/// (non-interactive mode).
+pub(crate) fn prompt_constitution(yes: bool) -> Result<ConstitutionSeeds, crate::CliError> {
+    if yes || !std::io::stdin().is_terminal() {
+        return Ok(ConstitutionSeeds::default());
+    }
+
+    println!();
+    println!("{}", section_rule("project constitution"));
+    println!();
+    println!(
+        "  {}",
+        bold("The constitution tells the plan reviewer what rules to enforce.")
+    );
+    println!("  Answer a few questions — you can edit the file any time.");
+
+    let language = prompt_text("Primary language(s)  [e.g. Go, TypeScript, Rust]", "")?;
+
+    let testing_idx = prompt_select(
+        "Testing approach",
+        &[
+            "unit tests only",
+            "unit + integration tests",
+            "TDD — write tests first",
+            "property-based / fuzzing",
+        ],
+        0,
+    )?;
+    let testing = match testing_idx {
+        0 => ConstitutionTestingStyle::UnitOnly,
+        1 => ConstitutionTestingStyle::UnitAndIntegration,
+        2 => ConstitutionTestingStyle::TestDriven,
+        _ => ConstitutionTestingStyle::PropertyBased,
+    };
+
+    let architecture = prompt_text("Architectural constraints  (optional, free text)", "")?;
+    let style = prompt_text("Style / linting notes  (optional, free text)", "")?;
+
+    Ok(ConstitutionSeeds {
+        language,
+        testing,
+        architecture,
+        style,
+    })
+}
+
+/// Render `seeds` into the markdown constitution file content.
+///
+/// The output deliberately avoids the `<!-- DERRICK-DRAFT:` banner and
+/// `[PROJECT_NAME]` placeholder so `constitution_needs_setup` returns `false`
+/// and the assay step is not silently skipped.
+pub(crate) fn format_constitution(site_name: &str, seeds: &ConstitutionSeeds) -> String {
+    let mut out = format!("# {site_name} — Engineering Constitution\n");
+    out.push_str(
+        "\nThis file captures durable rules that derrick's plan reviewer enforces.\n\
+         Edit it any time to add project-specific constraints.\n",
+    );
+
+    out.push_str("\n## Language and Stack\n\n");
+    if seeds.language.is_empty() {
+        out.push_str("No specific language constraint. Auto-detect from the codebase.\n");
+    } else {
+        out.push_str(&format!("Primary: {}\n", seeds.language));
+    }
+
+    out.push_str("\n## Testing Requirements\n\n");
+    out.push_str(&format!("- {}\n", seeds.testing.label()));
+
+    out.push_str("\n## Architectural Constraints\n\n");
+    if seeds.architecture.is_empty() {
+        out.push_str(
+            "None specified at setup time. \
+             Add project-specific constraints here.\n",
+        );
+    } else {
+        for line in seeds.architecture.lines() {
+            out.push_str(&format!("- {line}\n"));
+        }
+    }
+
+    out.push_str("\n## Style and Linting\n\n");
+    if seeds.style.is_empty() {
+        out.push_str(
+            "No specific style constraints. \
+             Follow language-idiomatic conventions.\n",
+        );
+    } else {
+        for line in seeds.style.lines() {
+            out.push_str(&format!("- {line}\n"));
+        }
+    }
+
+    out
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -670,5 +799,44 @@ mod tests {
         let error = validate_role_models(&roles, &available_model_ids())
             .expect_err("should reject unknown model");
         assert!(error.to_string().contains("proposer"));
+    }
+
+    #[test]
+    fn constitution_testing_style_labels_are_non_empty() {
+        for style in [
+            ConstitutionTestingStyle::UnitOnly,
+            ConstitutionTestingStyle::UnitAndIntegration,
+            ConstitutionTestingStyle::TestDriven,
+            ConstitutionTestingStyle::PropertyBased,
+        ] {
+            assert!(!style.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn format_constitution_empty_seeds_passes_needs_setup_check() {
+        let seeds = ConstitutionSeeds::default();
+        let content = format_constitution("myproject", &seeds);
+        // Must not trigger constitution_needs_setup (no draft banner, no [PROJECT_NAME])
+        assert!(!content.contains("DERRICK-DRAFT"));
+        assert!(!content.contains("[PROJECT_NAME]"));
+        assert!(content.contains("myproject"));
+    }
+
+    #[test]
+    fn format_constitution_populated_seeds_contains_answers() {
+        let seeds = ConstitutionSeeds {
+            language: "Go".to_owned(),
+            testing: ConstitutionTestingStyle::TestDriven,
+            architecture: "no global state".to_owned(),
+            style: "gofmt required".to_owned(),
+        };
+        let content = format_constitution("widget", &seeds);
+        assert!(content.contains("Go"));
+        assert!(content.contains("TDD — write tests first"));
+        assert!(content.contains("no global state"));
+        assert!(content.contains("gofmt required"));
+        assert!(!content.contains("DERRICK-DRAFT"));
+        assert!(!content.contains("[PROJECT_NAME]"));
     }
 }

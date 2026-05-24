@@ -331,6 +331,10 @@ async fn greenfield_init(
         write_jetbrains_configs(repo_root)?;
     }
 
+    // Seed the constitution so assay is never silently skipped on the first run.
+    // This call overwrites any unedited speckit placeholder written above.
+    seed_constitution(repo_root, &config, resolved.yes)?;
+
     print_summary(&config, resolved.ai_style);
     Ok(CliExitCode::Success)
 }
@@ -921,6 +925,9 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
         println!("  \x1b[2m{}\x1b[0m", "─".repeat(62));
         println!();
         println!("  \x1b[36m›\x1b[0m  run \x1b[1mderrick doctor\x1b[0m to verify the install");
+        println!(
+            "  \x1b[36m›\x1b[0m  refine your constitution at \x1b[1m.specify/memory/constitution.md\x1b[0m"
+        );
         println!("  \x1b[36m›\x1b[0m  start your first feature:");
         println!();
         println!("      \x1b[1mderrick add\x1b[0m \x1b[2m\"describe your feature\"\x1b[0m");
@@ -928,11 +935,36 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
         println!("  {}", "─".repeat(62));
         println!();
         println!("  ›  run `derrick doctor` to verify the install");
+        println!("  ›  refine your constitution at .specify/memory/constitution.md");
         println!("  ›  start your first feature:");
         println!();
         println!("      derrick add \"describe your feature\"");
     }
     println!();
+}
+
+/// Prompt the user for constitution seeds and write the seeded file.
+///
+/// Overwrites any unedited speckit `[PROJECT_NAME]` placeholder so that
+/// `constitution_needs_setup` returns `false` and assay is not silently
+/// skipped on the first `derrick add`.
+fn seed_constitution(
+    repo_root: &Path,
+    config: &derrick_config::Config,
+    yes: bool,
+) -> Result<(), crate::CliError> {
+    use crate::commands::init_wizard::{format_constitution, prompt_constitution};
+
+    let seeds = prompt_constitution(yes)?;
+    let constitution_rel = config.guardrails().constitution_path();
+    let constitution_abs = repo_root.join(constitution_rel);
+    if let Some(parent) = constitution_abs.parent() {
+        create_dir_all(parent)?;
+    }
+    let content = format_constitution(config.site().name(), &seeds);
+    write_file(&constitution_abs, &content)?;
+    print_written(&constitution_rel.display().to_string());
+    Ok(())
 }
 
 /// Check that every required tool is present on PATH.
