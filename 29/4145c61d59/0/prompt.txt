@@ -1,0 +1,14 @@
+Update DESIGN.md and any other docs that still describe foreman dispatch or assay reviewers as "sequential" or note fan-out as deferred/future work.
+
+Context:
+- Assay reviewers have been concurrent since T015 (tokio tasks + Arc<Semaphore>)
+- Foreman dispatch_ready() was just fixed to use join_all() — all hands now dispatch concurrently in a two-phase approach (sequential branch pre-computation, then concurrent dispatch)
+- CI is green on main
+
+Specifically:
+1. Find any text in DESIGN.md that says things like "sequential today", "true fan-out once...", "§9.C.5" deferral notes, or similar caveats about parallelism not yet being implemented
+2. Update those sections to reflect the current reality: both assay reviewers and foreman dispatch are concurrent
+3. Also check docs/ folder for architecture.md or similar that might have the same outdated language
+4. Also update the decision table entry D53 if it still marks fan-out as "deferred" or "future"
+
+After updating, commit with message: "docs: fan-out fully live — remove sequential caveats" and push to main. Use rtk prefix on git commands per CLAUDE.md.
