@@ -295,20 +295,32 @@ async fn execute_bridge(
     };
 
     let batch_name_str = step_batch_name(config, state, "bridge")
-        .unwrap_or_else(|| format!("br-{}", &state.run_id[..8].to_ascii_lowercase()));
+        .unwrap_or_else(|| format!("br-{}", state.run_id.to_ascii_lowercase()));
     let batch_name = BatchName::new(&batch_name_str).map_err(|e| {
         RunError::Config(format!(
             "bridge: invalid batch name {batch_name_str:?}: {e}"
         ))
     })?;
 
-    substrate
-        .create_batch(batch_name.clone())
+    // Idempotent: reuse an existing batch (e.g. on pipeline resume) rather than
+    // failing with a UNIQUE constraint error.
+    let batch_exists = substrate
+        .get_batch(&batch_name)
         .await
         .map_err(|e| RunError::StepFailed {
             id: "bridge".to_owned(),
-            message: format!("create_batch: {e}"),
-        })?;
+            message: format!("get_batch: {e}"),
+        })?
+        .is_some();
+    if !batch_exists {
+        substrate
+            .create_batch(batch_name.clone())
+            .await
+            .map_err(|e| RunError::StepFailed {
+                id: "bridge".to_owned(),
+                message: format!("create_batch: {e}"),
+            })?;
+    }
 
     let tickets = parse_tasks_from_markdown(&tasks_text, &batch_name, config.site().prefix())?;
 
