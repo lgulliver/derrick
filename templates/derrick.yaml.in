@@ -63,14 +63,14 @@ pipeline:
     rounds: "{{tools.assay.rounds}}"
     on_reject: halt
     skippable: true
-  - id: analyze
-    role: proposer
-    host: claude
-    command: "/speckit.analyze"
   - id: tasks
     role: drafter
     host: claude
     command: "/speckit.tasks"
+  - id: analyze
+    role: proposer
+    host: claude
+    command: "/speckit.analyze"
 guardrails:
   constitution_path: .specify/memory/constitution.md
   forbid_paths: []

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use derrick_tools::{HostRegistry, HostRequest};
 use owo_colors::OwoColorize;
 
-use derrick_assay::io::{append_log, relative_to_root, write_log};
+use derrick_assay::io::{relative_to_root, write_log};
 use derrick_assay::types::{RunError, StepExecution};
 
 pub struct ClarifyQuestion {
@@ -165,16 +165,14 @@ pub async fn execute_clarify(
             message: source.to_string(),
         })?;
 
+    let tokens_in = response.tokens_in;
+    let tokens_out = response.tokens_out;
     write_log(log_path, &response.stdout, &response.stderr)?;
-    append_log(
-        log_path,
-        "\n[clarify] token accounting unavailable for host adapter calls\n",
-    )?;
 
     let questions = parse_clarify_questions(&response.stdout);
     if questions.is_empty() {
         eprintln!("No clarifying questions needed. Proceeding.");
-        return Ok(StepExecution::success(Vec::new()));
+        return Ok(StepExecution::success(Vec::new()).with_tokens(tokens_in, tokens_out));
     }
 
     let mut answers: Vec<String> = Vec::new();
@@ -215,10 +213,10 @@ pub async fn execute_clarify(
     })?;
 
     eprintln!("\nClarification complete. Answers saved.");
-    Ok(StepExecution::success(vec![relative_to_root(
-        repo_root,
-        clarify_path,
-    )?]))
+    Ok(
+        StepExecution::success(vec![relative_to_root(repo_root, clarify_path)?])
+            .with_tokens(tokens_in, tokens_out),
+    )
 }
 
 #[cfg(test)]
