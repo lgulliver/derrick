@@ -211,7 +211,33 @@ async fn execute_role_step(
             .tokens_in
             .max((prompt_len as u32).saturating_div(4));
         let step_tokens_out = response.tokens_out;
-        write_log(log_path, &response.stdout, &response.stderr)?;
+        // Compute scrub stats for the host CLI's stdout+stderr. The host CLI
+        // (claude/codex/copilot) is a subprocess just like a bash step — we
+        // size its raw output and run it through the registered scrub rules
+        // so the manifest's bytes_raw / bytes_saved reflect the true cost of
+        // the role step.
+        let bytes_raw = (response.stdout.len().saturating_add(response.stderr.len())) as u32;
+        let (stdout_for_log, stderr_for_log, bytes_saved) =
+            if config.tools().output_compression().enabled() {
+                let scrubber = derrick_scrub::Scrubber::with_defaults();
+                let (out_scrubbed, out_stats) =
+                    scrubber.scrub(host_name, response.stdout.as_bytes());
+                let (err_scrubbed, err_stats) =
+                    scrubber.scrub(host_name, response.stderr.as_bytes());
+                let saved = (out_stats
+                    .bytes_in
+                    .saturating_sub(out_stats.bytes_out)
+                    .saturating_add(err_stats.bytes_in.saturating_sub(err_stats.bytes_out)))
+                    as u32;
+                (
+                    String::from_utf8_lossy(&out_scrubbed).into_owned(),
+                    String::from_utf8_lossy(&err_scrubbed).into_owned(),
+                    saved,
+                )
+            } else {
+                (response.stdout.clone(), response.stderr.clone(), 0u32)
+            };
+        write_log(log_path, &stdout_for_log, &stderr_for_log)?;
         if let Some(feature_dir) = pre_specify_dir {
             // Post-step check: the LLM must have overwritten the pre-scaffolded
             // stub with real content. feature.json is already in place from
@@ -235,6 +261,7 @@ async fn execute_role_step(
         Ok(
             StepExecution::success(detect_artifacts(step.id(), state, repo_root))
                 .with_tokens(step_tokens_in, step_tokens_out)
+                .with_compression(bytes_raw, bytes_saved)
                 .with_roughneck(roughneck_saved),
         )
     } else {

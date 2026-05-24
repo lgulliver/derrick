@@ -1820,6 +1820,118 @@ state:
     }
 
     #[tokio::test]
+    async fn role_step_records_bytes_raw_for_host_subprocess() -> TestResult {
+        // The role step's host CLI is a subprocess too. Its stdout/stderr
+        // must be counted toward bytes_raw via the scrub plumbing.
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("role-bytes-raw".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        let specify = outcome
+            .steps
+            .iter()
+            .find(|s| s.id == "specify")
+            .ok_or("specify step should exist")?;
+        assert_eq!(specify.status, StepStatus::Success);
+        assert!(
+            specify.bytes_raw > 0,
+            "role step bytes_raw should be > 0, got {}",
+            specify.bytes_raw
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bash_step_records_bytes_raw_when_compression_enabled() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        // A bash step that produces non-empty stdout. Using `echo` rather
+        // than a known scrubber-tool ensures we only assert bytes_raw, not
+        // bytes_saved (which requires a matching rule set).
+        let pipe = r#"  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+  - id: noisy
+    runner: bash
+    command: "printf 'hello world from bash step\\n'"
+"#;
+        let (_dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("bytes-raw".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        let noisy = outcome
+            .steps
+            .iter()
+            .find(|s| s.id == "noisy")
+            .ok_or("noisy step should exist")?;
+        assert_eq!(noisy.status, StepStatus::Success);
+        assert!(
+            noisy.bytes_raw > 0,
+            "bytes_raw should be non-zero for bash step with stdout, got {}",
+            noisy.bytes_raw
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bash_step_records_bytes_saved_when_tool_has_scrub_rules() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        // `git` has a scrub rule that drops `remote: Counting objects` lines.
+        // Use bash to fake git stderr noise that the scrubber will collapse.
+        let pipe = r#"  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+  - id: fake_git
+    runner: bash
+    command: "git --version >/dev/null; printf 'remote: Counting objects: 100\\nremote: Counting objects: 100\\nkeep\\n'"
+"#;
+        let (_dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("bytes-saved".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        let step = outcome
+            .steps
+            .iter()
+            .find(|s| s.id == "fake_git")
+            .ok_or("fake_git step should exist")?;
+        assert_eq!(step.status, StepStatus::Success);
+        assert!(step.bytes_raw > 0, "bytes_raw should be > 0");
+        assert!(
+            step.bytes_saved > 0,
+            "bytes_saved should be > 0 once git scrub rules fire, got {}",
+            step.bytes_saved
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn multi_reviewer_on_split_majority() -> TestResult {
         let a = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
         let b = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
