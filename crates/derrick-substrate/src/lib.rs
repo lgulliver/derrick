@@ -31,6 +31,15 @@ pub trait Substrate: Send + Sync {
     /// Lists tickets matching `filter`.
     async fn list_tickets(&self, filter: TicketFilter) -> Result<Vec<Ticket>, SubstrateError>;
 
+    /// Permanently removes a ticket and its associated labels and events.
+    ///
+    /// Bridge uses this when re-dispatching a feature whose prior run left
+    /// terminal tickets in the substrate. Only terminal tickets (`done` /
+    /// `rejected`) may be deleted; active tickets must be handled via the
+    /// typed state transitions. Returns `Ok(())` when the ticket did not
+    /// exist (idempotent).
+    async fn delete_ticket(&self, id: &TicketId) -> Result<(), SubstrateError>;
+
     /// **Narrowed in T012**: this method is reduced to the no-op idempotency
     /// path only (current state == target state, returns `Ok` without a
     /// write). Every other transition has a dedicated typed method:

@@ -324,15 +324,82 @@ async fn execute_bridge(
 
     let tickets = parse_tasks_from_markdown(&tasks_text, &batch_name, config.site().prefix())?;
 
-    let created = tickets.len();
+    // Auto-remediation: for each ticket, check whether one already exists from
+    // a prior run before attempting to create.
+    //   • terminal (done / rejected) → delete and recreate (fresh dispatch)
+    //   • active (ready / in_flight / in_review / blocked) → skip + warn
+    let mut created = 0usize;
+    let mut skipped = 0usize;
     for ticket in &tickets {
-        write_log(
-            log_path,
-            &format!("creating ticket {}: {}\n", ticket.id, ticket.title),
-            "",
-        )?;
-        if let Err(e) = substrate.create_ticket(ticket.clone()).await {
-            write_log(log_path, &format!("  failed: {e}\n"), "")?;
+        let existing =
+            substrate
+                .get_ticket(&ticket.id)
+                .await
+                .map_err(|e| RunError::StepFailed {
+                    id: "bridge".to_owned(),
+                    message: format!("get_ticket {}: {e}", ticket.id),
+                })?;
+
+        match existing {
+            Some(existing_ticket) if existing_ticket.state.is_terminal() => {
+                // Terminal ticket from a previous run — delete and recreate.
+                write_log(
+                    log_path,
+                    &format!(
+                        "ticket {} is terminal ({}), deleting for re-dispatch\n",
+                        ticket.id, existing_ticket.state
+                    ),
+                    "",
+                )?;
+                substrate
+                    .delete_ticket(&ticket.id)
+                    .await
+                    .map_err(|e| RunError::StepFailed {
+                        id: "bridge".to_owned(),
+                        message: format!("delete_ticket {}: {e}", ticket.id),
+                    })?;
+                write_log(
+                    log_path,
+                    &format!("creating ticket {}: {}\n", ticket.id, ticket.title),
+                    "",
+                )?;
+                substrate.create_ticket(ticket.clone()).await.map_err(|e| {
+                    RunError::StepFailed {
+                        id: "bridge".to_owned(),
+                        message: format!("create_ticket {}: {e}", ticket.id),
+                    }
+                })?;
+                created += 1;
+            }
+            Some(existing_ticket) => {
+                // Active ticket — skip creation, do not clobber in-progress work.
+                let msg = format!(
+                    "ticket {} already active (state: {}), skipping",
+                    ticket.id, existing_ticket.state
+                );
+                write_log(log_path, &format!("{msg}\n"), "")?;
+                eprintln!(
+                    "  {} {} {}",
+                    "bridge".cyan(),
+                    "\u{26a0}".yellow(),
+                    msg.yellow()
+                );
+                skipped += 1;
+            }
+            None => {
+                write_log(
+                    log_path,
+                    &format!("creating ticket {}: {}\n", ticket.id, ticket.title),
+                    "",
+                )?;
+                substrate.create_ticket(ticket.clone()).await.map_err(|e| {
+                    RunError::StepFailed {
+                        id: "bridge".to_owned(),
+                        message: format!("create_ticket {}: {e}", ticket.id),
+                    }
+                })?;
+                created += 1;
+            }
         }
     }
 
@@ -353,11 +420,16 @@ async fn execute_bridge(
             ticket.title.bright_white()
         );
     }
+    let summary = if skipped > 0 {
+        format!("{created} created, {skipped} skipped (active)")
+    } else {
+        format!("{created} tickets")
+    };
     eprintln!(
         "  {} {} {} {} {}",
         "\u{2514}".bright_cyan(),
-        format!("{created} tickets").cyan(),
-        "created in batch".bright_black(),
+        summary.cyan(),
+        "in batch".bright_black(),
         batch_name.as_str().cyan(),
         "\u{2713}".green()
     );

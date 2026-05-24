@@ -685,6 +685,33 @@ impl Substrate for NativeSubstrate {
         .await
     }
 
+    async fn delete_ticket(&self, id: &TicketId) -> Result<(), SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            // Cascade: remove labels and typed_events referencing this ticket,
+            // then the ticket row itself. All three deletes are no-ops when the
+            // ticket doesn't exist, so the call is idempotent.
+            connection
+                .execute(
+                    "DELETE FROM ticket_labels WHERE ticket_id = ?1",
+                    params![id.as_str()],
+                )
+                .map_err(sql_error)?;
+            connection
+                .execute(
+                    "DELETE FROM events
+                     WHERE scope_kind = 'ticket' AND ticket = ?1",
+                    params![id.as_str()],
+                )
+                .map_err(sql_error)?;
+            connection
+                .execute("DELETE FROM tickets WHERE id = ?1", params![id.as_str()])
+                .map_err(sql_error)?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn set_ticket_state(
         &self,
         id: &TicketId,

@@ -1295,3 +1295,50 @@ async fn legacy_record_event_still_works() -> Result<(), SubstrateError> {
     let _ = Uuid::new_v4();
     Ok(())
 }
+
+// ---------------------- delete_ticket ----------------------
+
+#[tokio::test]
+async fn delete_ticket_removes_ticket_and_is_idempotent() -> Result<(), SubstrateError> {
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+
+    substrate.create_ticket(new_ticket("drk-1")?).await?;
+    assert!(
+        substrate.get_ticket(&ticket_id("drk-1")?).await?.is_some(),
+        "ticket should exist before delete"
+    );
+
+    // First delete removes the ticket.
+    substrate.delete_ticket(&ticket_id("drk-1")?).await?;
+    assert!(
+        substrate.get_ticket(&ticket_id("drk-1")?).await?.is_none(),
+        "ticket should be gone after delete"
+    );
+
+    // Second delete on missing ticket is a no-op (idempotent).
+    substrate.delete_ticket(&ticket_id("drk-1")?).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn delete_ticket_removes_associated_events() -> Result<(), SubstrateError> {
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+
+    substrate.create_ticket(new_ticket("drk-1")?).await?;
+
+    // The create_ticket call should have written a TicketCreated typed event.
+    let events_before = substrate.ticket_events(&ticket_id("drk-1")?, 100).await?;
+    assert!(!events_before.is_empty(), "expected events before delete");
+
+    substrate.delete_ticket(&ticket_id("drk-1")?).await?;
+
+    // After delete the ticket row is gone; ticket_events for a missing ticket
+    // should return an empty list (not an error).
+    let events_after = substrate.ticket_events(&ticket_id("drk-1")?, 100).await?;
+    assert!(events_after.is_empty(), "expected no events after delete");
+
+    Ok(())
+}
