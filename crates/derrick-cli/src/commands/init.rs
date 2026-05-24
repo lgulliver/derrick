@@ -443,7 +443,7 @@ fn apply_config_overrides(
     serde_yaml::to_string(&yaml).map_err(|error| message(error.to_string()))
 }
 
-fn nested_mapping<'a>(
+pub(crate) fn nested_mapping<'a>(
     mapping: &'a mut serde_yaml::Mapping,
     key: &str,
 ) -> Result<&'a mut serde_yaml::Mapping, crate::CliError> {
@@ -471,7 +471,7 @@ fn role_mapping_value(roles: &RoleBindings) -> serde_yaml::Mapping {
     mapping
 }
 
-fn ensure_crew_pipeline(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliError> {
+pub(crate) fn ensure_crew_pipeline(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliError> {
     let key = serde_yaml::Value::String("pipeline".to_owned());
     let pipeline_value = root
         .get_mut(&key)
@@ -500,7 +500,7 @@ fn ensure_crew_pipeline(root: &mut serde_yaml::Mapping) -> Result<(), crate::Cli
     Ok(())
 }
 
-fn yaml_step(entries: &[(&str, &str)]) -> serde_yaml::Value {
+pub(crate) fn yaml_step(entries: &[(&str, &str)]) -> serde_yaml::Value {
     let mut step = serde_yaml::Mapping::new();
     for (key, value) in entries {
         step.insert(
@@ -511,7 +511,7 @@ fn yaml_step(entries: &[(&str, &str)]) -> serde_yaml::Value {
     serde_yaml::Value::Mapping(step)
 }
 
-fn step_id(step: &serde_yaml::Value) -> Option<&str> {
+pub(crate) fn step_id(step: &serde_yaml::Value) -> Option<&str> {
     let id_key = serde_yaml::Value::String("id".to_owned());
     step.as_mapping()?.get(&id_key)?.as_str()
 }

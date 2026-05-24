@@ -15,6 +15,7 @@ pub(crate) mod run;
 pub(crate) mod scrub;
 pub(crate) mod stack;
 pub(crate) mod status;
+pub(crate) mod switch;
 pub(crate) mod ticket;
 pub(crate) mod uninstall;
 
@@ -42,6 +43,8 @@ pub(crate) enum Command {
     Scrub(ScrubArgs),
     Caveman(CavemanArgs),
     Gain(GainArgs),
+    /// Switch the repo's substrate mode in-place (e.g. solo → crew).
+    Switch(SwitchArgs),
 }
 
 /// Arguments for `derrick add` — positional prompt shorthand for `run add-feature`.
@@ -429,6 +432,20 @@ pub(crate) struct StackSubmitArgs {
     /// Only submit tickets in this batch.
     #[arg(long)]
     pub(crate) batch: Option<String>,
+}
+
+/// Arguments for `derrick switch`.
+#[derive(Debug, Args)]
+pub(crate) struct SwitchArgs {
+    /// Target mode to switch to (solo, copilot, crew).
+    #[arg(long, value_enum)]
+    pub(crate) mode: InitMode,
+    /// Override the in-flight run guard (dangerous).
+    #[arg(long)]
+    pub(crate) force: bool,
+    /// Preview changes without writing derrick.yaml.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }
 
 impl From<CompletionShell> for clap_complete::Shell {
