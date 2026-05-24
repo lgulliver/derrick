@@ -98,6 +98,7 @@ impl Runner {
             unskip: manifest.flags.unskip.into_iter().collect(),
             dry_run: manifest.flags.dry_run,
             run_id: Some(run_id.clone()),
+            no_github_issues: false,
         };
         if input.prompt.as_deref().is_some_and(str::is_empty) {
             input.prompt = None;
@@ -424,13 +425,18 @@ impl Runner {
                                 if p.exists() {
                                     if let Ok(c) = std::fs::read_to_string(&p) {
                                         let line_count = c.lines().count();
-                                        let task_count = c
+                                        let tasks: Vec<String> = c
                                             .lines()
-                                            .filter(|l| {
-                                                l.trim().starts_with("## ")
-                                                    || l.trim().starts_with("- [")
-                                            })
-                                            .count();
+                                            .filter(|l| l.trim().starts_with("## "))
+                                            .map(|l| l.trim_start_matches('#').trim().to_owned())
+                                            .collect();
+                                        let task_count = if tasks.is_empty() {
+                                            c.lines()
+                                                .filter(|l| l.trim().starts_with("- ["))
+                                                .count()
+                                        } else {
+                                            tasks.len()
+                                        };
                                         eprintln!();
                                         eprintln!(
                                             "  {} {}",
@@ -450,6 +456,42 @@ impl Runner {
                                             p.display().to_string().cyan()
                                         );
                                         eprintln!();
+
+                                        // GitHub Issues offer
+                                        if !input.no_github_issues
+                                            && std::io::stdin().is_terminal()
+                                            && !tasks.is_empty()
+                                            && which::which("gh").is_ok()
+                                            && has_github_remote(&self.repo_root)
+                                        {
+                                            eprintln!(
+                                                "  {} Would you like these tasks created as GitHub Issues? {}",
+                                                "\u{276f}".cyan(),
+                                                format!("({task_count} issues)")
+                                                    .bright_black()
+                                            );
+                                            eprint!("  {} [Y/n] ", "\u{276f}".cyan());
+                                            std::io::stderr().flush().ok();
+                                            let mut answer = String::new();
+                                            if std::io::stdin().read_line(&mut answer).is_ok() {
+                                                let trimmed = answer.trim();
+                                                if trimmed.is_empty()
+                                                    || trimmed.eq_ignore_ascii_case("y")
+                                                    || trimmed.eq_ignore_ascii_case("yes")
+                                                {
+                                                    create_github_issues(&tasks, &self.repo_root)
+                                                        .await;
+                                                } else {
+                                                    eprintln!(
+                                                        "  {} {}",
+                                                        "\u{2502}".bright_cyan(),
+                                                        "Skipping GitHub Issues — tasks saved to tasks.md."
+                                                            .bright_black()
+                                                    );
+                                                }
+                                                eprintln!();
+                                            }
+                                        }
                                     }
                                 }
                             } else if step.id() == "specify" {
@@ -460,6 +502,105 @@ impl Runner {
                                         "\u{2713}".green(),
                                         p.display().to_string().cyan()
                                     );
+                                    // Confirmation gate — only in interactive mode
+                                    if std::io::stdin().is_terminal() {
+                                        if let Ok(content) = std::fs::read_to_string(&p) {
+                                            let preview_lines: Vec<&str> = content
+                                                .lines()
+                                                .filter(|l| !l.trim().is_empty())
+                                                .take(6)
+                                                .collect();
+                                            eprintln!();
+                                            eprintln!(
+                                                "  {} {}",
+                                                "\u{250c}".bright_cyan(),
+                                                "Here is what I understood:".bold()
+                                            );
+                                            for line in &preview_lines {
+                                                eprintln!(
+                                                    "  {} {}",
+                                                    "\u{2502}".bright_cyan(),
+                                                    line.bright_white()
+                                                );
+                                            }
+                                            if content
+                                                .lines()
+                                                .filter(|l| !l.trim().is_empty())
+                                                .count()
+                                                > 6
+                                            {
+                                                eprintln!(
+                                                    "  {} {}",
+                                                    "\u{2502}".bright_cyan(),
+                                                    "  … (see spec.md for full detail)"
+                                                        .bright_black()
+                                                );
+                                            }
+                                            eprintln!(
+                                                "  {} {}",
+                                                "\u{2514}".bright_cyan(),
+                                                "Is this correct?".bold()
+                                            );
+                                            eprint!("  {} Continue? [Y/n] ", "\u{276f}".cyan());
+                                            std::io::stderr().flush().ok();
+                                            let mut answer = String::new();
+                                            std::io::stdin().read_line(&mut answer).map_err(
+                                                |source| RunError::Io {
+                                                    path: PathBuf::from("<stdin>"),
+                                                    source,
+                                                },
+                                            )?;
+                                            let trimmed = answer.trim();
+                                            if trimmed.eq_ignore_ascii_case("n")
+                                                || trimmed.eq_ignore_ascii_case("no")
+                                            {
+                                                eprint!(
+                                                    "  {} What should I correct? ",
+                                                    "\u{276f}".cyan()
+                                                );
+                                                std::io::stderr().flush().ok();
+                                                let mut correction = String::new();
+                                                std::io::stdin()
+                                                    .read_line(&mut correction)
+                                                    .map_err(|source| RunError::Io {
+                                                        path: PathBuf::from("<stdin>"),
+                                                        source,
+                                                    })?;
+                                                let correction = correction.trim().to_owned();
+                                                eprintln!();
+                                                if correction.is_empty() {
+                                                    eprintln!(
+                                                        "  {} {}",
+                                                        "\u{26a0}".yellow(),
+                                                        "Pipeline halted at specify gate.".yellow()
+                                                    );
+                                                    eprintln!(
+                                                        "  {} Re-run with a refined prompt to try again.",
+                                                        "\u{2502}".bright_cyan()
+                                                    );
+                                                } else {
+                                                    eprintln!(
+                                                        "  {} {}",
+                                                        "\u{26a0}".yellow(),
+                                                        "Pipeline halted at specify gate.".yellow()
+                                                    );
+                                                    eprintln!(
+                                                        "  {} Re-run with:",
+                                                        "\u{2502}".bright_cyan()
+                                                    );
+                                                    eprintln!(
+                                                        "  {}   derrick add \"{}. {}\"",
+                                                        "\u{2514}".bright_cyan(),
+                                                        state.prompt.replace('"', "\\\""),
+                                                        correction.replace('"', "\\\"")
+                                                    );
+                                                }
+                                                outcome_status = RunStatus::Halted;
+                                                break 'outer;
+                                            }
+                                            eprintln!();
+                                        }
+                                    }
                                 }
                             } else if step.id() == "assay"
                                 && !self.config.tools().assay().auto_execute()
@@ -562,6 +703,22 @@ impl Runner {
                     if input.dry_run && step.id() == "tasks" {
                         outcome_status = RunStatus::Halted;
                         break 'outer;
+                    }
+                    // Foreman detach hint — printed after the foreman step completes
+                    if step.id() == "foreman" && std::io::stdin().is_terminal() {
+                        eprintln!();
+                        eprintln!(
+                            "  {} {}",
+                            "\u{276f}".cyan(),
+                            "Work is continuing in the background.".bold()
+                        );
+                        eprintln!(
+                            "  {} Run {} to re-attach or {} for a snapshot.",
+                            "\u{2502}".bright_cyan(),
+                            "derrick observe".cyan(),
+                            "derrick status".cyan()
+                        );
+                        eprintln!();
                     }
                     idx += 1;
                 }
@@ -1032,6 +1189,65 @@ fn assay_transcript_paths(assay_dir: &Path) -> Vec<PathBuf> {
         .map(|reviewer| assay_dir.join(reviewer).join("debate.md"))
         .filter(|path| path.is_file())
         .collect()
+}
+
+/// Check whether the repository has a GitHub remote configured.
+fn has_github_remote(repo_root: &Path) -> bool {
+    std::process::Command::new("git")
+        .args(["remote", "-v"])
+        .current_dir(repo_root)
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains("github.com"))
+        .unwrap_or(false)
+}
+
+/// Create one GitHub Issue per task title via `gh issue create`.
+async fn create_github_issues(tasks: &[String], repo_root: &Path) {
+    eprintln!();
+    for title in tasks {
+        let result = tokio::process::Command::new("gh")
+            .args([
+                "issue",
+                "create",
+                "--title",
+                title,
+                "--body",
+                "Created by derrick from tasks.md.",
+                "--label",
+                "derrick",
+            ])
+            .current_dir(repo_root)
+            .output()
+            .await;
+        match result {
+            Ok(out) if out.status.success() => {
+                let url = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                eprintln!(
+                    "  {} {} {}",
+                    "\u{2713}".green(),
+                    "Issue created:".cyan(),
+                    url.bright_white()
+                );
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                eprintln!(
+                    "  {} {} {}",
+                    "\u{26a0}".yellow(),
+                    format!("Failed to create issue for \"{title}\":").yellow(),
+                    err.trim().bright_black()
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "  {} {}",
+                    "\u{26a0}".yellow(),
+                    format!("gh error: {err}").yellow()
+                );
+            }
+        }
+    }
+    eprintln!();
 }
 
 #[cfg(test)]

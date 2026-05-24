@@ -63,6 +63,8 @@ pub(crate) struct AddArgs {
     pub(crate) no_clarify: bool,
     #[arg(long, help = "Alias for `--skip assay`")]
     pub(crate) no_assay: bool,
+    #[arg(long, help = "Skip the GitHub Issues creation offer")]
+    pub(crate) no_github_issues: bool,
 }
 
 #[derive(Debug, Args)]
@@ -230,6 +232,8 @@ pub(crate) struct AddFeatureArgs {
     pub(crate) no_clarify: bool,
     #[arg(long, help = "Alias for `--skip assay`")]
     pub(crate) no_assay: bool,
+    #[arg(long, help = "Skip the GitHub Issues creation offer")]
+    pub(crate) no_github_issues: bool,
 }
 
 #[derive(Debug, Args)]

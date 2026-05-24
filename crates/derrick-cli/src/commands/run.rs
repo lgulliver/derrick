@@ -85,6 +85,7 @@ fn pipeline_input(args: crate::commands::AddFeatureArgs) -> PipelineInput {
         unskip: args.unskip.into_iter().collect(),
         dry_run: args.dry_run,
         run_id: args.run_id,
+        no_github_issues: args.no_github_issues,
     }
 }
 

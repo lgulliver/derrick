@@ -69,6 +69,8 @@ pub struct PipelineInput {
     pub dry_run: bool,
     /// Override run id.
     pub run_id: Option<String>,
+    /// Skip the GitHub Issues creation offer even if `gh` is available.
+    pub no_github_issues: bool,
 }
 
 /// Result returned after a pipeline run.

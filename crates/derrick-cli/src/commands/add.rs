@@ -37,6 +37,7 @@ Use `derrick run resume` to resume it, or provide a prompt to start a new run."
         dry_run: args.dry_run,
         no_clarify: args.no_clarify,
         no_assay: args.no_assay,
+        no_github_issues: args.no_github_issues,
     };
     super::run::execute(RunArgs {
         command: RunCommand::AddFeature(add_feature),
@@ -101,6 +102,7 @@ mod tests {
             dry_run: false,
             no_clarify: false,
             no_assay: false,
+            no_github_issues: false,
         }
     }
 
