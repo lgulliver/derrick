@@ -12,7 +12,7 @@ use ratatui::widgets::{BarChart, Block, Borders, Cell, List, ListItem, Paragraph
 use ratatui::Frame;
 
 use crate::app::{App, TicketSort};
-use crate::data::{ActivityFilter, Tab, TicketRow};
+use crate::data::{ActivityFilter, HandRow, Tab, TicketRow};
 
 /// Format a duration in seconds as a compact human-readable string
 /// (`"14m"`, `"2h03m"`, `"5s"`).
@@ -48,7 +48,7 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Footer key-hint line shown below all tabs.
 pub fn render_footer(frame: &mut Frame, area: Rect) {
-    let hints = "q quit  r refresh  ↑↓ scroll  ⏎ detail  / filter  ? help  Esc back  1-6 tabs";
+    let hints = "q quit  r refresh  ↑↓ scroll  ⏎ detail  / filter  ? help  Esc back  1-7 tabs";
     let p = Paragraph::new(hints).block(Block::default().borders(Borders::TOP));
     frame.render_widget(p, area);
 }
@@ -76,6 +76,7 @@ pub fn render_active_tab(frame: &mut Frame, area: Rect, app: &App) {
         Tab::Activity => render_activity(frame, area, app),
         Tab::Tokens => render_tokens(frame, area, app),
         Tab::Memory => render_memory(frame, area, app),
+        Tab::Hands => render_hands(frame, area, app),
     }
 
     if app.show_help {
@@ -478,15 +479,26 @@ fn render_activity(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
+    let s = &app.data.token_summary;
+    let show_hands = s.hands_tokens_out > 0
+        || s.hands_roughneck_saved > 0
+        || s.hands_bytes_raw > 0
+        || s.hands_bytes_saved > 0;
+
+    // Layout: summary (7) [+ optional Hands (6)] + bar chart (min 5).
+    let constraints: Vec<Constraint> = if show_hands {
+        vec![
+            Constraint::Length(7),
+            Constraint::Length(6),
+            Constraint::Min(5),
+        ]
+    } else {
+        vec![Constraint::Length(7), Constraint::Min(5)]
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(7), // summary paragraph
-            Constraint::Min(5),    // per-step bar chart
-        ])
+        .constraints(constraints)
         .split(area);
-
-    let s = &app.data.token_summary;
 
     // ── Summary paragraph ────────────────────────────────────────────────
     let today_note = if s.today_in == 0 && s.today_out == 0 {
@@ -541,6 +553,34 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
         chunks[0],
     );
 
+    // ── Hands summary (optional) ─────────────────────────────────────────
+    let chart_chunk = if show_hands {
+        let pct = if s.hands_bytes_raw > 0 {
+            100.0 * s.hands_bytes_saved as f64 / s.hands_bytes_raw as f64
+        } else {
+            0.0
+        };
+        let hands_lines = vec![
+            Line::from(format!("tokens out:        {}", s.hands_tokens_out)),
+            Line::from(format!("roughneck saved:   ~{}", s.hands_roughneck_saved)),
+            Line::from(format!(
+                "scrub bytes saved: {} kb / {} kb raw  ({:.0}%)",
+                s.hands_bytes_saved / 1024,
+                s.hands_bytes_raw / 1024,
+                pct
+            )),
+            Line::from("source:            substrate `hand stats:` notes"),
+        ];
+        frame.render_widget(
+            Paragraph::new(hands_lines)
+                .block(Block::default().title("Hands").borders(Borders::ALL)),
+            chunks[1],
+        );
+        chunks[2]
+    } else {
+        chunks[1]
+    };
+
     // ── Per-step bar chart ───────────────────────────────────────────────
     if s.per_step.is_empty() {
         frame.render_widget(
@@ -549,7 +589,7 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
                     .title("Per-step breakdown")
                     .borders(Borders::ALL),
             ),
-            chunks[1],
+            chart_chunk,
         );
         return;
     }
@@ -582,7 +622,7 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
         .data(&bar_data)
         .bar_width(9)
         .bar_gap(1);
-    frame.render_widget(chart, chunks[1]);
+    frame.render_widget(chart, chart_chunk);
 }
 
 fn render_memory(frame: &mut Frame, area: Rect, app: &App) {
@@ -620,11 +660,116 @@ fn render_memory(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+fn hand_status_span(status: &str) -> Span<'static> {
+    match status {
+        "done" => Span::styled("✓", Style::default().fg(ratatui::style::Color::Green)),
+        "failed" => Span::styled("✗", Style::default().fg(ratatui::style::Color::Red)),
+        _ => Span::styled("⟳", Style::default().fg(ratatui::style::Color::Yellow)),
+    }
+}
+
+fn render_hands(frame: &mut Frame, area: Rect, app: &App) {
+    let filter = ActivityFilter::from_query(app.filter.query());
+
+    // Apply hand:/ticket: / text filters to the rollup. Hands are filtered
+    // by hand_id; ticket filters narrow to hands that touched a given ticket.
+    let visible: Vec<&HandRow> = app
+        .data
+        .hand_rows
+        .iter()
+        .filter(|row| match &filter {
+            ActivityFilter::None => true,
+            ActivityFilter::Hand(q) => row.hand_id.to_ascii_lowercase().contains(q),
+            ActivityFilter::Ticket(q) => row
+                .ticket_id
+                .as_deref()
+                .is_some_and(|t| t.to_ascii_lowercase().contains(q)),
+            ActivityFilter::Run(_) => false,
+            ActivityFilter::Text(q) => {
+                row.hand_id.to_ascii_lowercase().contains(q)
+                    || row
+                        .ticket_id
+                        .as_deref()
+                        .is_some_and(|t| t.to_ascii_lowercase().contains(q))
+                    || row.action.to_ascii_lowercase().contains(q)
+                    || row
+                        .detail
+                        .as_deref()
+                        .is_some_and(|d| d.to_ascii_lowercase().contains(q))
+            }
+        })
+        .collect();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(3)])
+        .split(area);
+
+    let now = Utc::now();
+    let rows: Vec<Row> = visible
+        .iter()
+        .map(|h| {
+            let age = fmt_secs((now - h.last_seen).num_seconds());
+            Row::new(vec![
+                Cell::from(Line::from(hand_status_span(&h.status))),
+                Cell::from(h.hand_id.clone()),
+                Cell::from(h.ticket_id.clone().unwrap_or_default()),
+                Cell::from(h.action.clone()),
+                Cell::from(age),
+                Cell::from(h.detail.clone().unwrap_or_default()),
+            ])
+        })
+        .collect();
+
+    let count_label = format!(
+        "{} hand{}",
+        visible.len(),
+        if visible.len() == 1 { "" } else { "s" }
+    );
+    let title = match filter.mode_label() {
+        Some(label) => format!("Hands  {count_label}  filter:{label}"),
+        None => format!("Hands  {count_label}"),
+    };
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(2),
+            Constraint::Length(20),
+            Constraint::Length(12),
+            Constraint::Length(16),
+            Constraint::Length(8),
+            Constraint::Min(10),
+        ],
+    )
+    .header(
+        Row::new(vec!["", "hand", "ticket", "action", "age", "detail"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::default().title(title).borders(Borders::ALL));
+    frame.render_widget(table, chunks[0]);
+
+    let status_line = if app.filter.is_active() {
+        format!("/ {}_  |  prefixes: hand:  ticket:", app.filter.query())
+    } else if !filter.is_none() {
+        format!(
+            "filter: {}  |  / to edit  Esc to clear",
+            filter.mode_label().unwrap_or_default()
+        )
+    } else {
+        "press / to filter  |  prefixes: hand:<id>  ticket:<id>".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(status_line).block(Block::default().borders(Borders::ALL)),
+        chunks[1],
+    );
+}
+
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let body = "Keys:\n\
         q     quit\n\
         r     refresh\n\
-        1-6   switch tab\n\
+        1-7   switch tab\n\
         ↑/↓   navigate rows\n\
         ⏎     toggle detail / open PR (Stack)\n\
         /     filter\n\

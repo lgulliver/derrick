@@ -202,7 +202,7 @@ impl App {
                 self.ticket_sort = self.ticket_sort.cycle();
                 self.selected_row = 0;
             }
-            KeyCode::Char(c @ '1'..='6') => {
+            KeyCode::Char(c @ '1'..='7') => {
                 let idx = (c as u8 - b'1') as usize;
                 if let Some(tab) = Tab::from_index(idx) {
                     self.active_tab = tab;

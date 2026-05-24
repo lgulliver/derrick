@@ -73,8 +73,8 @@ pub struct LastAssaySnapshot {
     pub at: DateTime<Utc>,
 }
 
-/// One of the six tabs in the dashboard. The discriminant ordering matches
-/// the numeric `1`-`6` hotkeys.
+/// One of the seven tabs in the dashboard. The discriminant ordering matches
+/// the numeric `1`-`7` hotkeys.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Tab {
     /// Overview: standup view of the active batch.
@@ -90,6 +90,8 @@ pub enum Tab {
     Tokens,
     /// Memory: per-site memory entries.
     Memory,
+    /// Hands: per-hand activity rollup.
+    Hands,
 }
 
 impl Tab {
@@ -102,10 +104,11 @@ impl Tab {
             Self::Activity => "Activity",
             Self::Tokens => "Tokens",
             Self::Memory => "Memory",
+            Self::Hands => "Hands",
         }
     }
 
-    /// Zero-based index in the tabs bar (0..=5).
+    /// Zero-based index in the tabs bar (0..=6).
     pub fn index(self) -> usize {
         match self {
             Self::Overview => 0,
@@ -114,6 +117,7 @@ impl Tab {
             Self::Activity => 3,
             Self::Tokens => 4,
             Self::Memory => 5,
+            Self::Hands => 6,
         }
     }
 
@@ -126,12 +130,13 @@ impl Tab {
             3 => Some(Self::Activity),
             4 => Some(Self::Tokens),
             5 => Some(Self::Memory),
+            6 => Some(Self::Hands),
             _ => None,
         }
     }
 
     /// All tabs in display order.
-    pub fn all() -> [Self; 6] {
+    pub fn all() -> [Self; 7] {
         [
             Self::Overview,
             Self::Tickets,
@@ -139,6 +144,7 @@ impl Tab {
             Self::Activity,
             Self::Tokens,
             Self::Memory,
+            Self::Hands,
         ]
     }
 }
@@ -159,6 +165,7 @@ impl FromStr for Tab {
             "activity" => Ok(Self::Activity),
             "tokens" => Ok(Self::Tokens),
             "memory" => Ok(Self::Memory),
+            "hands" => Ok(Self::Hands),
             other => Err(ParseTabError(other.to_owned())),
         }
     }
@@ -451,6 +458,208 @@ pub struct TokenSummary {
     /// Total output tokens saved by roughneck prompt injection across all
     /// recorded runs.
     pub total_roughneck_saved: u64,
+    /// Total output tokens from hand LLM calls (aggregated from substrate
+    /// `hand stats:` note events).
+    pub hands_tokens_out: u64,
+    /// Total roughneck savings from hand calls.
+    pub hands_roughneck_saved: u64,
+    /// Total raw bytes from hand subprocess output.
+    pub hands_bytes_raw: u64,
+    /// Total bytes saved by scrub in hand subprocesses.
+    pub hands_bytes_saved: u64,
+}
+
+/// Parse a `"hand stats: tokens_in=N tokens_out=N roughneck_saved=N bytes_raw=N bytes_saved=N"`
+/// note body into `(tokens_in, tokens_out, roughneck_saved, bytes_raw, bytes_saved)`.
+///
+/// Returns `None` when the body does not start with `"hand stats:"` or when
+/// any of the five required keys is missing or cannot be parsed as a `u64`.
+/// Extra keys are ignored.
+pub fn parse_hand_stats_note(body: &str) -> Option<(u64, u64, u64, u64, u64)> {
+    let rest = body.strip_prefix("hand stats:")?.trim();
+    let mut tokens_in: Option<u64> = None;
+    let mut tokens_out: Option<u64> = None;
+    let mut roughneck_saved: Option<u64> = None;
+    let mut bytes_raw: Option<u64> = None;
+    let mut bytes_saved: Option<u64> = None;
+    for pair in rest.split_whitespace() {
+        let (k, v) = pair.split_once('=')?;
+        let v: u64 = v.parse().ok()?;
+        match k {
+            "tokens_in" => tokens_in = Some(v),
+            "tokens_out" => tokens_out = Some(v),
+            "roughneck_saved" => roughneck_saved = Some(v),
+            "bytes_raw" => bytes_raw = Some(v),
+            "bytes_saved" => bytes_saved = Some(v),
+            _ => {}
+        }
+    }
+    Some((
+        tokens_in?,
+        tokens_out?,
+        roughneck_saved?,
+        bytes_raw?,
+        bytes_saved?,
+    ))
+}
+
+/// One row in the Hands tab — a single hand's activity summary.
+#[derive(Clone, Debug)]
+pub struct HandRow {
+    /// Hand identifier.
+    pub hand_id: String,
+    /// Ticket this hand is/was working on.
+    pub ticket_id: Option<String>,
+    /// Latest action observed (e.g. "dispatched", "completed", "failed").
+    pub action: String,
+    /// Timestamp of the most recent event for this hand.
+    pub last_seen: DateTime<Utc>,
+    /// Status badge: "running", "done", "failed", "unknown".
+    pub status: String,
+    /// One-line summary of notable output (commit hash, PR URL, error, etc.).
+    pub detail: Option<String>,
+}
+
+/// Aggregate `TypedEvent`s into one `HandRow` per hand id, sorted newest-first
+/// by `last_seen`.
+///
+/// `events` is expected newest-first (as returned by `tail_typed_events`).
+/// Because we only set a `HandRow` field if it is empty, the most recent
+/// value for each field wins.
+fn build_hand_rows(events: &[TypedEvent]) -> Vec<HandRow> {
+    let mut rows: HashMap<String, HandRow> = HashMap::new();
+    // We also track whether any "failed" or "done" terminal event has been
+    // seen for each hand, since these dominate the status badge regardless of
+    // ordering.
+    let mut terminal: HashMap<String, &'static str> = HashMap::new();
+
+    for ev in events {
+        // Determine the hand id this event belongs to, plus the action/detail
+        // we should record.
+        let (hand_id, action, ticket_id, detail, status_hint): (
+            Option<String>,
+            &'static str,
+            Option<String>,
+            Option<String>,
+            Option<&'static str>,
+        ) = match (&ev.scope, &ev.kind) {
+            // Hand-scoped events
+            (EventScope::Hand(h), EventKind::HandRegistered) => {
+                (Some(h.to_string()), "registered", None, None, None)
+            }
+            (EventScope::Hand(h), EventKind::HandHeartbeat) => {
+                (Some(h.to_string()), "heartbeat", None, None, None)
+            }
+            (EventScope::Hand(h), EventKind::HandAbandoned { previous_owner_of }) => (
+                Some(h.to_string()),
+                "abandoned",
+                Some(previous_owner_of.to_string()),
+                None,
+                Some("failed"),
+            ),
+            // Ticket-scoped events that name a hand
+            (EventScope::Ticket(tid), EventKind::TicketAssigned { hand }) => (
+                Some(hand.to_string()),
+                "dispatched",
+                Some(tid.to_string()),
+                None,
+                None,
+            ),
+            (EventScope::Ticket(tid), EventKind::TicketUnassigned { reason }) => {
+                // We don't know which hand released the ticket here, so this
+                // event cannot update a HandRow.  We still record nothing.
+                let _ = (tid, reason);
+                (None, "", None, None, None)
+            }
+            // Hand-scoped notes ("claude hand: ...", "exited successfully",
+            // "exited non-zero", "hand stats: ...", etc.)
+            (EventScope::Hand(h), EventKind::Note { body }) => {
+                if let Some(rest) = body.strip_prefix("hand stats:") {
+                    (
+                        Some(h.to_string()),
+                        "stats recorded",
+                        None,
+                        Some(rest.trim().to_owned()),
+                        None,
+                    )
+                } else if body.contains("exited successfully") {
+                    (
+                        Some(h.to_string()),
+                        "completed",
+                        None,
+                        Some(body.clone()),
+                        Some("done"),
+                    )
+                } else if body.contains("exited non-zero") || body.contains("failed") {
+                    (
+                        Some(h.to_string()),
+                        "failed",
+                        None,
+                        Some(body.clone()),
+                        Some("failed"),
+                    )
+                } else if let Some(rest) = body.strip_prefix("claude hand:") {
+                    (
+                        Some(h.to_string()),
+                        "queue written",
+                        None,
+                        Some(rest.trim().to_owned()),
+                        None,
+                    )
+                } else {
+                    (Some(h.to_string()), "note", None, Some(body.clone()), None)
+                }
+            }
+            _ => (None, "", None, None, None),
+        };
+
+        let Some(hand_id) = hand_id else { continue };
+        if action.is_empty() {
+            continue;
+        }
+
+        if let Some(s) = status_hint {
+            // Failure is sticky: once we see a "failed" hint, it dominates
+            // any later "done" we encounter (events are newest-first, so any
+            // "failed" anywhere in the trail should override).
+            let entry = terminal.entry(hand_id.clone()).or_insert(s);
+            if s == "failed" {
+                *entry = "failed";
+            }
+        }
+
+        let row = rows.entry(hand_id.clone()).or_insert_with(|| HandRow {
+            hand_id: hand_id.clone(),
+            ticket_id: None,
+            action: action.to_owned(),
+            last_seen: ev.at,
+            status: "running".to_owned(),
+            detail: None,
+        });
+        // Newest-first: only fill empty fields.
+        if row.ticket_id.is_none() {
+            row.ticket_id = ticket_id;
+        }
+        if row.detail.is_none() {
+            row.detail = detail;
+        }
+        // last_seen is the most recent event timestamp; first-seen wins
+        // because events are newest-first.
+        if ev.at > row.last_seen {
+            row.last_seen = ev.at;
+        }
+    }
+
+    // Apply terminal status overrides
+    for (id, status) in &terminal {
+        if let Some(row) = rows.get_mut(id) {
+            row.status = (*status).to_owned();
+        }
+    }
+
+    let mut out: Vec<HandRow> = rows.into_values().collect();
+    out.sort_by_key(|r| std::cmp::Reverse(r.last_seen));
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +778,10 @@ fn load_token_summary(runs_dir: &Path) -> TokenSummary {
         total_bytes_raw,
         total_bytes_saved,
         total_roughneck_saved,
+        hands_tokens_out: 0,
+        hands_roughneck_saved: 0,
+        hands_bytes_raw: 0,
+        hands_bytes_saved: 0,
     }
 }
 
@@ -598,6 +811,8 @@ pub struct DataModel {
     pub token_summary: TokenSummary,
     /// Site memory entries.
     pub memory_entries: Vec<MemoryEntry>,
+    /// Per-hand activity rollup for the Hands tab.
+    pub hand_rows: Vec<HandRow>,
     /// Timestamp of the most recent refresh.
     pub last_refresh: Option<DateTime<Utc>>,
     /// Site name pulled from the substrate.
@@ -673,7 +888,27 @@ impl DataModel {
         let ticket_rows: Vec<TicketRow> = tickets.iter().map(TicketRow::from).collect();
         let event_rows: Vec<EventRow> = events.iter().map(EventRow::from).collect();
 
-        let token_summary = runs_dir.map(load_token_summary).unwrap_or_default();
+        let mut token_summary = runs_dir.map(load_token_summary).unwrap_or_default();
+        // Aggregate hand stats recorded as substrate Note events.
+        for ev in &events {
+            if let EventKind::Note { body } = &ev.kind {
+                if let Some((_ti, to, rn, br, bs)) = parse_hand_stats_note(body) {
+                    token_summary.hands_tokens_out =
+                        token_summary.hands_tokens_out.saturating_add(to);
+                    token_summary.hands_roughneck_saved =
+                        token_summary.hands_roughneck_saved.saturating_add(rn);
+                    token_summary.hands_bytes_raw =
+                        token_summary.hands_bytes_raw.saturating_add(br);
+                    token_summary.hands_bytes_saved =
+                        token_summary.hands_bytes_saved.saturating_add(bs);
+                    token_summary.total_roughneck_saved =
+                        token_summary.total_roughneck_saved.saturating_add(rn);
+                    token_summary.total_out = token_summary.total_out.saturating_add(to);
+                }
+            }
+        }
+
+        let hand_rows = build_hand_rows(&events);
 
         Ok(Self {
             overview,
@@ -682,6 +917,7 @@ impl DataModel {
             events: event_rows,
             token_summary,
             memory_entries: memory_entries.to_vec(),
+            hand_rows,
             last_refresh: Some(Utc::now()),
             site_name: site.name().to_owned(),
         })
@@ -713,7 +949,7 @@ mod tests {
         for tab in Tab::all() {
             assert_eq!(Tab::from_index(tab.index()), Some(tab));
         }
-        assert_eq!(Tab::from_index(6), None);
+        assert_eq!(Tab::from_index(7), None);
     }
 
     #[test]
@@ -724,6 +960,118 @@ mod tests {
         assert_eq!(Tab::Activity.title(), "Activity");
         assert_eq!(Tab::Tokens.title(), "Tokens");
         assert_eq!(Tab::Memory.title(), "Memory");
+        assert_eq!(Tab::Hands.title(), "Hands");
+    }
+
+    #[test]
+    fn tab_all_has_seven_entries() {
+        assert_eq!(Tab::all().len(), 7);
+    }
+
+    #[test]
+    fn tab_hands_has_correct_index() {
+        assert_eq!(Tab::Hands.index(), 6);
+        assert_eq!(Tab::from_index(6), Some(Tab::Hands));
+        assert_eq!(Tab::from_index(7), None);
+    }
+
+    #[test]
+    fn tab_from_str_accepts_hands() {
+        assert_eq!("hands".parse::<Tab>().ok(), Some(Tab::Hands));
+        assert_eq!("HANDS".parse::<Tab>().ok(), Some(Tab::Hands));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_hand_stats_note
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_hand_stats_note_valid() {
+        let result = parse_hand_stats_note(
+            "hand stats: tokens_in=100 tokens_out=200 roughneck_saved=300 bytes_raw=4096 bytes_saved=1024",
+        );
+        assert_eq!(result, Some((100, 200, 300, 4096, 1024)));
+    }
+
+    #[test]
+    fn parse_hand_stats_note_invalid() {
+        assert_eq!(parse_hand_stats_note("something else"), None);
+        assert_eq!(parse_hand_stats_note("hand stats: broken"), None);
+        // Missing required key
+        assert_eq!(
+            parse_hand_stats_note(
+                "hand stats: tokens_in=1 tokens_out=2 roughneck_saved=3 bytes_raw=4"
+            ),
+            None
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // build_hand_rows
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_hand_rows_from_events() {
+        use derrick_substrate::{EventId, HandId, TicketId};
+
+        let Ok(hand) = HandId::new("bramble") else {
+            return;
+        };
+        let Ok(ticket) = TicketId::new("tst-7") else {
+            return;
+        };
+        let now = chrono::Utc::now();
+
+        let events = vec![
+            // Newest first: ticket assignment to this hand.
+            TypedEvent {
+                id: EventId(2),
+                scope: EventScope::Ticket(ticket.clone()),
+                kind: EventKind::TicketAssigned { hand: hand.clone() },
+                at: now,
+            },
+            // Hand was registered earlier.
+            TypedEvent {
+                id: EventId(1),
+                scope: EventScope::Hand(hand.clone()),
+                kind: EventKind::HandRegistered,
+                at: now - chrono::Duration::seconds(60),
+            },
+        ];
+
+        let rows = build_hand_rows(&events);
+        assert_eq!(rows.len(), 1, "should aggregate to one hand row");
+        let row = &rows[0];
+        assert_eq!(row.hand_id, "bramble");
+        assert_eq!(row.ticket_id.as_deref(), Some("tst-7"));
+        assert_eq!(row.status, "running");
+    }
+
+    #[test]
+    fn build_hand_rows_marks_failed() {
+        use derrick_substrate::{EventId, HandId, TicketId};
+
+        let Ok(hand) = HandId::new("cedar") else {
+            return;
+        };
+        let Ok(ticket) = TicketId::new("tst-9") else {
+            return;
+        };
+        let now = chrono::Utc::now();
+
+        let events = vec![TypedEvent {
+            id: EventId(1),
+            scope: EventScope::Hand(hand.clone()),
+            kind: EventKind::HandAbandoned {
+                previous_owner_of: ticket,
+            },
+            at: now,
+        }];
+
+        let rows = build_hand_rows(&events);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].action, "abandoned");
     }
 
     // -----------------------------------------------------------------------
