@@ -580,6 +580,7 @@ dependencies = [
  "chrono",
  "derrick-config",
  "derrick-roughneck",
+ "derrick-scrub",
  "derrick-substrate",
  "derrick-substrate-native",
  "serde_json",

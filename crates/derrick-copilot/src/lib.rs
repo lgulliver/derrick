@@ -26,7 +26,9 @@
 mod branch;
 mod client;
 mod dispatcher;
+mod local_dispatcher;
 
 pub use branch::{BranchCreator, BranchError, GitBranchCreator};
 pub use client::{CopilotDispatchClient, CopilotDispatchError, GhCopilotClient, PrInfo, TaskId};
 pub use dispatcher::{CopilotHandDispatcher, CopilotHandDispatcherConfig};
+pub use local_dispatcher::{LocalCopilotHandDispatcher, LocalCopilotHandDispatcherConfig};

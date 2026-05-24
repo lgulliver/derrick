@@ -7,9 +7,7 @@ use std::time::{Duration, Instant};
 
 use derrick_claude::{ClaudeHandDispatcher, ClaudeHandDispatcherConfig};
 use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
-use derrick_copilot::{
-    CopilotHandDispatcher, CopilotHandDispatcherConfig, GhCopilotClient, GitBranchCreator,
-};
+use derrick_copilot::{LocalCopilotHandDispatcher, LocalCopilotHandDispatcherConfig};
 use derrick_stack::{GraphiteStackBackend, NativeStackBackend, NoneStackBackend, StackBackend};
 use derrick_substrate::Substrate;
 #[allow(deprecated)]
@@ -145,23 +143,26 @@ fn build_dispatcher(
     let mut multi = MultiDispatcher::new(default_kind);
 
     if copilot_enabled {
-        let copilot_config = CopilotHandDispatcherConfig {
+        // Local CLI dispatcher: spawns `copilot -p <prompt> --add-dir <worktree>`
+        // per ticket. The legacy cloud (gh issue + @copilot) dispatcher is
+        // intentionally not wired here; it will return when the cloud path
+        // is needed again.
+        let copilot_config = LocalCopilotHandDispatcherConfig {
+            auto_dispatch: true,
             poll_interval: config.tools().copilot().poll_interval(),
             poll_timeout: config.tools().copilot().poll_timeout(),
-            base_branch: "main".to_owned(),
             agent_identity: config.tools().copilot().agent_identity().to_owned(),
             branch_prefix: config.tools().git().branch_prefix().to_owned(),
+            queue_dir: repo_root.join(".derrick/copilot-queue"),
+            repo_root: repo_root.to_path_buf(),
+            worktree_root: repo_root.join(".derrick/copilot-worktrees"),
+            copilot_binary: std::path::PathBuf::from("copilot"),
+            allow_all_tools: true,
             roughneck_enabled: config.tools().roughneck().enabled(),
             roughneck_level: config.tools().roughneck().level().to_owned(),
         };
-        let branch_creator = Arc::new(GitBranchCreator::new(repo_root.to_path_buf()))
-            as Arc<dyn derrick_copilot::BranchCreator>;
-        let client = Arc::new(GhCopilotClient::new(repo_root.to_path_buf()))
-            as Arc<dyn derrick_copilot::CopilotDispatchClient>;
-        multi = multi.register(Box::new(CopilotHandDispatcher::new(
+        multi = multi.register(Box::new(LocalCopilotHandDispatcher::new(
             Arc::clone(substrate),
-            branch_creator,
-            client,
             copilot_config,
         )));
     }
