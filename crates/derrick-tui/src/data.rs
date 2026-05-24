@@ -265,21 +265,131 @@ pub struct EventRow {
     pub kind: String,
     /// Ticket id when the event is ticket-scoped.
     pub ticket: Option<String>,
+    /// Hand id when the event is hand-scoped.
+    pub hand: Option<String>,
+    /// Run id when the event is worktree/pipeline-scoped.
+    pub run_id: Option<String>,
     /// One-line rendered body.
     pub body: String,
 }
 
 impl From<&TypedEvent> for EventRow {
     fn from(ev: &TypedEvent) -> Self {
-        let ticket = match &ev.scope {
-            EventScope::Ticket(id) => Some(id.to_string()),
-            _ => None,
+        let (ticket, hand, run_id) = match &ev.scope {
+            EventScope::Ticket(id) => (Some(id.to_string()), None, None),
+            EventScope::Hand(h) => (None, Some(h.to_string()), None),
+            EventScope::Worktree { run_id } => (None, None, Some(run_id.clone())),
+            _ => (None, None, None),
         };
         Self {
             at: ev.at,
             kind: ev.kind.discriminator().to_owned(),
             ticket,
+            hand,
+            run_id,
             body: summarise_event(&ev.kind),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Activity filter
+// ---------------------------------------------------------------------------
+
+/// Parsed filter for the Activity tab. Derived from the shared
+/// [`FilterState`](crate::app::FilterState) query string at render time.
+///
+/// Plain text (no prefix) performs a substring match across all fields.
+/// Prefixed queries narrow to a single dimension:
+///
+/// ```text
+/// ticket:tst-42     — only events scoped to ticket tst-42
+/// hand:bramble      — only events scoped to hand bramble
+/// run:abc123        — only events scoped to run abc123
+/// ```
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ActivityFilter {
+    /// No filter — every event is shown.
+    #[default]
+    None,
+    /// Substring match across ticket, hand, run_id, kind, and body.
+    Text(String),
+    /// Exact prefix match on the ticket id field.
+    Ticket(String),
+    /// Exact prefix match on the hand id field.
+    Hand(String),
+    /// Exact prefix match on the run id field.
+    Run(String),
+}
+
+impl ActivityFilter {
+    /// Parse a raw query string (from the filter input) into an
+    /// `ActivityFilter`. The empty string produces `None`.
+    pub fn from_query(q: &str) -> Self {
+        let q = q.trim();
+        if q.is_empty() {
+            return Self::None;
+        }
+        if let Some(rest) = q.strip_prefix("ticket:") {
+            return Self::Ticket(rest.to_ascii_lowercase());
+        }
+        if let Some(rest) = q.strip_prefix("hand:") {
+            return Self::Hand(rest.to_ascii_lowercase());
+        }
+        if let Some(rest) = q.strip_prefix("run:") {
+            return Self::Run(rest.to_ascii_lowercase());
+        }
+        Self::Text(q.to_ascii_lowercase())
+    }
+
+    /// Short label for display in the UI (e.g. `"ticket:tst-1"`).
+    /// Returns `None` when the filter is inactive.
+    pub fn mode_label(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::Text(q) => Some(format!("text:{q}")),
+            Self::Ticket(q) => Some(format!("ticket:{q}")),
+            Self::Hand(q) => Some(format!("hand:{q}")),
+            Self::Run(q) => Some(format!("run:{q}")),
+        }
+    }
+
+    /// Whether this filter is inactive.
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// Returns `true` when `row` passes this filter.
+    pub fn matches(&self, row: &EventRow) -> bool {
+        match self {
+            Self::None => true,
+            Self::Text(q) => {
+                row.ticket
+                    .as_deref()
+                    .is_some_and(|t| t.to_ascii_lowercase().contains(q.as_str()))
+                    || row
+                        .hand
+                        .as_deref()
+                        .is_some_and(|h| h.to_ascii_lowercase().contains(q.as_str()))
+                    || row
+                        .run_id
+                        .as_deref()
+                        .is_some_and(|r| r.to_ascii_lowercase().contains(q.as_str()))
+                    || row.kind.contains(q.as_str())
+                    || row.body.to_ascii_lowercase().contains(q.as_str())
+            }
+            Self::Ticket(q) => row
+                .ticket
+                .as_deref()
+                .is_some_and(|t| t.to_ascii_lowercase().contains(q.as_str())),
+            Self::Hand(q) => row
+                .hand
+                .as_deref()
+                .is_some_and(|h| h.to_ascii_lowercase().contains(q.as_str())),
+            Self::Run(q) => row
+                .run_id
+                .as_deref()
+                .is_some_and(|r| r.to_ascii_lowercase().contains(q.as_str())),
         }
     }
 }
@@ -563,5 +673,136 @@ mod tests {
             assert_eq!(Tab::from_index(tab.index()), Some(tab));
         }
         assert_eq!(Tab::from_index(6), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // ActivityFilter tests
+    // -----------------------------------------------------------------------
+
+    fn make_event_row(
+        ticket: Option<&str>,
+        hand: Option<&str>,
+        run_id: Option<&str>,
+        kind: &str,
+        body: &str,
+    ) -> EventRow {
+        EventRow {
+            at: chrono::Utc::now(),
+            kind: kind.to_owned(),
+            ticket: ticket.map(str::to_owned),
+            hand: hand.map(str::to_owned),
+            run_id: run_id.map(str::to_owned),
+            body: body.to_owned(),
+        }
+    }
+
+    #[test]
+    fn from_query_empty_gives_none() {
+        assert_eq!(ActivityFilter::from_query(""), ActivityFilter::None);
+        assert_eq!(ActivityFilter::from_query("   "), ActivityFilter::None);
+    }
+
+    #[test]
+    fn from_query_ticket_prefix() {
+        assert_eq!(
+            ActivityFilter::from_query("ticket:TST-1"),
+            ActivityFilter::Ticket("tst-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn from_query_hand_prefix() {
+        assert_eq!(
+            ActivityFilter::from_query("hand:Bramble"),
+            ActivityFilter::Hand("bramble".to_owned())
+        );
+    }
+
+    #[test]
+    fn from_query_run_prefix() {
+        assert_eq!(
+            ActivityFilter::from_query("run:abc123"),
+            ActivityFilter::Run("abc123".to_owned())
+        );
+    }
+
+    #[test]
+    fn from_query_plain_text() {
+        assert_eq!(
+            ActivityFilter::from_query("hello"),
+            ActivityFilter::Text("hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn filter_none_matches_everything() {
+        let row = make_event_row(Some("tst-1"), None, None, "ticket_state_changed", "ready");
+        assert!(ActivityFilter::None.matches(&row));
+    }
+
+    #[test]
+    fn filter_ticket_matches_ticket_field() {
+        let row = make_event_row(Some("tst-42"), None, None, "some_event", "body");
+        assert!(ActivityFilter::Ticket("tst-42".to_owned()).matches(&row));
+        // Substring match: "tst" should also find "tst-42"
+        assert!(ActivityFilter::Ticket("tst".to_owned()).matches(&row));
+        // Non-matching ticket
+        assert!(!ActivityFilter::Ticket("tst-99".to_owned()).matches(&row));
+        // hand-scoped row should not match a ticket filter
+        let hand_row = make_event_row(None, Some("bramble"), None, "some_event", "body");
+        assert!(!ActivityFilter::Ticket("tst".to_owned()).matches(&hand_row));
+    }
+
+    #[test]
+    fn filter_hand_matches_hand_field() {
+        let row = make_event_row(None, Some("bramble"), None, "ticket_assigned", "body");
+        assert!(ActivityFilter::Hand("bramble".to_owned()).matches(&row));
+        assert!(ActivityFilter::Hand("bram".to_owned()).matches(&row));
+        assert!(!ActivityFilter::Hand("cedar".to_owned()).matches(&row));
+    }
+
+    #[test]
+    fn filter_run_matches_run_id_field() {
+        let row = make_event_row(
+            None,
+            None,
+            Some("run-abc123"),
+            "pipeline_step_completed",
+            "ok",
+        );
+        assert!(ActivityFilter::Run("abc123".to_owned()).matches(&row));
+        assert!(!ActivityFilter::Run("xyz".to_owned()).matches(&row));
+    }
+
+    #[test]
+    fn filter_text_matches_across_all_fields() {
+        // Matches ticket id
+        let r1 = make_event_row(Some("tst-1"), None, None, "state_changed", "moved");
+        assert!(ActivityFilter::Text("tst".to_owned()).matches(&r1));
+        // Matches kind
+        let r2 = make_event_row(None, None, None, "pipeline_step_completed", "done");
+        assert!(ActivityFilter::Text("pipeline".to_owned()).matches(&r2));
+        // Matches body
+        let r3 = make_event_row(None, None, None, "event", "moved to review");
+        assert!(ActivityFilter::Text("review".to_owned()).matches(&r3));
+        // Matches hand
+        let r4 = make_event_row(None, Some("cedar"), None, "event", "body");
+        assert!(ActivityFilter::Text("cedar".to_owned()).matches(&r4));
+        // No match
+        let r5 = make_event_row(Some("tst-1"), None, None, "event", "nothing here");
+        assert!(!ActivityFilter::Text("zebra".to_owned()).matches(&r5));
+    }
+
+    #[test]
+    fn mode_label_none_is_none() {
+        assert_eq!(ActivityFilter::None.mode_label(), None);
+    }
+
+    #[test]
+    fn mode_label_text_prefix() {
+        assert_eq!(
+            ActivityFilter::Text("hello".to_owned()).mode_label(),
+            Some("text:hello".to_owned())
+        );
     }
 }

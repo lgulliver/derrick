@@ -12,7 +12,7 @@ use ratatui::widgets::{BarChart, Block, Borders, Cell, List, ListItem, Paragraph
 use ratatui::Frame;
 
 use crate::app::{App, TicketSort};
-use crate::data::{Tab, TicketRow};
+use crate::data::{ActivityFilter, Tab, TicketRow};
 
 /// Format a duration in seconds as a compact human-readable string
 /// (`"14m"`, `"2h03m"`, `"5s"`).
@@ -409,19 +409,27 @@ fn render_stack(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_activity(frame: &mut Frame, area: Rect, app: &App) {
+    let filter = ActivityFilter::from_query(app.filter.query());
+
     let items: Vec<ListItem> = app
         .data
         .events
         .iter()
         .rev() // newest-last so newest sits at bottom
+        .filter(|e| filter.matches(e))
         .map(|e| {
-            let ticket = e
-                .ticket
-                .as_deref()
-                .map(|t| format!("[{t}] "))
-                .unwrap_or_default();
+            // Build a compact scope tag from whatever scope field is populated.
+            let scope_tag = if let Some(t) = &e.ticket {
+                format!("[{t}] ")
+            } else if let Some(h) = &e.hand {
+                format!("[hand:{h}] ")
+            } else if let Some(r) = &e.run_id {
+                format!("[run:{r}] ")
+            } else {
+                String::new()
+            };
             ListItem::new(format!(
-                "{} {} {ticket}{}",
+                "{} {} {scope_tag}{}",
                 e.at.format("%H:%M:%S"),
                 e.kind,
                 e.body
@@ -429,13 +437,44 @@ fn render_activity(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let title = if app.activity_auto_scroll {
-        "Activity (auto-scroll)"
+    // Split into list area + one-line status bar.
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .split(area);
+
+    // Block title reflects scroll state and active filter mode.
+    let scroll_label = if app.activity_auto_scroll {
+        "auto-scroll"
     } else {
-        "Activity (paused)"
+        "paused"
+    };
+    let title = match filter.mode_label() {
+        Some(label) => format!("Activity ({scroll_label})  filter:{label}"),
+        None => format!("Activity ({scroll_label})"),
     };
     let list = List::new(items).block(Block::default().title(title).borders(Borders::ALL));
-    frame.render_widget(list, area);
+    frame.render_widget(list, chunks[0]);
+
+    // Status bar: show active filter and available prefix hints.
+    let status_line = if app.filter.is_active() {
+        format!(
+            "/ {}_  |  prefixes: ticket:  hand:  run:",
+            app.filter.query()
+        )
+    } else if !filter.is_none() {
+        // Committed (inactive) filter is applied.
+        format!(
+            "filter: {}  |  / to edit  Esc to clear  |  prefixes: ticket:  hand:  run:",
+            filter.mode_label().unwrap_or_default()
+        )
+    } else {
+        "press / to filter  |  prefixes: ticket:<id>  hand:<id>  run:<id>".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(status_line).block(Block::default().borders(Borders::ALL)),
+        chunks[1],
+    );
 }
 
 fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
