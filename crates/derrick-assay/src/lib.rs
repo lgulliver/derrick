@@ -1052,7 +1052,7 @@ fn detect_constitution_violations(text: &str) -> Vec<String> {
             trimmed.starts_with("**") || trimmed.starts_with("- ") || trimmed.starts_with("* ");
         if is_violation_line {
             let cleaned = clean_violation_text(trimmed);
-            if !cleaned.is_empty() {
+            if !cleaned.is_empty() && !is_non_violation_marker(&cleaned) {
                 violations.push(cleaned);
             }
         }
@@ -1079,6 +1079,51 @@ fn clean_violation_text(line: &str) -> String {
         cleaned = rest.trim_start();
     }
     strip_markdown_emphasis(cleaned).to_owned()
+}
+
+/// Returns `true` when a cleaned violation line is a "nothing found" marker
+/// rather than an actual violation.
+///
+/// LLMs often write `**No contradictions found.**` or `- None` inside the
+/// Constitution Contradictions section to signal a clean review. These should
+/// not be treated as violations.
+fn is_non_violation_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let lower = lower.trim_end_matches('.').trim();
+    // Standalone "none" or "n/a".
+    if lower == "none" || lower == "n/a" {
+        return true;
+    }
+    // "No contradictions/violations/conflicts/issues [found/detected/present/identified]"
+    // We require a terminal positive word so that "No error handling" (a real
+    // violation) is NOT filtered — it ends with a noun, not a resolution word.
+    let terminal_words = [
+        "found",
+        "detected",
+        "present",
+        "identified",
+        "noted",
+        "observed",
+        "exist",
+        "exists",
+        "encountered",
+    ];
+    if terminal_words.iter().any(|w| lower.ends_with(w)) {
+        let trigger_words = [
+            "contradictions",
+            "violations",
+            "conflicts",
+            "issues",
+            "contradictions found",
+            "violations found",
+        ];
+        if trigger_words.iter().any(|w| lower.contains(w)) {
+            return true;
+        }
+    }
+    // Catch bare "No contradictions found" even without trailing resolution word
+    // when the phrase itself is conclusive.
+    lower.contains("no contradictions") || lower.contains("no violations")
 }
 
 fn strip_markdown_emphasis(mut s: &str) -> &str {
@@ -1692,6 +1737,49 @@ revise"#;
 Random text."#;
         let violations = detect_constitution_violations(text);
         assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn detect_constitution_violations_ignores_no_contradictions_found_marker() {
+        // When the LLM writes "**No contradictions found.**" inside the
+        // Constitution section to signal a clean review, it must not be
+        // treated as a violation.
+        let text = r#"### Constitution Contradictions
+
+| Rule | Finding |
+|------|---------|
+| Language auto-detect | ✅ passes |
+| Unit tests only | ✅ passes |
+
+**No contradictions found.**
+
+## Verdict
+
+accept"#;
+        let violations = detect_constitution_violations(text);
+        assert!(
+            violations.is_empty(),
+            "expected no violations but got: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn is_non_violation_marker_matches_common_patterns() {
+        // "Nothing to report" markers must be filtered.
+        assert!(is_non_violation_marker("No contradictions found."));
+        assert!(is_non_violation_marker("No contradictions found"));
+        assert!(is_non_violation_marker("No violations detected"));
+        assert!(is_non_violation_marker("No violations noted"));
+        assert!(is_non_violation_marker("None"));
+        assert!(is_non_violation_marker("none."));
+        assert!(is_non_violation_marker("N/A"));
+        // Real violations whose first word is "No" must NOT be filtered.
+        assert!(!is_non_violation_marker("No error handling"));
+        assert!(!is_non_violation_marker("No test coverage"));
+        assert!(!is_non_violation_marker("No conflicts"));
+        // Other real violations must NOT be filtered.
+        assert!(!is_non_violation_marker("Missing test coverage plan"));
+        assert!(!is_non_violation_marker("Error handling omitted"));
     }
 
     #[test]
