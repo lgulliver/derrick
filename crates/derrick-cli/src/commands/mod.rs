@@ -68,6 +68,9 @@ pub(crate) struct AddArgs {
     pub(crate) no_assay: bool,
     #[arg(long, help = "Skip the GitHub Issues creation offer")]
     pub(crate) no_github_issues: bool,
+    /// Wipe prior run state and start fresh instead of auto-resuming.
+    #[arg(long, help = "Discard any prior incomplete run and start from scratch")]
+    pub(crate) force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -237,6 +240,14 @@ pub(crate) struct AddFeatureArgs {
     pub(crate) no_assay: bool,
     #[arg(long, help = "Skip the GitHub Issues creation offer")]
     pub(crate) no_github_issues: bool,
+    /// Internal routing flag set by `add.rs` when it detects an incomplete run
+    /// with a matching prompt key. Not exposed as a CLI flag.
+    #[arg(skip)]
+    pub(crate) auto_resume: bool,
+    /// When `auto_resume` is true and the prior run was abandoned via
+    /// `--force`, this carries the old run_id for `resume_of` lineage.
+    #[arg(skip)]
+    pub(crate) force_prior_run_id: Option<String>,
 }
 
 #[derive(Debug, Args)]

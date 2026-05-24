@@ -13,11 +13,34 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
     match args.command {
         RunCommand::AddFeature(add_feature) => {
             if let Some(from_step) = add_feature.resume_from {
+                // Explicit step-level resume (--resume-from <step>).
                 let outcome = runner
                     .resume(add_feature.run_id.as_deref(), Some(&from_step))
                     .await
                     .map_err(|error| crate::message(error.to_string()))?;
                 println!("resumed run {}: {:?}", outcome.run_id, outcome.status);
+                return Ok(status_code(outcome.status));
+            }
+
+            if add_feature.auto_resume {
+                // Prompt-key auto-resume: detected by `add.rs`, run_id already
+                // pinned to the incomplete run.
+                let outcome = runner
+                    .resume(add_feature.run_id.as_deref(), None)
+                    .await
+                    .map_err(|error| crate::message(error.to_string()))?;
+                println!("resumed run {}: {:?}", outcome.run_id, outcome.status);
+                return Ok(status_code(outcome.status));
+            }
+
+            if let Some(prior_run_id) = add_feature.force_prior_run_id.clone() {
+                // Force-restart: start a brand-new run but record lineage.
+                let input = pipeline_input(add_feature);
+                let outcome = runner
+                    .run_pipeline_as_restart("add-feature", input, prior_run_id)
+                    .await
+                    .map_err(|error| crate::message(error.to_string()))?;
+                println!("run {}: {:?}", outcome.run_id, outcome.status);
                 return Ok(status_code(outcome.status));
             }
 

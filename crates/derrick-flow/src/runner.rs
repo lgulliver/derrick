@@ -59,7 +59,19 @@ impl Runner {
         pipeline_id: &str,
         input: PipelineInput,
     ) -> Result<RunOutcome, RunError> {
-        self.run_pipeline_from(pipeline_id, input, None).await
+        self.run_pipeline_from(pipeline_id, input, None, None).await
+    }
+
+    /// Like [`run_pipeline`] but records `resume_of` in the manifest so the
+    /// run is traceable back to a prior incomplete run that was force-restarted.
+    pub async fn run_pipeline_as_restart(
+        &self,
+        pipeline_id: &str,
+        input: PipelineInput,
+        resume_of: String,
+    ) -> Result<RunOutcome, RunError> {
+        self.run_pipeline_from(pipeline_id, input, None, Some(resume_of))
+            .await
     }
 
     /// Resume a previous run from the given step, or auto-detect if `from_step` is `None`.
@@ -104,8 +116,13 @@ impl Runner {
             input.prompt = None;
         }
         let prior = manifest.steps.into_iter().take(from_index).collect();
-        self.run_pipeline_from(ADD_FEATURE_PIPELINE, input, Some(prior))
-            .await
+        self.run_pipeline_from(
+            ADD_FEATURE_PIPELINE,
+            input,
+            Some(prior),
+            Some(run_id.clone()),
+        )
+        .await
     }
 
     async fn run_pipeline_from(
@@ -113,6 +130,7 @@ impl Runner {
         pipeline_id: &str,
         input: PipelineInput,
         prior_steps: Option<Vec<ManifestStep>>,
+        resume_of: Option<String>,
     ) -> Result<RunOutcome, RunError> {
         self.validate_pipeline_id(pipeline_id)?;
         let prompt = input
@@ -151,6 +169,7 @@ impl Runner {
             }
             manifest.steps = prior_steps;
         }
+        manifest.resume_of = resume_of;
 
         create_dir_all(&run_dir)?;
         crate::manifest::write_manifest(&self.manifest_path(&run_id), &manifest)?;

@@ -11,6 +11,7 @@ pub use code_review::{run_code_review, CodeReviewOutcome};
 pub use derrick_assay::types::{
     PipelineInput, RunError, RunOutcome, RunStatus, StepRecord, StepStatus,
 };
+pub use manifest::compute_prompt_key;
 pub use runner::Runner;
 
 /// Re-export of the shared run/step types crate. Existing call sites that

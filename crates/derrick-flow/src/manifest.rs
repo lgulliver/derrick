@@ -2,6 +2,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use derrick_assay::types::{RunError, RunStatus, StepRecord, StepStatus};
 
@@ -10,6 +11,11 @@ pub struct RunManifest {
     pub run_id: String,
     pub pipeline_id: String,
     pub prompt: String,
+    /// Normalised SHA256 prefix of the prompt — used to match incomplete runs
+    /// for the same feature so `derrick add` can auto-resume instead of
+    /// starting fresh and hitting ticket-ID collisions.
+    #[serde(default)]
+    pub prompt_key: String,
     pub flags: FlagsManifest,
     pub config_hash: String,
     pub started_at: DateTime<Utc>,
@@ -21,6 +27,26 @@ pub struct RunManifest {
     pub tokens_in: u64,
     #[serde(default)]
     pub tokens_out: u64,
+    /// When set, this run is a continuation or forced restart of the named
+    /// prior run (same or different run_id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_of: Option<String>,
+}
+
+/// Normalise `prompt` and return a 12-hex-char SHA256 prefix that
+/// acts as a stable identity key across re-invocations of the same feature.
+///
+/// Normalisation: trim, lowercase, collapse runs of whitespace to a single
+/// space. That makes "  Build a webhook " and "build a webhook" the same key.
+pub fn compute_prompt_key(prompt: &str) -> String {
+    let normalised: String = prompt
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let digest = Sha256::digest(normalised.as_bytes());
+    format!("{digest:x}")[..12].to_owned()
 }
 
 impl RunManifest {
@@ -50,10 +76,12 @@ impl RunManifest {
         config_hash: String,
         started_at: DateTime<Utc>,
     ) -> Self {
+        let prompt_key = compute_prompt_key(&prompt);
         Self {
             run_id,
             pipeline_id,
             prompt,
+            prompt_key,
             flags,
             config_hash,
             started_at,
@@ -63,6 +91,7 @@ impl RunManifest {
             steps: Vec::new(),
             tokens_in: 0,
             tokens_out: 0,
+            resume_of: None,
         }
     }
 }
@@ -170,4 +199,76 @@ pub fn write_manifest(path: &Path, manifest: &RunManifest) -> Result<(), RunErro
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_prompt_key_is_deterministic() {
+        assert_eq!(
+            compute_prompt_key("Build a webhook endpoint"),
+            compute_prompt_key("build a webhook endpoint"),
+            "case should not change the key"
+        );
+        assert_eq!(
+            compute_prompt_key("build a webhook endpoint"),
+            compute_prompt_key("  build  a  webhook  endpoint  "),
+            "whitespace normalisation should not change the key"
+        );
+    }
+
+    #[test]
+    fn compute_prompt_key_is_12_hex_chars() {
+        let key = compute_prompt_key("some feature");
+        assert_eq!(key.len(), 12);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn different_prompts_produce_different_keys() {
+        let a = compute_prompt_key("add rate limiting");
+        let b = compute_prompt_key("build a webhook endpoint");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn manifest_new_stores_prompt_key() {
+        use chrono::Utc;
+        let m = RunManifest::new(
+            "run-1".to_owned(),
+            "add-feature".to_owned(),
+            "Build a webhook endpoint".to_owned(),
+            FlagsManifest {
+                skip: vec![],
+                unskip: vec![],
+                dry_run: false,
+            },
+            "sha256:abc".to_owned(),
+            Utc::now(),
+        );
+        let expected = compute_prompt_key("Build a webhook endpoint");
+        assert_eq!(m.prompt_key, expected);
+        assert!(m.resume_of.is_none());
+    }
+
+    #[test]
+    fn manifest_new_stores_resume_of_when_set() {
+        use chrono::Utc;
+        let mut m = RunManifest::new(
+            "run-2".to_owned(),
+            "add-feature".to_owned(),
+            "prompt".to_owned(),
+            FlagsManifest {
+                skip: vec![],
+                unskip: vec![],
+                dry_run: false,
+            },
+            "sha256:abc".to_owned(),
+            Utc::now(),
+        );
+        m.resume_of = Some("run-1".to_owned());
+        assert_eq!(m.resume_of.as_deref(), Some("run-1"));
+    }
 }
