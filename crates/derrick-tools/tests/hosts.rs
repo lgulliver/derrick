@@ -133,7 +133,12 @@ printf 'ok'
     let adapter = kind.adapter(host.path().join(kind.name()));
     let req = request(cwd.path());
     let expected = match kind {
-        HostKind::Claude => vec!["--print".to_owned(), req.prompt.clone()],
+        HostKind::Claude => vec![
+            "--print".to_owned(),
+            "--output-format".to_owned(),
+            "json".to_owned(),
+            req.prompt.clone(),
+        ],
         HostKind::Codex => vec![
             "exec".to_owned(),
             "--skip-git-repo-check".to_owned(),
@@ -168,12 +173,18 @@ async fn assert_prompt_single_arg(kind: HostKind) -> TestResult {
         kind,
         r#"#!/bin/sh
 printf 'argc=%s\n' "$#" >&2
-case "$1:$2:$3" in
-  --print:/speckit.specify\ hello\ world* | exec:--skip-git-repo-check:/speckit.specify\ hello\ world* | -p:/speckit.specify\ hello\ world* )
+case "$1:$2:$3:$4" in
+  --print:--output-format:json:/speckit.specify\ hello\ world* )
+    printf 'prompt-ok'
+    ;;
+  exec:--skip-git-repo-check:/speckit.specify\ hello\ world*:* )
+    printf 'prompt-ok'
+    ;;
+  -p:/speckit.specify\ hello\ world*:*:* )
     printf 'prompt-ok'
     ;;
   *)
-    printf 'bad prompt args: %s|%s|%s\n' "$1" "$2" "$3" >&2
+    printf 'bad prompt args: %s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >&2
     exit 7
     ;;
 esac

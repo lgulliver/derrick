@@ -153,6 +153,8 @@ Description of task three.
                 stderr: String::new(),
                 exit_code: 0,
                 elapsed: Duration::from_millis(1),
+                tokens_in: 0,
+                tokens_out: 0,
             })
         }
     }
@@ -1170,6 +1172,8 @@ fi
                     stderr: String::new(),
                     exit_code: 0,
                     elapsed: Duration::from_millis(1),
+                    tokens_in: 0,
+                    tokens_out: 0,
                 })
             }
         }
@@ -1290,6 +1294,8 @@ fi
                     stderr: String::new(),
                     exit_code: 0,
                     elapsed: Duration::from_millis(1),
+                    tokens_in: 0,
+                    tokens_out: 0,
                 })
             }
         }

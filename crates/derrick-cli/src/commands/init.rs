@@ -335,6 +335,10 @@ async fn greenfield_init(
     // This call overwrites any unedited speckit placeholder written above.
     seed_constitution(repo_root, &config, resolved.yes)?;
 
+    // Make an initial commit so `git worktree add ... HEAD` succeeds on the
+    // first `derrick add`. Only runs when the repo has no commits yet.
+    maybe_initial_commit(repo_root)?;
+
     print_summary(&config, resolved.ai_style);
     Ok(CliExitCode::Success)
 }
@@ -964,6 +968,70 @@ fn seed_constitution(
     let content = format_constitution(config.site().name(), &seeds);
     write_file(&constitution_abs, &content)?;
     print_written(&constitution_rel.display().to_string());
+    Ok(())
+}
+
+/// Stage and commit all init-written files when no HEAD exists yet.
+///
+/// `git worktree add ... HEAD` (called by the pipeline runner) fails with
+/// "fatal: invalid reference: HEAD" when the repo has no commits. This
+/// function creates a single initial commit so the first `derrick add`
+/// always works.
+///
+/// Does nothing if the repo already has at least one commit.
+fn maybe_initial_commit(repo_root: &Path) -> Result<(), crate::CliError> {
+    let has_head = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if has_head {
+        return Ok(());
+    }
+
+    // Stage everything derrick just wrote.
+    let add_status = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo_root)
+        .status()
+        .map_err(|source| crate::CliError::Io {
+            path: repo_root.join(".git"),
+            source,
+        })?;
+    if !add_status.success() {
+        // Non-fatal: the user can commit manually if something is odd.
+        if is_styled() {
+            eprintln!("  \x1b[33m⚠\x1b[0m  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`.");
+        } else {
+            eprintln!("  ⚠  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`.");
+        }
+        return Ok(());
+    }
+
+    let commit_status = std::process::Command::new("git")
+        .args(["commit", "-m", "chore: derrick init"])
+        .current_dir(repo_root)
+        .status()
+        .map_err(|source| crate::CliError::Io {
+            path: repo_root.join(".git"),
+            source,
+        })?;
+    if !commit_status.success() {
+        if is_styled() {
+            eprintln!("  \x1b[33m⚠\x1b[0m  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`.");
+        } else {
+            eprintln!("  ⚠  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`.");
+        }
+        return Ok(());
+    }
+
+    if is_styled() {
+        println!("  \x1b[32m·\x1b[0m  initial commit created");
+    } else {
+        println!("  ·  initial commit created");
+    }
     Ok(())
 }
 

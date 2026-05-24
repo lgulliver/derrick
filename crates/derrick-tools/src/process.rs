@@ -73,6 +73,8 @@ pub(crate) async fn run_host(
             stderr,
             exit_code,
             elapsed,
+            tokens_in: 0,
+            tokens_out: 0,
         })
     } else {
         Err(HostError::NonZeroExit {

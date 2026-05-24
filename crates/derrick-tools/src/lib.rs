@@ -97,6 +97,10 @@ pub struct HostResponse {
     pub exit_code: i32,
     /// Wall-clock elapsed time.
     pub elapsed: Duration,
+    /// Input tokens consumed by the host (0 when not reported).
+    pub tokens_in: u32,
+    /// Output tokens produced by the host (0 when not reported).
+    pub tokens_out: u32,
 }
 
 /// Errors returned by host CLI adapters.

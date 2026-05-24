@@ -171,6 +171,8 @@ async fn execute_role_step(
                 id: step.id().to_owned(),
                 message: source.to_string(),
             })?;
+        let step_tokens_in = response.tokens_in;
+        let step_tokens_out = response.tokens_out;
         write_log(log_path, &response.stdout, &response.stderr)?;
         if let Some(before) = pre_specify {
             let wd = working_dir(state, repo_root);
@@ -179,11 +181,10 @@ async fn execute_role_step(
             derrick_assay::io::write_feature_json(wd, &feature_dir)?;
             state.feature_dir = Some(feature_dir);
         }
-        Ok(StepExecution::success(detect_artifacts(
-            step.id(),
-            state,
-            repo_root,
-        )))
+        Ok(
+            StepExecution::success(detect_artifacts(step.id(), state, repo_root))
+                .with_tokens(step_tokens_in, step_tokens_out),
+        )
     } else {
         let role = derrick_assay::io::required_step_text(step.role(), step.id(), "role")?;
         let prompt = step

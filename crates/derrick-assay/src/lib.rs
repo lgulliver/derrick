@@ -416,7 +416,12 @@ pub async fn run_reviewer_rounds(
                     id: step.id().to_owned(),
                     message: source.to_string(),
                 })?;
-            (host_response.stdout, "claude".to_owned(), 0u32, 0u32)
+            (
+                host_response.stdout,
+                "claude".to_owned(),
+                host_response.tokens_in,
+                host_response.tokens_out,
+            )
         } else {
             let model = derrick_models::resolve_role(
                 reviewer_role,
