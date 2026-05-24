@@ -125,6 +125,12 @@ pub struct ManifestStep {
     pub tokens_in: u32,
     #[serde(default)]
     pub tokens_out: u32,
+    /// Raw subprocess output bytes before compression (0 for non-bash steps).
+    #[serde(default)]
+    pub bytes_raw: u32,
+    /// Bytes removed by output compression (0 when off or N/A).
+    #[serde(default)]
+    pub bytes_saved: u32,
 }
 
 impl ManifestStep {
@@ -138,6 +144,8 @@ impl ManifestStep {
             artifacts: record.artifacts.clone(),
             tokens_in: record.tokens_in,
             tokens_out: record.tokens_out,
+            bytes_raw: record.bytes_raw,
+            bytes_saved: record.bytes_saved,
         }
     }
 }
@@ -153,6 +161,8 @@ impl From<ManifestStep> for StepRecord {
             artifacts: step.artifacts,
             tokens_in: step.tokens_in,
             tokens_out: step.tokens_out,
+            bytes_raw: step.bytes_raw,
+            bytes_saved: step.bytes_saved,
         }
     }
 }
@@ -270,5 +280,47 @@ mod tests {
         );
         m.resume_of = Some("run-1".to_owned());
         assert_eq!(m.resume_of.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn manifest_step_bytes_round_trip() {
+        use chrono::Utc;
+        use derrick_assay::types::StepStatus;
+        use std::path::PathBuf;
+
+        let step = ManifestStep {
+            id: "analyze".to_owned(),
+            status: StepStatus::Success,
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            log_path: PathBuf::from(".derrick/runs/r1/step-analyze.log"),
+            artifacts: vec![],
+            tokens_in: 10,
+            tokens_out: 20,
+            bytes_raw: 4096,
+            bytes_saved: 1024,
+        };
+        let json = serde_json::to_string(&step).expect("serialize");
+        let decoded: ManifestStep = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.bytes_raw, 4096);
+        assert_eq!(decoded.bytes_saved, 1024);
+    }
+
+    #[test]
+    fn manifest_step_bytes_default_to_zero_when_absent() {
+        // Old manifests without bytes_raw / bytes_saved should still parse.
+        let json = r#"{
+            "id": "specify",
+            "status": "success",
+            "started_at": "2026-05-24T09:00:00Z",
+            "finished_at": "2026-05-24T09:01:00Z",
+            "log_path": ".derrick/runs/r1/step-specify.log",
+            "artifacts": [],
+            "tokens_in": 5,
+            "tokens_out": 10
+        }"#;
+        let step: ManifestStep = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(step.bytes_raw, 0);
+        assert_eq!(step.bytes_saved, 0);
     }
 }

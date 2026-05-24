@@ -507,9 +507,19 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
             s.total_out / 1_000
         )
     };
-    let savings_note = match s.savings_pct {
-        Some(p) => format!("savings:   {:.0}% (RTK attribution)", f64::from(p) * 100.0),
-        None => "savings:   (attribution not yet wired)".to_owned(),
+    let savings_note = if s.total_bytes_raw > 0 {
+        let pct = 100.0 * s.total_bytes_saved as f64 / s.total_bytes_raw as f64;
+        format!(
+            "compression: {}kb raw → {}kb out  ({:.0}% saved, subprocess output)",
+            s.total_bytes_raw / 1024,
+            (s.total_bytes_raw.saturating_sub(s.total_bytes_saved)) / 1024,
+            pct,
+        )
+    } else {
+        match s.savings_pct {
+            Some(p) => format!("savings:   {:.0}% (RTK attribution)", f64::from(p) * 100.0),
+            None => "compression: (no bash steps recorded yet)".to_owned(),
+        }
     };
     let summary = vec![
         Line::from(today_note),
@@ -535,10 +545,10 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // Build a flat label/value slice for BarChart. We show tokens_in per
-    // step, labelled with the step id. The bar chart widget requires
-    // &[(&str, u64)] backed by a local Vec of owned strings — we keep both
-    // alive until `frame.render_widget` consumes them.
+    // Build a flat label/value slice for BarChart. We show tokens_out per
+    // step (output tokens represent actual LLM work done).  The bar chart
+    // widget requires &[(&str, u64)] backed by a local Vec of owned strings
+    // — we keep both alive until `frame.render_widget` consumes them.
     //
     // Cap each value to u32::MAX so the cast is safe; no real run will
     // approach 4B tokens on a single step.
@@ -549,7 +559,7 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .zip(owned_labels.iter())
         .map(|(st, label)| {
-            let val = st.tokens_in.min(cap);
+            let val = st.tokens_out.min(cap);
             (label.as_str(), val)
         })
         .collect();
@@ -557,7 +567,7 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
     let chart = BarChart::default()
         .block(
             Block::default()
-                .title("Per-step (tokens in, all runs)")
+                .title("Per-step (tokens out, all runs)")
                 .borders(Borders::ALL),
         )
         .data(&bar_data)

@@ -65,6 +65,8 @@ pub async fn execute_step(
             tokens_in,
             tokens_out,
             message,
+            bytes_raw,
+            bytes_saved,
         }) => {
             let status_str = match status {
                 StepStatus::Skipped => "skipped",
@@ -98,6 +100,8 @@ pub async fn execute_step(
                 artifacts,
                 tokens_in,
                 tokens_out,
+                bytes_raw,
+                bytes_saved,
             })
         }
         Err(error) => {
@@ -111,6 +115,8 @@ pub async fn execute_step(
                 artifacts: Vec::new(),
                 tokens_in: 0,
                 tokens_out: 0,
+                bytes_raw: 0,
+                bytes_saved: 0,
             };
             let _ = substrate
                 .record_typed_event(
@@ -159,6 +165,7 @@ async fn execute_role_step(
         } else {
             None
         };
+        let prompt_len = prompt.len();
         let mut request = HostRequest::new(prompt, working_dir(state, repo_root));
         request.headless = true;
         if host_name == "copilot" {
@@ -171,7 +178,12 @@ async fn execute_role_step(
                 id: step.id().to_owned(),
                 message: source.to_string(),
             })?;
-        let step_tokens_in = response.tokens_in;
+        // Use the larger of: CLI-reported input tokens vs prompt-length
+        // estimate.  The CLI only counts the direct user message (not full
+        // Claude Code session context), so this gives a better lower bound.
+        let step_tokens_in = response
+            .tokens_in
+            .max((prompt_len as u32).saturating_div(4));
         let step_tokens_out = response.tokens_out;
         write_log(log_path, &response.stdout, &response.stderr)?;
         if let Some(before) = pre_specify {
@@ -199,13 +211,17 @@ async fn execute_role_step(
             &AuthStore::from_env(),
         )
         .await?;
+        let prompt_len = rendered.len();
         let response = model
             .complete(completion_request(rendered, None, None))
             .await?;
+        let actual_tokens_in = response
+            .tokens_in
+            .max((prompt_len as u32).saturating_div(4));
         write_log(log_path, &response.text, "")?;
         Ok(
             StepExecution::success(detect_artifacts(step.id(), state, repo_root))
-                .with_tokens(response.tokens_in, response.tokens_out),
+                .with_tokens(actual_tokens_in, response.tokens_out),
         )
     }
 }
@@ -718,10 +734,24 @@ async fn execute_bash_step(
     use tokio::process::Command;
     let command = derrick_assay::io::required_step_text(step.command(), step.id(), "command")?;
     let command = render_template(command, &template_context(config, state)?)?;
+
+    // Derive a tool name from the first word of the command for scrubbing.
+    // Strip any path prefix so "cargo test" → "cargo" and "/usr/bin/git" → "git".
+    let tool_name = command
+        .split_whitespace()
+        .next()
+        .map(|w| {
+            std::path::Path::new(w)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(w)
+        })
+        .unwrap_or("");
+
     let working_dir = working_dir(state, repo_root).to_path_buf();
     let output = Command::new("bash")
         .arg("-lc")
-        .arg(command)
+        .arg(&command)
         .current_dir(&working_dir)
         .kill_on_drop(true)
         .output()
@@ -730,11 +760,30 @@ async fn execute_bash_step(
             path: working_dir,
             source,
         })?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    write_log(log_path, &stdout, &stderr)?;
+
+    let bytes_raw = (output.stdout.len().saturating_add(output.stderr.len())) as u32;
+
+    let (stdout_final, stderr_final, bytes_saved) =
+        if config.tools().output_compression().enabled() && !tool_name.is_empty() {
+            let scrubber = derrick_scrub::Scrubber::with_defaults();
+            let (out_scrubbed, out_stats) = scrubber.scrub(tool_name, &output.stdout);
+            let (err_scrubbed, err_stats) = scrubber.scrub(tool_name, &output.stderr);
+            let saved = (out_stats
+                .bytes_in
+                .saturating_sub(out_stats.bytes_out)
+                .saturating_add(err_stats.bytes_in.saturating_sub(err_stats.bytes_out)))
+                as u32;
+            (out_scrubbed, err_scrubbed, saved)
+        } else {
+            (output.stdout.clone(), output.stderr.clone(), 0u32)
+        };
+
+    let stdout_str = String::from_utf8_lossy(&stdout_final);
+    let stderr_str = String::from_utf8_lossy(&stderr_final);
+    write_log(log_path, &stdout_str, &stderr_str)?;
+
     if output.status.success() {
-        Ok(StepExecution::success(Vec::new()))
+        Ok(StepExecution::success(Vec::new()).with_compression(bytes_raw, bytes_saved))
     } else {
         Err(RunError::StepFailed {
             id: step.id().to_owned(),

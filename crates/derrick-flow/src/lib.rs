@@ -1193,6 +1193,8 @@ fi
             artifacts: vec![],
             tokens_in: 0,
             tokens_out: 0,
+            bytes_raw: 0,
+            bytes_saved: 0,
         });
         manifest.steps.push(ManifestStep {
             id: "failme".into(),
@@ -1203,6 +1205,8 @@ fi
             artifacts: vec![],
             tokens_in: 0,
             tokens_out: 0,
+            bytes_raw: 0,
+            bytes_saved: 0,
         });
         assert_eq!(manifest.resume_step_index(), 1); // retry from "failme"
     }
@@ -1234,6 +1238,8 @@ fi
             artifacts: vec![],
             tokens_in: 0,
             tokens_out: 0,
+            bytes_raw: 0,
+            bytes_saved: 0,
         });
         assert_eq!(manifest.resume_step_index(), 1); // next step is index 1
     }
@@ -1265,6 +1271,8 @@ fi
             artifacts: vec![],
             tokens_in: 0,
             tokens_out: 0,
+            bytes_raw: 0,
+            bytes_saved: 0,
         });
         assert_eq!(manifest.resume_step_index(), 0); // retry from "assay"
     }

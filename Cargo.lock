@@ -597,6 +597,7 @@ dependencies = [
  "derrick-assay",
  "derrick-config",
  "derrick-models",
+ "derrick-scrub",
  "derrick-substrate",
  "derrick-substrate-native",
  "derrick-tools",

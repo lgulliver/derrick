@@ -1133,6 +1133,8 @@ impl Runner {
             artifacts: Vec::new(),
             tokens_in: 0,
             tokens_out: 0,
+            bytes_raw: 0,
+            bytes_saved: 0,
         }
     }
 

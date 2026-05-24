@@ -16,6 +16,11 @@ pub struct StepExecution {
     pub tokens_in: u32,
     pub tokens_out: u32,
     pub message: String,
+    /// Raw subprocess output bytes before output compression.
+    pub bytes_raw: u32,
+    /// Bytes removed by output compression (0 when compression is off or the
+    /// step is not a bash step).
+    pub bytes_saved: u32,
 }
 
 impl StepExecution {
@@ -26,6 +31,8 @@ impl StepExecution {
             tokens_in: 0,
             tokens_out: 0,
             message: String::new(),
+            bytes_raw: 0,
+            bytes_saved: 0,
         }
     }
 
@@ -36,6 +43,8 @@ impl StepExecution {
             tokens_in: 0,
             tokens_out: 0,
             message: String::new(),
+            bytes_raw: 0,
+            bytes_saved: 0,
         }
     }
 
@@ -46,12 +55,21 @@ impl StepExecution {
             tokens_in: 0,
             tokens_out: 0,
             message: message.into(),
+            bytes_raw: 0,
+            bytes_saved: 0,
         }
     }
 
     pub fn with_tokens(mut self, tokens_in: u32, tokens_out: u32) -> Self {
         self.tokens_in = tokens_in;
         self.tokens_out = tokens_out;
+        self
+    }
+
+    /// Record subprocess output compression stats for this step.
+    pub fn with_compression(mut self, bytes_raw: u32, bytes_saved: u32) -> Self {
+        self.bytes_raw = bytes_raw;
+        self.bytes_saved = bytes_saved;
         self
     }
 }
@@ -130,6 +148,10 @@ pub struct StepRecord {
     pub tokens_in: u32,
     /// Output tokens produced by model calls in this step (0 for non-model steps).
     pub tokens_out: u32,
+    /// Raw subprocess output bytes before output compression (0 for non-bash steps).
+    pub bytes_raw: u32,
+    /// Bytes removed by output compression (0 when compression is off or N/A).
+    pub bytes_saved: u32,
 }
 
 /// Per-step status.

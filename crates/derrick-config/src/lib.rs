@@ -446,6 +446,7 @@ pub struct Tools {
     git: Git,
     foreman: Foreman,
     code_review: CodeReview,
+    output_compression: OutputCompression,
 }
 
 impl Tools {
@@ -488,6 +489,11 @@ impl Tools {
     pub fn code_review(&self) -> &CodeReview {
         &self.code_review
     }
+
+    /// Returns output-compression configuration.
+    pub fn output_compression(&self) -> &OutputCompression {
+        &self.output_compression
+    }
 }
 
 impl Default for Tools {
@@ -507,6 +513,7 @@ impl Default for Tools {
             git: Git::default(),
             foreman: Foreman::default(),
             code_review: CodeReview::default(),
+            output_compression: OutputCompression::default(),
         }
     }
 }
@@ -550,6 +557,30 @@ impl Default for CodeReview {
             rounds: 2,
             base_branch: "main".to_owned(),
         }
+    }
+}
+
+/// Output-compression configuration.
+///
+/// When enabled, Derrick scrubs subprocess stdout/stderr through
+/// `derrick-scrub` rules before writing to step logs.  This reduces the
+/// bytes that flow into LLM context windows on subsequent steps.
+/// Enabled by default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputCompression {
+    enabled: bool,
+}
+
+impl OutputCompression {
+    /// Returns whether output compression is enabled (default: `true`).
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+impl Default for OutputCompression {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -1591,6 +1622,7 @@ struct ToolsLayer {
     git: Option<GitLayer>,
     foreman: Option<ToolsForemanLayer>,
     code_review: Option<CodeReviewLayer>,
+    output_compression: Option<OutputCompressionLayer>,
 }
 
 impl ToolsLayer {
@@ -1607,6 +1639,11 @@ impl ToolsLayer {
             other.code_review,
             CodeReviewLayer::merge,
         );
+        merge_nested(
+            &mut self.output_compression,
+            other.output_compression,
+            OutputCompressionLayer::merge,
+        );
     }
 
     fn finalize(self) -> Result<Tools, ConfigError> {
@@ -1619,6 +1656,7 @@ impl ToolsLayer {
             git: self.git.unwrap_or_default().finalize()?,
             foreman: self.foreman.unwrap_or_default().finalize(),
             code_review: self.code_review.unwrap_or_default().finalize(),
+            output_compression: self.output_compression.unwrap_or_default().finalize(),
         })
     }
 }
@@ -1634,6 +1672,7 @@ impl From<Tools> for ToolsLayer {
             git: Some(tools.git.into()),
             foreman: Some(tools.foreman.into()),
             code_review: Some(tools.code_review.into()),
+            output_compression: Some(tools.output_compression.into()),
         }
     }
 }
@@ -1673,6 +1712,32 @@ impl From<CodeReview> for CodeReviewLayer {
             role: Some(cr.role),
             rounds: Some(cr.rounds),
             base_branch: Some(cr.base_branch),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputCompressionLayer {
+    enabled: Option<bool>,
+}
+
+impl OutputCompressionLayer {
+    fn merge(&mut self, other: Self) {
+        merge_scalar(&mut self.enabled, other.enabled);
+    }
+
+    fn finalize(self) -> OutputCompression {
+        OutputCompression {
+            enabled: self.enabled.unwrap_or(true),
+        }
+    }
+}
+
+impl From<OutputCompression> for OutputCompressionLayer {
+    fn from(oc: OutputCompression) -> Self {
+        Self {
+            enabled: Some(oc.enabled),
         }
     }
 }
@@ -2960,5 +3025,67 @@ state:
         assert_eq!(config.state().dir(), Path::new("state"));
         assert!(!config.state().log_runs());
         assert_eq!(config.state().worktree_root(), Path::new("state/worktrees"));
+    }
+
+    #[test]
+    fn output_compression_defaults_to_enabled() {
+        let tools = Tools::default();
+        assert!(
+            tools.output_compression().enabled(),
+            "output_compression should be enabled by default"
+        );
+    }
+
+    #[test]
+    fn output_compression_can_be_disabled_via_yaml() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("derrick.yaml");
+        // Write a minimal config with output_compression.enabled: false nested
+        // correctly under tools:.
+        let yaml = r#"
+version: 1
+site:
+  name: test-site
+  prefix: tst
+models:
+  claude-sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-6
+roles:
+  drafter: claude-sonnet
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: false
+    role: drafter
+    reviewers: []
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    agent_identity: derrick-hand
+  output_compression:
+    enabled: false
+pipeline: []
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#;
+        write_file(&path, yaml);
+        let config = Config::load_from_path(&path).expect("load config");
+        assert!(
+            !config.tools().output_compression().enabled(),
+            "output_compression.enabled should be false"
+        );
     }
 }

@@ -422,6 +422,8 @@ pub struct StepTokenSummary {
     pub tokens_in: u64,
     /// Total output tokens produced by this step across all recorded runs.
     pub tokens_out: u64,
+    /// Total subprocess output bytes saved by compression in this step.
+    pub bytes_saved: u64,
 }
 
 /// Aggregate token spend summary derived from run manifests.
@@ -440,6 +442,10 @@ pub struct TokenSummary {
     /// Savings fraction in `[0.0, 1.0]`. `None` until a savings source is
     /// wired (RTK or otherwise).
     pub savings_pct: Option<f32>,
+    /// Total raw subprocess output bytes across all recorded runs.
+    pub total_bytes_raw: u64,
+    /// Total bytes saved by output compression across all recorded runs.
+    pub total_bytes_saved: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +470,10 @@ struct ManifestStepTokens {
     tokens_in: u32,
     #[serde(default)]
     tokens_out: u32,
+    #[serde(default)]
+    bytes_raw: u32,
+    #[serde(default)]
+    bytes_saved: u32,
 }
 
 /// Scan `runs_dir` for `manifest.json` files and aggregate token counts.
@@ -481,7 +491,9 @@ fn load_token_summary(runs_dir: &Path) -> TokenSummary {
     let mut total_out: u64 = 0;
     let mut today_in: u64 = 0;
     let mut today_out: u64 = 0;
-    let mut per_step: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut total_bytes_raw: u64 = 0;
+    let mut total_bytes_saved: u64 = 0;
+    let mut per_step: HashMap<String, (u64, u64, u64)> = HashMap::new();
 
     let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
         return TokenSummary::default();
@@ -505,21 +517,33 @@ fn load_token_summary(runs_dir: &Path) -> TokenSummary {
         }
 
         for step in &manifest.steps {
-            let (si, so) = per_step.entry(step.id.clone()).or_default();
+            total_bytes_raw = total_bytes_raw.saturating_add(u64::from(step.bytes_raw));
+            total_bytes_saved = total_bytes_saved.saturating_add(u64::from(step.bytes_saved));
+            let (si, so, bs) = per_step.entry(step.id.clone()).or_default();
             *si = si.saturating_add(u64::from(step.tokens_in));
             *so = so.saturating_add(u64::from(step.tokens_out));
+            *bs = bs.saturating_add(u64::from(step.bytes_saved));
         }
     }
 
     let mut per_step_vec: Vec<StepTokenSummary> = per_step
         .into_iter()
-        .map(|(step_id, (tokens_in, tokens_out))| StepTokenSummary {
-            step_id,
-            tokens_in,
-            tokens_out,
-        })
+        .map(
+            |(step_id, (tokens_in, tokens_out, bytes_saved))| StepTokenSummary {
+                step_id,
+                tokens_in,
+                tokens_out,
+                bytes_saved,
+            },
+        )
         .collect();
     per_step_vec.sort_by(|a, b| a.step_id.cmp(&b.step_id));
+
+    let savings_pct = if total_bytes_raw > 0 {
+        Some(total_bytes_saved as f32 / total_bytes_raw as f32)
+    } else {
+        None
+    };
 
     TokenSummary {
         total_in,
@@ -527,7 +551,9 @@ fn load_token_summary(runs_dir: &Path) -> TokenSummary {
         today_in,
         today_out,
         per_step: per_step_vec,
-        savings_pct: None,
+        savings_pct,
+        total_bytes_raw,
+        total_bytes_saved,
     }
 }
 
@@ -867,6 +893,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
 
         assert_eq!(summary.total_in, 0);
+    }
+
+    #[test]
+    fn load_token_summary_aggregates_bytes_saved() {
+        let tmp = std::env::temp_dir().join(format!("derrick-test-bytes-{}", std::process::id()));
+        let run_dir = tmp.join("run-001");
+        let _ = std::fs::create_dir_all(&run_dir);
+
+        let manifest = serde_json::json!({
+            "tokens_in": 100,
+            "tokens_out": 50,
+            "started_at": chrono::Utc::now().to_rfc3339(),
+            "steps": [
+                {
+                    "id": "analyze",
+                    "tokens_in": 0,
+                    "tokens_out": 0,
+                    "bytes_raw": 8192,
+                    "bytes_saved": 2048
+                },
+                {
+                    "id": "specify",
+                    "tokens_in": 100,
+                    "tokens_out": 50,
+                    "bytes_raw": 0,
+                    "bytes_saved": 0
+                }
+            ]
+        });
+        let _ = std::fs::write(run_dir.join("manifest.json"), manifest.to_string());
+
+        let summary = load_token_summary(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(summary.total_bytes_raw, 8192);
+        assert_eq!(summary.total_bytes_saved, 2048);
+        // savings_pct should be set: 2048/8192 = 0.25
+        assert!(summary.savings_pct.is_some_and(|p| (p - 0.25).abs() < 1e-4));
+        // Per-step bytes_saved should be wired
+        let analyze = summary.per_step.iter().find(|s| s.step_id == "analyze");
+        assert!(analyze.is_some_and(|s| s.bytes_saved == 2048));
+    }
+
+    #[test]
+    fn load_token_summary_savings_pct_none_when_no_bash_steps() {
+        let tmp = std::env::temp_dir().join(format!("derrick-test-nopct-{}", std::process::id()));
+        let run_dir = tmp.join("run-001");
+        let _ = std::fs::create_dir_all(&run_dir);
+
+        // Only token steps, no bytes_raw
+        let manifest = serde_json::json!({
+            "tokens_in": 100,
+            "tokens_out": 50,
+            "started_at": chrono::Utc::now().to_rfc3339(),
+            "steps": [
+                {"id": "specify", "tokens_in": 100, "tokens_out": 50}
+            ]
+        });
+        let _ = std::fs::write(run_dir.join("manifest.json"), manifest.to_string());
+
+        let summary = load_token_summary(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(summary.total_bytes_raw, 0);
+        assert!(summary.savings_pct.is_none());
     }
 
     // -----------------------------------------------------------------------
