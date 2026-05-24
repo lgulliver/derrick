@@ -811,6 +811,23 @@ fn completions_emit_for_each_shell() -> TestResult {
 }
 
 #[test]
+fn upgrade_without_url_keeps_reserved_message() -> TestResult {
+    let output = derrick()?
+        .arg("upgrade")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_contains(
+        &output,
+        "upgrade not yet available, re-run the install script",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn version_matches_cargo_pkg_version() -> TestResult {
     let output = derrick()?
         .arg("--version")

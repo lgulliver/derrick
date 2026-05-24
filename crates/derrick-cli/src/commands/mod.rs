@@ -41,7 +41,7 @@ pub(crate) enum Command {
     Stack(StackArgs),
     Observe(ObserveArgs),
     Uninstall(UninstallArgs),
-    /// [reserved] Binary self-update (not yet implemented).
+    /// Binary self-update.
     Upgrade(UpgradeArgs),
     Scrub(ScrubArgs),
     Caveman(CavemanArgs),
@@ -134,6 +134,9 @@ pub(crate) struct UpgradeArgs {
     /// Run the upgrade flow even if the current version appears up to date.
     #[arg(long)]
     pub(crate) force: bool,
+    /// Download URL for the replacement binary.
+    #[arg(long, value_name = "URL", hide = true)]
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Debug, Args)]
