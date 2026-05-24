@@ -67,6 +67,7 @@ pub async fn execute_step(
             message,
             bytes_raw,
             bytes_saved,
+            roughneck_tokens_saved,
         }) => {
             let status_str = match status {
                 StepStatus::Skipped => "skipped",
@@ -102,6 +103,7 @@ pub async fn execute_step(
                 tokens_out,
                 bytes_raw,
                 bytes_saved,
+                roughneck_tokens_saved,
             })
         }
         Err(error) => {
@@ -117,6 +119,7 @@ pub async fn execute_step(
                 tokens_out: 0,
                 bytes_raw: 0,
                 bytes_saved: 0,
+                roughneck_tokens_saved: 0,
             };
             let _ = substrate
                 .record_typed_event(
@@ -154,6 +157,12 @@ async fn execute_role_step(
         let command = derrick_assay::io::required_step_text(step.command(), step.id(), "command")?;
         let prompt = render_template(command, &template_context(config, state)?)?;
         let prompt = inject_clarify_answers_for_plan(step.id(), state, repo_root, prompt)?;
+        // Apply roughneck prompt injection if enabled.
+        let prompt = if config.tools().roughneck().enabled() {
+            derrick_roughneck::inject_prompt(&prompt, config.tools().roughneck().level())
+        } else {
+            prompt
+        };
         let host_name = host_name(host);
         let host = hosts
             .get(host_name)
@@ -193,9 +202,18 @@ async fn execute_role_step(
             derrick_assay::io::write_feature_json(wd, &feature_dir)?;
             state.feature_dir = Some(feature_dir);
         }
+        let roughneck_saved = if config.tools().roughneck().enabled() {
+            derrick_roughneck::estimate_tokens_saved(
+                step_tokens_out,
+                config.tools().roughneck().level(),
+            )
+        } else {
+            0
+        };
         Ok(
             StepExecution::success(detect_artifacts(step.id(), state, repo_root))
-                .with_tokens(step_tokens_in, step_tokens_out),
+                .with_tokens(step_tokens_in, step_tokens_out)
+                .with_roughneck(roughneck_saved),
         )
     } else {
         let role = derrick_assay::io::required_step_text(step.role(), step.id(), "role")?;
@@ -204,6 +222,12 @@ async fn execute_role_step(
             .map_or_else(|| state.prompt.clone(), ToOwned::to_owned);
         let rendered = render_template(&prompt, &template_context(config, state)?)?;
         let rendered = inject_clarify_answers_for_plan(step.id(), state, repo_root, rendered)?;
+        // Apply roughneck prompt injection if enabled.
+        let rendered = if config.tools().roughneck().enabled() {
+            derrick_roughneck::inject_prompt(&rendered, config.tools().roughneck().level())
+        } else {
+            rendered
+        };
         let model = derrick_models::resolve_role(
             role,
             config.roles(),
@@ -219,9 +243,18 @@ async fn execute_role_step(
             .tokens_in
             .max((prompt_len as u32).saturating_div(4));
         write_log(log_path, &response.text, "")?;
+        let roughneck_saved = if config.tools().roughneck().enabled() {
+            derrick_roughneck::estimate_tokens_saved(
+                response.tokens_out,
+                config.tools().roughneck().level(),
+            )
+        } else {
+            0
+        };
         Ok(
             StepExecution::success(detect_artifacts(step.id(), state, repo_root))
-                .with_tokens(actual_tokens_in, response.tokens_out),
+                .with_tokens(actual_tokens_in, response.tokens_out)
+                .with_roughneck(roughneck_saved),
         )
     }
 }

@@ -131,6 +131,9 @@ pub struct ManifestStep {
     /// Bytes removed by output compression (0 when off or N/A).
     #[serde(default)]
     pub bytes_saved: u32,
+    /// Output tokens saved by roughneck prompt injection (0 when off or N/A).
+    #[serde(default)]
+    pub roughneck_tokens_saved: u32,
 }
 
 impl ManifestStep {
@@ -146,6 +149,7 @@ impl ManifestStep {
             tokens_out: record.tokens_out,
             bytes_raw: record.bytes_raw,
             bytes_saved: record.bytes_saved,
+            roughneck_tokens_saved: record.roughneck_tokens_saved,
         }
     }
 }
@@ -163,6 +167,7 @@ impl From<ManifestStep> for StepRecord {
             tokens_out: step.tokens_out,
             bytes_raw: step.bytes_raw,
             bytes_saved: step.bytes_saved,
+            roughneck_tokens_saved: step.roughneck_tokens_saved,
         }
     }
 }
@@ -299,11 +304,52 @@ mod tests {
             tokens_out: 20,
             bytes_raw: 4096,
             bytes_saved: 1024,
+            roughneck_tokens_saved: 0,
         };
         let json = serde_json::to_string(&step).expect("serialize");
         let decoded: ManifestStep = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.bytes_raw, 4096);
         assert_eq!(decoded.bytes_saved, 1024);
+    }
+
+    #[test]
+    fn manifest_step_roughneck_round_trip() {
+        use chrono::Utc;
+        use derrick_assay::types::StepStatus;
+        use std::path::PathBuf;
+
+        let step = ManifestStep {
+            id: "plan".to_owned(),
+            status: StepStatus::Success,
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            log_path: PathBuf::from(".derrick/runs/r1/step-plan.log"),
+            artifacts: vec![],
+            tokens_in: 100,
+            tokens_out: 200,
+            bytes_raw: 0,
+            bytes_saved: 0,
+            roughneck_tokens_saved: 500,
+        };
+        let json = serde_json::to_string(&step).expect("serialize");
+        let decoded: ManifestStep = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.roughneck_tokens_saved, 500);
+    }
+
+    #[test]
+    fn manifest_step_roughneck_defaults_to_zero() {
+        let json = r#"{
+            "id": "specify",
+            "status": "success",
+            "started_at": "2026-05-24T09:00:00Z",
+            "finished_at": "2026-05-24T09:01:00Z",
+            "log_path": ".derrick/runs/r1/step-specify.log",
+            "artifacts": [],
+            "tokens_in": 5,
+            "tokens_out": 10
+        }"#;
+        let step: ManifestStep = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(step.roughneck_tokens_saved, 0);
     }
 
     #[test]

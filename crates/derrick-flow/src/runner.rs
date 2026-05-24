@@ -1135,6 +1135,7 @@ impl Runner {
             tokens_out: 0,
             bytes_raw: 0,
             bytes_saved: 0,
+            roughneck_tokens_saved: 0,
         }
     }
 

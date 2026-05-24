@@ -447,6 +447,7 @@ pub struct Tools {
     foreman: Foreman,
     code_review: CodeReview,
     output_compression: OutputCompression,
+    roughneck: Roughneck,
 }
 
 impl Tools {
@@ -494,6 +495,11 @@ impl Tools {
     pub fn output_compression(&self) -> &OutputCompression {
         &self.output_compression
     }
+
+    /// Returns roughneck (LLM output compression) configuration.
+    pub fn roughneck(&self) -> &Roughneck {
+        &self.roughneck
+    }
 }
 
 impl Default for Tools {
@@ -514,6 +520,7 @@ impl Default for Tools {
             foreman: Foreman::default(),
             code_review: CodeReview::default(),
             output_compression: OutputCompression::default(),
+            roughneck: Roughneck::default(),
         }
     }
 }
@@ -581,6 +588,45 @@ impl OutputCompression {
 impl Default for OutputCompression {
     fn default() -> Self {
         Self { enabled: true }
+    }
+}
+
+/// Roughneck (LLM output compression via prompt injection) configuration.
+///
+/// When enabled, Derrick prepends terse-response instructions to each
+/// pipeline step's prompt to cut output tokens. Three intensity levels are
+/// available: `lite`, `full`, `ultra`. See `derrick-roughneck`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Roughneck {
+    enabled: bool,
+    level: String,
+    compress_memory: bool,
+}
+
+impl Roughneck {
+    /// Returns whether roughneck is enabled (default: `true`).
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Returns the configured intensity level (`lite` | `full` | `ultra`).
+    pub fn level(&self) -> &str {
+        &self.level
+    }
+
+    /// Returns whether memory entries should be compressed on read.
+    pub fn compress_memory(&self) -> bool {
+        self.compress_memory
+    }
+}
+
+impl Default for Roughneck {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            level: "full".to_owned(),
+            compress_memory: false,
+        }
     }
 }
 
@@ -1623,6 +1669,7 @@ struct ToolsLayer {
     foreman: Option<ToolsForemanLayer>,
     code_review: Option<CodeReviewLayer>,
     output_compression: Option<OutputCompressionLayer>,
+    roughneck: Option<RoughneckLayer>,
 }
 
 impl ToolsLayer {
@@ -1644,6 +1691,7 @@ impl ToolsLayer {
             other.output_compression,
             OutputCompressionLayer::merge,
         );
+        merge_nested(&mut self.roughneck, other.roughneck, RoughneckLayer::merge);
     }
 
     fn finalize(self) -> Result<Tools, ConfigError> {
@@ -1657,6 +1705,7 @@ impl ToolsLayer {
             foreman: self.foreman.unwrap_or_default().finalize(),
             code_review: self.code_review.unwrap_or_default().finalize(),
             output_compression: self.output_compression.unwrap_or_default().finalize(),
+            roughneck: self.roughneck.unwrap_or_default().finalize(),
         })
     }
 }
@@ -1673,6 +1722,7 @@ impl From<Tools> for ToolsLayer {
             foreman: Some(tools.foreman.into()),
             code_review: Some(tools.code_review.into()),
             output_compression: Some(tools.output_compression.into()),
+            roughneck: Some(tools.roughneck.into()),
         }
     }
 }
@@ -1738,6 +1788,40 @@ impl From<OutputCompression> for OutputCompressionLayer {
     fn from(oc: OutputCompression) -> Self {
         Self {
             enabled: Some(oc.enabled),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoughneckLayer {
+    enabled: Option<bool>,
+    level: Option<String>,
+    compress_memory: Option<bool>,
+}
+
+impl RoughneckLayer {
+    fn merge(&mut self, other: Self) {
+        merge_scalar(&mut self.enabled, other.enabled);
+        merge_scalar(&mut self.level, other.level);
+        merge_scalar(&mut self.compress_memory, other.compress_memory);
+    }
+
+    fn finalize(self) -> Roughneck {
+        Roughneck {
+            enabled: self.enabled.unwrap_or(true),
+            level: self.level.unwrap_or_else(|| "full".to_owned()),
+            compress_memory: self.compress_memory.unwrap_or(false),
+        }
+    }
+}
+
+impl From<Roughneck> for RoughneckLayer {
+    fn from(r: Roughneck) -> Self {
+        Self {
+            enabled: Some(r.enabled),
+            level: Some(r.level),
+            compress_memory: Some(r.compress_memory),
         }
     }
 }
@@ -3034,6 +3118,66 @@ state:
             tools.output_compression().enabled(),
             "output_compression should be enabled by default"
         );
+    }
+
+    #[test]
+    fn roughneck_defaults() {
+        let tools = Tools::default();
+        assert!(tools.roughneck().enabled());
+        assert_eq!(tools.roughneck().level(), "full");
+        assert!(!tools.roughneck().compress_memory());
+    }
+
+    #[test]
+    fn roughneck_can_be_configured_via_yaml() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tmp: {e}"));
+        let path = dir.path().join("derrick.yaml");
+        let yaml = r#"
+version: 1
+site:
+  name: test-site
+  prefix: tst
+models:
+  claude-sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-6
+roles:
+  drafter: claude-sonnet
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: false
+    role: drafter
+    reviewers: []
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    agent_identity: derrick-hand
+  roughneck:
+    enabled: false
+    level: lite
+    compress_memory: true
+pipeline: []
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#;
+        write_file(&path, yaml);
+        let config = Config::load_from_path(&path).expect("load config");
+        assert!(!config.tools().roughneck().enabled());
+        assert_eq!(config.tools().roughneck().level(), "lite");
+        assert!(config.tools().roughneck().compress_memory());
     }
 
     #[test]

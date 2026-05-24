@@ -21,6 +21,9 @@ pub struct StepExecution {
     /// Bytes removed by output compression (0 when compression is off or the
     /// step is not a bash step).
     pub bytes_saved: u32,
+    /// Estimated output tokens saved by roughneck prompt injection (0 when
+    /// roughneck is disabled or the step is not a role/model step).
+    pub roughneck_tokens_saved: u32,
 }
 
 impl StepExecution {
@@ -33,6 +36,7 @@ impl StepExecution {
             message: String::new(),
             bytes_raw: 0,
             bytes_saved: 0,
+            roughneck_tokens_saved: 0,
         }
     }
 
@@ -45,6 +49,7 @@ impl StepExecution {
             message: String::new(),
             bytes_raw: 0,
             bytes_saved: 0,
+            roughneck_tokens_saved: 0,
         }
     }
 
@@ -57,6 +62,7 @@ impl StepExecution {
             message: message.into(),
             bytes_raw: 0,
             bytes_saved: 0,
+            roughneck_tokens_saved: 0,
         }
     }
 
@@ -70,6 +76,12 @@ impl StepExecution {
     pub fn with_compression(mut self, bytes_raw: u32, bytes_saved: u32) -> Self {
         self.bytes_raw = bytes_raw;
         self.bytes_saved = bytes_saved;
+        self
+    }
+
+    /// Record roughneck output-token savings for this step.
+    pub fn with_roughneck(mut self, tokens_saved: u32) -> Self {
+        self.roughneck_tokens_saved = tokens_saved;
         self
     }
 }
@@ -152,6 +164,9 @@ pub struct StepRecord {
     pub bytes_raw: u32,
     /// Bytes removed by output compression (0 when compression is off or N/A).
     pub bytes_saved: u32,
+    /// Estimated output tokens saved by roughneck prompt injection
+    /// (0 when roughneck is disabled or N/A).
+    pub roughneck_tokens_saved: u32,
 }
 
 /// Per-step status.

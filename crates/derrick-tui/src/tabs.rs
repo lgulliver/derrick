@@ -481,7 +481,7 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6), // summary paragraph
+            Constraint::Length(7), // summary paragraph
             Constraint::Min(5),    // per-step bar chart
         ])
         .split(area);
@@ -521,10 +521,19 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
             None => "compression: (no bash steps recorded yet)".to_owned(),
         }
     };
+    let roughneck_note = if s.total_roughneck_saved > 0 {
+        format!(
+            "roughneck: ~{} tokens saved  (prompt injection, est.)",
+            s.total_roughneck_saved
+        )
+    } else {
+        "roughneck: no savings recorded yet".to_string()
+    };
     let summary = vec![
         Line::from(today_note),
         Line::from(alltime_note),
         Line::from(savings_note),
+        Line::from(roughneck_note),
         Line::from("source:    run manifests (.derrick/runs/*/manifest.json)"),
     ];
     frame.render_widget(

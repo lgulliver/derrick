@@ -45,6 +45,10 @@ tools:
   git:
     stacking:
       backend: none
+  roughneck:
+    enabled: true
+    level: full      # lite | full | ultra
+    compress_memory: false
 pipeline:
   - id: specify
     role: drafter

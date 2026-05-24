@@ -424,6 +424,8 @@ pub struct StepTokenSummary {
     pub tokens_out: u64,
     /// Total subprocess output bytes saved by compression in this step.
     pub bytes_saved: u64,
+    /// Total output tokens saved by roughneck prompt injection in this step.
+    pub roughneck_tokens_saved: u64,
 }
 
 /// Aggregate token spend summary derived from run manifests.
@@ -446,6 +448,9 @@ pub struct TokenSummary {
     pub total_bytes_raw: u64,
     /// Total bytes saved by output compression across all recorded runs.
     pub total_bytes_saved: u64,
+    /// Total output tokens saved by roughneck prompt injection across all
+    /// recorded runs.
+    pub total_roughneck_saved: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +479,8 @@ struct ManifestStepTokens {
     bytes_raw: u32,
     #[serde(default)]
     bytes_saved: u32,
+    #[serde(default)]
+    roughneck_tokens_saved: u32,
 }
 
 /// Scan `runs_dir` for `manifest.json` files and aggregate token counts.
@@ -493,7 +500,8 @@ fn load_token_summary(runs_dir: &Path) -> TokenSummary {
     let mut today_out: u64 = 0;
     let mut total_bytes_raw: u64 = 0;
     let mut total_bytes_saved: u64 = 0;
-    let mut per_step: HashMap<String, (u64, u64, u64)> = HashMap::new();
+    let mut total_roughneck_saved: u64 = 0;
+    let mut per_step: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
 
     let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
         return TokenSummary::default();
@@ -519,21 +527,27 @@ fn load_token_summary(runs_dir: &Path) -> TokenSummary {
         for step in &manifest.steps {
             total_bytes_raw = total_bytes_raw.saturating_add(u64::from(step.bytes_raw));
             total_bytes_saved = total_bytes_saved.saturating_add(u64::from(step.bytes_saved));
-            let (si, so, bs) = per_step.entry(step.id.clone()).or_default();
+            total_roughneck_saved =
+                total_roughneck_saved.saturating_add(u64::from(step.roughneck_tokens_saved));
+            let (si, so, bs, rn) = per_step.entry(step.id.clone()).or_default();
             *si = si.saturating_add(u64::from(step.tokens_in));
             *so = so.saturating_add(u64::from(step.tokens_out));
             *bs = bs.saturating_add(u64::from(step.bytes_saved));
+            *rn = rn.saturating_add(u64::from(step.roughneck_tokens_saved));
         }
     }
 
     let mut per_step_vec: Vec<StepTokenSummary> = per_step
         .into_iter()
         .map(
-            |(step_id, (tokens_in, tokens_out, bytes_saved))| StepTokenSummary {
-                step_id,
-                tokens_in,
-                tokens_out,
-                bytes_saved,
+            |(step_id, (tokens_in, tokens_out, bytes_saved, roughneck_tokens_saved))| {
+                StepTokenSummary {
+                    step_id,
+                    tokens_in,
+                    tokens_out,
+                    bytes_saved,
+                    roughneck_tokens_saved,
+                }
             },
         )
         .collect();
@@ -554,6 +568,7 @@ fn load_token_summary(runs_dir: &Path) -> TokenSummary {
         savings_pct,
         total_bytes_raw,
         total_bytes_saved,
+        total_roughneck_saved,
     }
 }
 
@@ -934,6 +949,41 @@ mod tests {
         // Per-step bytes_saved should be wired
         let analyze = summary.per_step.iter().find(|s| s.step_id == "analyze");
         assert!(analyze.is_some_and(|s| s.bytes_saved == 2048));
+    }
+
+    #[test]
+    fn load_token_summary_aggregates_roughneck_saved() {
+        let tmp = std::env::temp_dir().join(format!("derrick-test-rn-{}", std::process::id()));
+        let run_dir = tmp.join("run-001");
+        let _ = std::fs::create_dir_all(&run_dir);
+
+        let manifest = serde_json::json!({
+            "tokens_in": 100,
+            "tokens_out": 50,
+            "started_at": chrono::Utc::now().to_rfc3339(),
+            "steps": [
+                {
+                    "id": "plan",
+                    "tokens_in": 50,
+                    "tokens_out": 25,
+                    "roughneck_tokens_saved": 300
+                },
+                {
+                    "id": "specify",
+                    "tokens_in": 50,
+                    "tokens_out": 25,
+                    "roughneck_tokens_saved": 200
+                }
+            ]
+        });
+        let _ = std::fs::write(run_dir.join("manifest.json"), manifest.to_string());
+
+        let summary = load_token_summary(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(summary.total_roughneck_saved, 500);
+        let plan = summary.per_step.iter().find(|s| s.step_id == "plan");
+        assert!(plan.is_some_and(|s| s.roughneck_tokens_saved == 300));
     }
 
     #[test]
