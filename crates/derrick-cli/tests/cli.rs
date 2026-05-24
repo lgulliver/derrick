@@ -19,6 +19,7 @@ fn repo() -> TestResult<TempDir> {
 fn greenfield(dir: &Path) -> TestResult<assert_cmd::assert::Assert> {
     Ok(derrick()?
         .current_dir(dir)
+        .env("DERRICK_SKIP_PREREQS", "1")
         .args([
             "init",
             "--greenfield",
@@ -37,6 +38,7 @@ fn adopted_init(dir: &Path) -> TestResult<assert_cmd::assert::Assert> {
     fs::write(dir.join("CLAUDE.md"), "# Claude\n")?;
     Ok(derrick()?
         .current_dir(dir)
+        .env("DERRICK_SKIP_PREREQS", "1")
         .args(["init", "--site", "test", "--prefix", "tst"])
         .assert())
 }
@@ -202,6 +204,7 @@ fn bare_init_adopts_brownfield_repo() -> TestResult {
 
     let output = derrick()?
         .current_dir(dir.path())
+        .env("DERRICK_SKIP_PREREQS", "1")
         .args(["init", "--site", "test", "--prefix", "tst"])
         .assert()
         .success()
@@ -262,6 +265,7 @@ fn greenfield_init_overwrites_with_force() -> TestResult {
 
     derrick()?
         .current_dir(dir.path())
+        .env("DERRICK_SKIP_PREREQS", "1")
         .args([
             "init",
             "--greenfield",
@@ -286,6 +290,7 @@ fn init_refuses_outside_git_repo() -> TestResult {
 
     let output = derrick()?
         .current_dir(dir.path())
+        .env("DERRICK_SKIP_PREREQS", "1")
         .arg("init")
         .assert()
         .failure()
@@ -296,6 +301,7 @@ fn init_refuses_outside_git_repo() -> TestResult {
 
     let output = derrick()?
         .current_dir(dir.path())
+        .env("DERRICK_SKIP_PREREQS", "1")
         .args(["init", "--greenfield"])
         .assert()
         .failure()
@@ -313,6 +319,7 @@ fn greenfield_init_validates_prefix() -> TestResult {
 
     let output = derrick()?
         .current_dir(dir.path())
+        .env("DERRICK_SKIP_PREREQS", "1")
         .args(["init", "--greenfield", "--prefix", "BAD"])
         .assert()
         .failure()
@@ -342,6 +349,7 @@ fn init_accepts_project_alias_for_site() -> TestResult {
     let dir = repo()?;
     derrick()?
         .current_dir(dir.path())
+        .env("DERRICK_SKIP_PREREQS", "1")
         .args([
             "init",
             "--greenfield",
@@ -362,6 +370,7 @@ fn greenfield_crew_init_writes_mode_roles_and_crew_steps() -> TestResult {
     let dir = repo()?;
     derrick()?
         .current_dir(dir.path())
+        .env("DERRICK_SKIP_PREREQS", "1")
         .args([
             "init",
             "--greenfield",

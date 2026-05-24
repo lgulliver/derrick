@@ -920,7 +920,13 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
 
 /// Check that every required tool is present on PATH.
 /// Returns `Err` with a styled message listing every missing tool.
+///
+/// Bypassed when `DERRICK_SKIP_PREREQS=1` is set (used in tests and CI
+/// environments where the full tool-chain is not installed).
 fn check_prerequisites() -> Result<(), crate::CliError> {
+    if std::env::var_os("DERRICK_SKIP_PREREQS").is_some() {
+        return Ok(());
+    }
     struct Tool {
         name: &'static str,
         bins: &'static [&'static str],

@@ -25,6 +25,7 @@ fn make_repo(mode: &str) -> TestResult<TempDir> {
     fs::create_dir(dir.path().join(".git"))?;
     derrick()?
         .current_dir(dir.path())
+        .env("DERRICK_SKIP_PREREQS", "1")
         .args([
             "init",
             "--greenfield",
