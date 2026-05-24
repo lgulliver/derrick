@@ -63,7 +63,7 @@ Every byte across a model boundary earns its place.
 Scrub and caveman fire automatically at every model boundary via Claude Code / Codex hooks written by `derrick init`. Roughneck fires at every model step via prompt injection; configure via `tools.roughneck` in `derrick.yaml`.
 
 ### 🔀 Parallelism
-Independent work runs concurrently. Each `/add-feature` run gets an isolated git worktree. The foreman dispatches multiple hands (agents) in parallel. Multi-reviewer assay runs reviewers sequentially today (true fan-out once the executor is `Arc`-wrapped, §9.C.5).
+Independent work runs concurrently. Each `/add-feature` run gets an isolated git worktree. The foreman dispatches multiple hands (agents) in parallel via `join_all`. Multi-reviewer assay fans reviewers out concurrently, bounded by `parallelism.assay_max` (§9.C.5).
 
 ---
 
