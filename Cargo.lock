@@ -718,6 +718,7 @@ dependencies = [
  "derrick-config",
  "derrick-stack",
  "derrick-substrate",
+ "futures",
  "rusqlite",
  "serde_json",
  "tempfile",

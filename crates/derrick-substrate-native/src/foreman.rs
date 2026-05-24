@@ -18,6 +18,7 @@ use derrick_substrate::{
     BlockReason, EventKind, EventScope, HandId, InReviewMetadata, Substrate, SubstrateError,
     Ticket, TicketId,
 };
+use futures::future::join_all;
 use thiserror::Error;
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -1199,25 +1200,43 @@ impl Foreman {
         if inflight >= cap {
             return Ok(());
         }
-        let mut budget = cap - inflight;
+        let budget = (cap - inflight) as usize;
         let ready = self.substrate.list_ready_tickets_ordered().await?;
-        for ticket in ready {
-            if budget == 0 {
-                break;
-            }
+
+        // Phase 1 (sequential): resolve each ticket's parent branch. These are
+        // fast substrate reads and must happen before dispatch so the dispatcher
+        // receives accurate stack context.
+        let mut candidates: Vec<(Ticket, String)> = Vec::with_capacity(budget);
+        for ticket in ready.into_iter().take(budget) {
             let parent_branch = self.compute_parent_branch(&ticket).await?;
-            let ctx = DispatchContext {
-                ticket: &ticket,
+            candidates.push((ticket, parent_branch));
+        }
+
+        // Phase 2 (concurrent): fan-out all dispatch futures. Build the
+        // `DispatchContext` values first (before constructing futures) so
+        // each future can borrow a live `DispatchContext` from `contexts`
+        // for its entire poll lifetime. `HandDispatcher` is `Send + Sync`,
+        // so concurrent borrows of `self.dispatcher` are safe. `join_all`
+        // does not require `'static` — it polls all futures on the current
+        // task, which is sufficient for I/O-bound dispatchers.
+        let contexts: Vec<DispatchContext<'_>> = candidates
+            .iter()
+            .map(|(ticket, parent_branch)| DispatchContext {
+                ticket,
                 worktree_root: &self.repo_root,
-                parent_branch,
-            };
-            match self.dispatcher.dispatch(&ctx).await {
+                parent_branch: parent_branch.clone(),
+            })
+            .collect();
+        let results = join_all(contexts.iter().map(|ctx| self.dispatcher.dispatch(ctx))).await;
+
+        // Phase 3: process results and update report. Errors on individual
+        // tickets propagate using the same policy as the sequential version.
+        for ((ticket, _), result) in candidates.iter().zip(results) {
+            match result {
                 Ok(_) => {
                     report.dispatched.push(ticket.id.clone());
-                    budget -= 1;
                 }
                 Err(DispatchError::NotImplemented { kind }) => {
-                    // Surface the T013 pointer as an event; don't fail the tick.
                     self.substrate
                         .record_typed_event(
                             EventScope::Ticket(ticket.id.clone()),

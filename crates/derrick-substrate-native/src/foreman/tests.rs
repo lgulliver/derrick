@@ -1243,3 +1243,102 @@ async fn restack_conflict_blocks_ticket() {
         .iter()
         .any(|action| matches!(action, VerifierAction::RestackConflict { .. })));
 }
+
+// ---- Fan-out concurrency proof -------------------------------------------
+
+/// Dispatcher that sleeps for `delay` before dispatching. Used by the
+/// wall-time concurrency test to prove that dispatches run in parallel.
+#[derive(Clone)]
+struct SleepingDispatcher {
+    delay: std::time::Duration,
+    hand: HandId,
+    substrate: Arc<NativeSubstrate>,
+}
+
+impl SleepingDispatcher {
+    fn new(delay: std::time::Duration, hand: HandId, substrate: Arc<NativeSubstrate>) -> Self {
+        Self {
+            delay,
+            hand,
+            substrate,
+        }
+    }
+}
+
+#[async_trait]
+impl HandDispatcher for SleepingDispatcher {
+    fn kind(&self) -> &'static str {
+        "sleeping"
+    }
+
+    async fn dispatch(&self, ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
+        tokio::time::sleep(self.delay).await;
+        match self
+            .substrate
+            .assign_to_hand(&ctx.ticket.id, &self.hand)
+            .await
+        {
+            Ok(_) => Ok(DispatchResult {
+                hand: self.hand.clone(),
+                completed_synchronously: false,
+            }),
+            // Tolerate lost races (another concurrent task won the assignment).
+            Err(SubstrateError::Invalid { field, .. }) if field == "state" => Ok(DispatchResult {
+                hand: self.hand.clone(),
+                completed_synchronously: false,
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+/// Proves that `dispatch_ready` fans out N ticket dispatches concurrently:
+/// total wall time must be less than N × per-ticket delay.
+///
+/// With 4 tickets each sleeping 50 ms, sequential dispatch would take ≥ 200 ms.
+/// Concurrent dispatch finishes in ~50 ms. We use 180 ms as the ceiling to
+/// give the CI runner plenty of headroom while still catching any regression
+/// back to sequential dispatch.
+#[tokio::test]
+async fn dispatch_ready_fans_out_concurrently() {
+    let per_ticket_delay = std::time::Duration::from_millis(50);
+    let ticket_count: u32 = 4;
+    // Sequential floor: N × delay (200 ms). Ceiling with headroom: 180 ms.
+    // A passing run should finish around 50–60 ms; we allow up to 180 ms.
+    let sequential_floor = per_ticket_delay * ticket_count;
+    let ceiling = sequential_floor * 9 / 10; // 90% of sequential = 180 ms
+
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+    let hand = register_hand_simple(&substrate, "h1").await;
+
+    for n in 1..=ticket_count {
+        new_ticket(&substrate, &format!("drk-{n}")).await;
+    }
+
+    let foreman = build_foreman(
+        substrate.clone(),
+        Box::new(MockRepoState::new()),
+        Box::new(SleepingDispatcher::new(
+            per_ticket_delay,
+            hand,
+            substrate.clone(),
+        )),
+        tempdir.path().to_path_buf(),
+    )
+    .with_batch_max(ticket_count);
+
+    let start = std::time::Instant::now();
+    let report = foreman.tick().await.expect("tick");
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        report.dispatched.len(),
+        ticket_count as usize,
+        "all {ticket_count} tickets should be dispatched"
+    );
+    assert!(
+        elapsed < ceiling,
+        "wall time {elapsed:?} >= ceiling {ceiling:?}; dispatches appear sequential"
+    );
+}

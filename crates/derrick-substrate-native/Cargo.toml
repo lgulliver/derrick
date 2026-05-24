@@ -12,6 +12,7 @@ chrono = { workspace = true }
 derrick-config = { path = "../derrick-config" }
 derrick-stack = { path = "../derrick-stack" }
 derrick-substrate = { path = "../derrick-substrate" }
+futures = { workspace = true }
 rusqlite = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
