@@ -1,0 +1,30 @@
+The `CopilotHandDispatcher` currently dispatches to GitHub cloud (creates GH issues, assigns @copilot). This doesn't work and is a later concern. The immediate requirement is a local CLI dispatcher that runs `copilot` as a subprocess per ticket, matching how Claude hands work.
+
+## What to build
+
+A `LocalCopilotHandDispatcher` that mirrors `ClaudeHandDispatcher` (`crates/derrick-claude/src/dispatcher.rs`):
+
+1. Per ticket: create a worktree, write a queue file (task description + context), spawn `copilot -p <queue_file_contents> --add-dir <worktree>` as a subprocess
+2. Apply Roughneck injection to the prompt before spawning (same as Claude hands — call `derrick_roughneck::inject_prompt`)
+3. Apply Scrub to subprocess output (same as Claude hands)
+4. Track token stats via substrate Note events: `"hand stats: tokens_in=N tokens_out=N roughneck_saved=N bytes_raw=N bytes_saved=N"`
+5. Transition ticket state: Ready → InFlight when spawned, InFlight → Done/Failed when process exits
+6. The dispatcher should live in `crates/derrick-copilot/src/local_dispatcher.rs` (or similar) and implement the same `HandDispatcher` trait
+
+## Reference files to read first
+- `crates/derrick-claude/src/dispatcher.rs` — the working Claude hand dispatcher (this is the model to follow)
+- `crates/derrick-copilot/src/dispatcher.rs` — existing cloud dispatcher (understand the trait impl shape)
+- `crates/derrick-tools/src/hosts/copilot.rs` — `CopilotHost` already knows how to invoke `copilot -p ...`, reuse this
+- `DESIGN.md` around line 1208-1215 — spec for local copilot CLI invocation
+
+## Wire-up
+- In `crates/derrick-cli/src/commands/foreman.rs` where `CopilotHandDispatcher` is constructed, switch to `LocalCopilotHandDispatcher` (or make it config-switchable with `tools.copilot.backend: cli|cloud`, defaulting to `cli`)
+- Update `templates/derrick.yaml.in` if needed
+
+## After implementing
+- `rtk cargo build -p derrick-copilot` — must compile clean
+- `rtk cargo test -p derrick-copilot` — tests must pass
+- Add at minimum one unit test for the local dispatcher (can use a mock/stub process)
+- Commit and push: `"feat(copilot): local CLI hand dispatcher — spawn copilot subprocess per ticket"`
+
+Use rtk prefix on all commands per CLAUDE.md.

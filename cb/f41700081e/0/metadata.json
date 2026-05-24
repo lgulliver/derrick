@@ -1,0 +1,92 @@
+{
+  "cli_version": "0.5.4",
+  "checkpoint_id": "cbf41700081e",
+  "session_id": "b4f42fa8-29e4-47a2-bc1a-a917e9d5170c",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-24T21:47:38.359874Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "Cargo.lock",
+    "crates/derrick-cli/src/commands/foreman.rs",
+    "crates/derrick-copilot/Cargo.toml",
+    "crates/derrick-copilot/src/lib.rs",
+    "crates/derrick-copilot/src/local_dispatcher.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "e52e260935fa",
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 96104,
+    "cache_read_tokens": 3926619,
+    "output_tokens": 19365,
+    "api_call_count": 37
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-24T21:47:38.120283Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 755,
+    "human_modified": 12,
+    "human_removed": 0,
+    "total_committed": 755,
+    "total_lines_changed": 767,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 5131,
+      "user_lines_removed": 76,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/scheduled_tasks.lock": 1,
+        ".claude/settings.json": 196,
+        ".claude/settings.local.json": 14,
+        ".claude/skills/speckit-analyze/SKILL.md": 260,
+        ".claude/skills/speckit-checklist/SKILL.md": 372,
+        ".claude/skills/speckit-clarify/SKILL.md": 254,
+        ".claude/skills/speckit-constitution/SKILL.md": 157,
+        ".claude/skills/speckit-implement/SKILL.md": 209,
+        ".claude/skills/speckit-plan/SKILL.md": 156,
+        ".claude/skills/speckit-specify/SKILL.md": 330,
+        ".claude/skills/speckit-tasks/SKILL.md": 202,
+        ".claude/skills/speckit-taskstoissues/SKILL.md": 106,
+        ".claude/worktrees/agent-a33613ab74c871391/templates/.idea/runConfigurations/derrick_doctor.xml": 11,
+        ".claude/worktrees/agent-a33613ab74c871391/templates/.idea/runConfigurations/derrick_foreman_start.xml": 11,
+        ".claude/worktrees/agent-a33613ab74c871391/templates/.idea/runConfigurations/derrick_observe.xml": 11,
+        ".claude/worktrees/agent-a33613ab74c871391/templates/.vscode/tasks.json": 40,
+        ".claude/worktrees/agent-a79d8a1ec8886c75d/templates/.idea/runConfigurations/derrick_doctor.xml": 11,
+        ".claude/worktrees/agent-a79d8a1ec8886c75d/templates/.idea/runConfigurations/derrick_foreman_start.xml": 11,
+        ".claude/worktrees/agent-a79d8a1ec8886c75d/templates/.idea/runConfigurations/derrick_observe.xml": 11,
+        ".claude/worktrees/agent-a79d8a1ec8886c75d/templates/.vscode/tasks.json": 40,
+        ".codex/instructions.md": 20,
+        ".derrick/.gitignore": 5,
+        ".specify/init-options.json": 6,
+        ".specify/integration.json": 7,
+        ".specify/integrations/claude.manifest.json": 18,
+        ".specify/integrations/claude/scripts/update-context.ps1": 23,
+        ".specify/integrations/claude/scripts/update-context.sh": 28,
+        ".specify/integrations/speckit.manifest.json": 18,
+        ".specify/scripts/bash/check-prerequisites.sh": 190,
+        ".specify/scripts/bash/common.sh": 375,
+        ".specify/scripts/bash/create-new-feature.sh": 413,
+        ".specify/scripts/bash/setup-plan.sh": 73,
+        ".specify/scripts/bash/update-agent-context.sh": 857,
+        ".specify/templates/agent-file-template.md": 28,
+        ".specify/templates/checklist-template.md": 40,
+        ".specify/templates/constitution-template.md": 50,
+        ".specify/templates/plan-template.md": 104,
+        ".specify/templates/spec-template.md": 128,
+        ".specify/templates/tasks-template.md": 251,
+        "derrick.yaml": 94
+      },
+      "user_removed_per_file": {
+        ".claude/settings.json": 76
+      }
+    }
+  ]
+}

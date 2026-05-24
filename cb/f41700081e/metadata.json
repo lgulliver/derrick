@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.5.4",
+  "checkpoint_id": "cbf41700081e",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "Cargo.lock",
+    "crates/derrick-cli/src/commands/foreman.rs",
+    "crates/derrick-copilot/Cargo.toml",
+    "crates/derrick-copilot/src/lib.rs",
+    "crates/derrick-copilot/src/local_dispatcher.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/cb/f41700081e/0/metadata.json",
+      "transcript": "/cb/f41700081e/0/full.jsonl",
+      "content_hash": "/cb/f41700081e/0/content_hash.txt",
+      "prompt": "/cb/f41700081e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 42,
+    "cache_creation_tokens": 96104,
+    "cache_read_tokens": 3926619,
+    "output_tokens": 19365,
+    "api_call_count": 37
+  }
+}
