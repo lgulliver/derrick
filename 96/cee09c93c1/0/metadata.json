@@ -1,0 +1,36 @@
+{
+  "cli_version": "0.5.4",
+  "checkpoint_id": "96cee09c93c1",
+  "session_id": "afe85386-afc1-42f7-8060-dafb2e333f54",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-24T20:37:10.082931Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "DESIGN.md"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "50bec904f880",
+  "checkpoint_transcript_start": 142,
+  "transcript_lines_at_start": 142,
+  "token_usage": {
+    "input_tokens": 6,
+    "cache_creation_tokens": 2319,
+    "cache_read_tokens": 486335,
+    "output_tokens": 1598,
+    "api_call_count": 6
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-24T20:37:09.80774Z",
+    "agent_lines": 6,
+    "agent_removed": 3,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 6,
+    "total_lines_changed": 9,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
