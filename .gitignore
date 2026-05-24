@@ -42,6 +42,9 @@ Thumbs.db
 .derrick/derrick.db-wal
 .derrick/worktrees/
 
+# Claude Code agent worktrees (runtime state, never committed)
+.claude/worktrees/
+
 # Local secrets (never committed)
 .env
 .env.local
