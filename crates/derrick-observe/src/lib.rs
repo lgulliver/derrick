@@ -17,7 +17,7 @@ use derrick_config::Config;
 use derrick_substrate::Substrate;
 use derrick_substrate_native::{NativeConfig, NativeSubstrate};
 use derrick_tui::{
-    install_panic_hook, run_event_loop, App, DataModel, MemoryEntry, StackNode, Tab,
+    install_panic_hook, run_event_loop, App, DataModel, EventLoopPaths, MemoryEntry, StackNode, Tab,
 };
 
 const MEMORY_PREVIEW_CHARS: usize = 200;
@@ -70,7 +70,8 @@ pub async fn observe(initial_tab: Tab, _site: Option<String>) -> anyhow::Result<
         Ok(g) => g.clone(),
         Err(p) => p.into_inner().clone(),
     };
-    let data = DataModel::refresh(&*substrate, &sn, &memory)
+    let runs_dir = state_dir.join("runs");
+    let data = DataModel::refresh(&*substrate, &sn, &memory, Some(runs_dir.as_path()))
         .await
         .context("initial data refresh")?;
     let mut app = App::new(initial_tab, data);
@@ -88,8 +89,11 @@ pub async fn observe(initial_tab: Tab, _site: Option<String>) -> anyhow::Result<
         Arc::clone(&substrate),
         stack_nodes,
         memory_entries,
-        watch_paths,
-        Some(state_dir.join("memory-prune-queue.json")),
+        EventLoopPaths {
+            watch_paths,
+            prune_queue_path: Some(state_dir.join("memory-prune-queue.json")),
+            runs_dir: Some(runs_dir),
+        },
         &mut terminal,
     )
     .await;

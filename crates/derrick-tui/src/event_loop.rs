@@ -74,6 +74,20 @@ fn spawn_watcher(paths: Vec<PathBuf>) -> mpsc::Receiver<()> {
     rx
 }
 
+/// File-system and path configuration for the event loop.
+///
+/// Passed as a single argument to keep `run_event_loop`'s arity below
+/// the clippy `too_many_arguments` threshold.
+pub struct EventLoopPaths {
+    /// Paths the `notify` watcher should watch for filesystem changes.
+    pub watch_paths: Vec<PathBuf>,
+    /// Path to the JSON file where memory slug prune requests are queued.
+    pub prune_queue_path: Option<PathBuf>,
+    /// Path to `.derrick/runs/` for token aggregation from run manifests.
+    /// `None` disables token tracking.
+    pub runs_dir: Option<PathBuf>,
+}
+
 /// Run the event loop until `app.quit` is set.
 ///
 /// `stack_nodes` and `memory_entries` are read each tick to pick up updates
@@ -84,13 +98,17 @@ pub async fn run_event_loop<B: Backend>(
     substrate: Arc<dyn Substrate>,
     stack_nodes: Arc<std::sync::RwLock<Vec<StackNode>>>,
     memory_entries: Arc<std::sync::RwLock<Vec<MemoryEntry>>>,
-    watch_paths: Vec<PathBuf>,
-    prune_queue_path: Option<std::path::PathBuf>,
+    paths: EventLoopPaths,
     terminal: &mut Terminal<B>,
 ) -> anyhow::Result<()>
 where
     <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
 {
+    let EventLoopPaths {
+        watch_paths,
+        prune_queue_path,
+        runs_dir,
+    } = paths;
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -166,7 +184,7 @@ where
                 Ok(g) => g.clone(),
                 Err(p) => p.into_inner().clone(),
             };
-            match DataModel::refresh(&*substrate, &sn, &me).await {
+            match DataModel::refresh(&*substrate, &sn, &me, runs_dir.as_deref()).await {
                 Ok(data) => app.set_data(data),
                 Err(e) => tracing::warn!("data refresh failed: {e}"),
             }

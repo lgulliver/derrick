@@ -5,14 +5,16 @@
 //! (stack nodes). The renderer modules consume `&DataModel` and never call
 //! the substrate directly.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use derrick_substrate::{
     EventKind, EventScope, ForemanMode, ForemanStatus, Substrate, SubstrateError, Ticket,
     TicketFilter, TicketState, TypedEvent,
 };
+use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
 // Stack summary
@@ -301,18 +303,122 @@ fn summarise_event(kind: &EventKind) -> String {
     }
 }
 
-/// Aggregate token spend summary (placeholder — v1 has no per-event token
-/// metadata in the substrate).
+/// Per-step aggregate token spend (across all runs).
+#[derive(Clone, Debug, Default)]
+pub struct StepTokenSummary {
+    /// Pipeline step identifier (e.g. `"specify"`, `"plan"`, `"assay"`).
+    pub step_id: String,
+    /// Total input tokens consumed by this step across all recorded runs.
+    pub tokens_in: u64,
+    /// Total output tokens produced by this step across all recorded runs.
+    pub tokens_out: u64,
+}
+
+/// Aggregate token spend summary derived from run manifests.
 #[derive(Clone, Debug, Default)]
 pub struct TokenSummary {
-    /// Total prompt tokens recorded in the substrate.
+    /// All-time total input tokens.
     pub total_in: u64,
-    /// Total completion tokens recorded in the substrate.
+    /// All-time total output tokens.
     pub total_out: u64,
-    /// Savings fraction in `[0.0, 1.0]` from the RTK token proxy
-    /// (e.g. `0.87` means 87% of raw tokens were saved). `None` until RTK
-    /// reporting is plumbed into the substrate.
+    /// Input tokens consumed by runs that started today (UTC day).
+    pub today_in: u64,
+    /// Output tokens produced by runs that started today (UTC day).
+    pub today_out: u64,
+    /// Per-step breakdown aggregated across all runs, sorted by step_id.
+    pub per_step: Vec<StepTokenSummary>,
+    /// Savings fraction in `[0.0, 1.0]`. `None` until a savings source is
+    /// wired (RTK or otherwise).
     pub savings_pct: Option<f32>,
+}
+
+// ---------------------------------------------------------------------------
+// Minimal manifest deserialization — only the token fields we need.
+// Lives here so derrick-tui does not depend on derrick-flow.
+// ---------------------------------------------------------------------------
+
+/// Deserializes only the token-relevant fields of a run manifest JSON file.
+#[derive(Deserialize)]
+struct ManifestTokens {
+    tokens_in: u64,
+    tokens_out: u64,
+    started_at: DateTime<Utc>,
+    #[serde(default)]
+    steps: Vec<ManifestStepTokens>,
+}
+
+#[derive(Deserialize)]
+struct ManifestStepTokens {
+    id: String,
+    #[serde(default)]
+    tokens_in: u32,
+    #[serde(default)]
+    tokens_out: u32,
+}
+
+/// Scan `runs_dir` for `manifest.json` files and aggregate token counts.
+///
+/// Returns a zeroed `TokenSummary` when the directory is absent or unreadable.
+fn load_token_summary(runs_dir: &Path) -> TokenSummary {
+    let today_start = Utc::now()
+        .with_hour(0)
+        .and_then(|t| t.with_minute(0))
+        .and_then(|t| t.with_second(0))
+        .and_then(|t| t.with_nanosecond(0))
+        .unwrap_or_else(Utc::now);
+
+    let mut total_in: u64 = 0;
+    let mut total_out: u64 = 0;
+    let mut today_in: u64 = 0;
+    let mut today_out: u64 = 0;
+    let mut per_step: HashMap<String, (u64, u64)> = HashMap::new();
+
+    let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
+        return TokenSummary::default();
+    };
+
+    for entry in dir_entries.flatten() {
+        let manifest_path = entry.path().join("manifest.json");
+        let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest) = serde_json::from_str::<ManifestTokens>(&content) else {
+            continue;
+        };
+
+        total_in = total_in.saturating_add(manifest.tokens_in);
+        total_out = total_out.saturating_add(manifest.tokens_out);
+
+        if manifest.started_at >= today_start {
+            today_in = today_in.saturating_add(manifest.tokens_in);
+            today_out = today_out.saturating_add(manifest.tokens_out);
+        }
+
+        for step in &manifest.steps {
+            let (si, so) = per_step.entry(step.id.clone()).or_default();
+            *si = si.saturating_add(u64::from(step.tokens_in));
+            *so = so.saturating_add(u64::from(step.tokens_out));
+        }
+    }
+
+    let mut per_step_vec: Vec<StepTokenSummary> = per_step
+        .into_iter()
+        .map(|(step_id, (tokens_in, tokens_out))| StepTokenSummary {
+            step_id,
+            tokens_in,
+            tokens_out,
+        })
+        .collect();
+    per_step_vec.sort_by(|a, b| a.step_id.cmp(&b.step_id));
+
+    TokenSummary {
+        total_in,
+        total_out,
+        today_in,
+        today_out,
+        per_step: per_step_vec,
+        savings_pct: None,
+    }
 }
 
 /// One row in the Memory tab.
@@ -354,12 +460,17 @@ impl DataModel {
         Self::default()
     }
 
-    /// Pulls fresh data from `substrate` and merges the injected stack and
-    /// memory state.
+    /// Pulls fresh data from `substrate` and merges the injected stack,
+    /// memory, and run-manifest state.
+    ///
+    /// `runs_dir` should point to the `.derrick/runs/` directory so that
+    /// token counts can be aggregated from the per-run manifests. Pass
+    /// `None` in tests or contexts where manifests are unavailable.
     pub async fn refresh(
         substrate: &dyn Substrate,
         stack_nodes: &[StackNode],
         memory_entries: &[MemoryEntry],
+        runs_dir: Option<&Path>,
     ) -> Result<Self, SubstrateError> {
         let site = substrate.site().await?;
         let tickets = substrate.list_tickets(TicketFilter::default()).await?;
@@ -411,12 +522,14 @@ impl DataModel {
         let ticket_rows: Vec<TicketRow> = tickets.iter().map(TicketRow::from).collect();
         let event_rows: Vec<EventRow> = events.iter().map(EventRow::from).collect();
 
+        let token_summary = runs_dir.map(load_token_summary).unwrap_or_default();
+
         Ok(Self {
             overview,
             tickets: ticket_rows,
             stack_nodes: stack_nodes.to_vec(),
             events: event_rows,
-            token_summary: TokenSummary::default(),
+            token_summary,
             memory_entries: memory_entries.to_vec(),
             last_refresh: Some(Utc::now()),
             site_name: site.name().to_owned(),

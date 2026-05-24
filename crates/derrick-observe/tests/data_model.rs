@@ -56,7 +56,7 @@ async fn data_model_counts_reflect_substrate() {
         seed_ticket(&substrate, id).await;
     }
 
-    let data = match DataModel::refresh(&substrate, &[], &[]).await {
+    let data = match DataModel::refresh(&substrate, &[], &[], None).await {
         Ok(d) => d,
         Err(e) => unreachable!("refresh: {e}"),
     };

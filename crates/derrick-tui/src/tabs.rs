@@ -140,28 +140,28 @@ fn render_overview(frame: &mut Frame, area: Rect, app: &App) {
         None => "last assay:   (none yet)".to_owned(),
     };
 
-    // ── row 6: token spend ───────────────────────────────────────────────
+    // ── row 6: token spend (today only) ─────────────────────────────────
     let ts = &app.data.token_summary;
-    let tokens_line = if ts.total_in == 0 && ts.total_out == 0 {
+    let tokens_line = if ts.today_in == 0 && ts.today_out == 0 {
         "tokens today: (no data)".to_owned()
     } else {
         match ts.savings_pct {
             Some(pct) => {
                 // savings_pct is the fraction of raw tokens saved; actual =
                 // raw * (1 - pct).
-                let raw_k = ts.total_in / 1_000;
-                let actual_k = (ts.total_in as f64 * f64::from(1.0 - pct) / 1_000.0) as u64;
+                let raw_k = ts.today_in / 1_000;
+                let actual_k = (ts.today_in as f64 * f64::from(1.0 - pct) / 1_000.0) as u64;
                 format!(
-                    "tokens today: raw {}k → actual {}k (-{:.0}%)",
+                    "tokens today: raw {}k \u{2192} actual {}k (-{:.0}%)",
                     raw_k,
                     actual_k,
                     f64::from(pct) * 100.0
                 )
             }
             None => format!(
-                "tokens today: {}k in · {}k out",
-                ts.total_in / 1_000,
-                ts.total_out / 1_000,
+                "tokens today: {}k in \u{00b7} {}k out",
+                ts.today_in / 1_000,
+                ts.today_out / 1_000,
             ),
         }
     };
@@ -373,28 +373,89 @@ fn render_activity(frame: &mut Frame, area: Rect, app: &App) {
 fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(5)])
+        .constraints([
+            Constraint::Length(6), // summary paragraph
+            Constraint::Min(5),    // per-step bar chart
+        ])
         .split(area);
 
     let s = &app.data.token_summary;
+
+    // ── Summary paragraph ────────────────────────────────────────────────
+    let today_note = if s.today_in == 0 && s.today_out == 0 {
+        "today:     (no runs yet today)".to_owned()
+    } else {
+        format!(
+            "today:     {}k in / {}k out",
+            s.today_in / 1_000,
+            s.today_out / 1_000
+        )
+    };
+    let alltime_note = if s.total_in == 0 {
+        "all-time:  (no data)".to_owned()
+    } else {
+        format!(
+            "all-time:  {}k in / {}k out",
+            s.total_in / 1_000,
+            s.total_out / 1_000
+        )
+    };
+    let savings_note = match s.savings_pct {
+        Some(p) => format!("savings:   {:.0}% (RTK attribution)", f64::from(p) * 100.0),
+        None => "savings:   (attribution not yet wired)".to_owned(),
+    };
     let summary = vec![
-        Line::from(format!("total in:  {}", s.total_in)),
-        Line::from(format!("total out: {}", s.total_out)),
-        Line::from("(full savings attribution deferred — see plan §Tokens)"),
+        Line::from(today_note),
+        Line::from(alltime_note),
+        Line::from(savings_note),
+        Line::from("source:    run manifests (.derrick/runs/*/manifest.json)"),
     ];
     frame.render_widget(
         Paragraph::new(summary).block(Block::default().title("Tokens").borders(Borders::ALL)),
         chunks[0],
     );
 
-    let data = [
-        ("in", u64::min(s.total_in, u64::from(u32::MAX))),
-        ("out", u64::min(s.total_out, u64::from(u32::MAX))),
-    ];
+    // ── Per-step bar chart ───────────────────────────────────────────────
+    if s.per_step.is_empty() {
+        frame.render_widget(
+            Paragraph::new("(no step data — run `derrick add` to generate token records)").block(
+                Block::default()
+                    .title("Per-step breakdown")
+                    .borders(Borders::ALL),
+            ),
+            chunks[1],
+        );
+        return;
+    }
+
+    // Build a flat label/value slice for BarChart. We show tokens_in per
+    // step, labelled with the step id. The bar chart widget requires
+    // &[(&str, u64)] backed by a local Vec of owned strings — we keep both
+    // alive until `frame.render_widget` consumes them.
+    //
+    // Cap each value to u32::MAX so the cast is safe; no real run will
+    // approach 4B tokens on a single step.
+    let cap = u64::from(u32::MAX);
+    let owned_labels: Vec<String> = s.per_step.iter().map(|st| st.step_id.clone()).collect();
+    let bar_data: Vec<(&str, u64)> = s
+        .per_step
+        .iter()
+        .zip(owned_labels.iter())
+        .map(|(st, label)| {
+            let val = st.tokens_in.min(cap);
+            (label.as_str(), val)
+        })
+        .collect();
+
     let chart = BarChart::default()
-        .block(Block::default().title("Breakdown").borders(Borders::ALL))
-        .data(&data)
-        .bar_width(5);
+        .block(
+            Block::default()
+                .title("Per-step (tokens in, all runs)")
+                .borders(Borders::ALL),
+        )
+        .data(&bar_data)
+        .bar_width(9)
+        .bar_gap(1);
     frame.render_widget(chart, chunks[1]);
 }
 

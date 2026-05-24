@@ -14,6 +14,6 @@ pub mod tabs;
 pub use app::{App, FilterState};
 pub use data::{
     DataModel, EventRow, ForemanStatusSnapshot, LastAssaySnapshot, MemoryEntry, OverviewData,
-    ParseTabError, StackNode, StackSummary, Tab, TicketRow, TokenSummary,
+    ParseTabError, StackNode, StackSummary, StepTokenSummary, Tab, TicketRow, TokenSummary,
 };
-pub use event_loop::{install_panic_hook, run_event_loop};
+pub use event_loop::{install_panic_hook, run_event_loop, EventLoopPaths};
