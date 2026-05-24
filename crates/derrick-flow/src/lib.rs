@@ -770,7 +770,10 @@ fi
     }
 
     #[tokio::test]
-    async fn assay_revise_past_rounds_halts_pipeline() -> TestResult {
+    async fn assay_revise_past_rounds_continues_pipeline() -> TestResult {
+        // When the reviewer consistently returns `revise` and rounds are
+        // exhausted, the pipeline should treat it as accept_with_conditions
+        // and continue — no halt, no interactive prompt.
         let reviewer = reviewer_script(
             "#!/bin/sh\nprintf '## Suggested revisions\\nonly objection\\n## Verdict\\nrevise\\n'",
         )?;
@@ -784,13 +787,13 @@ fi
                 ADD_FEATURE_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
-                    run_id: Some("revise-halt".to_owned()),
+                    run_id: Some("revise-accept-conditions".to_owned()),
                     ..PipelineInput::default()
                 },
             )
             .await?;
 
-        assert_eq!(outcome.status, RunStatus::Halted);
+        assert_eq!(outcome.status, RunStatus::Success);
         Ok(())
     }
 

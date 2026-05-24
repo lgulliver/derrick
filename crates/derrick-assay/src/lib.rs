@@ -92,63 +92,20 @@ pub async fn execute_assay(
                 if outcome.constitution_violations.is_empty() {
                     Ok(StepExecution::success(vec![verdict_path_rel])
                         .with_tokens(tokens_in, tokens_out))
-                } else if config.tools().assay().auto_execute() {
-                    eprintln!(
-                        "  {} {} {}",
-                        "\u{26a0}".yellow(),
-                        "Constitution violation — cannot auto-execute".yellow(),
-                        "\u{26a0}".yellow()
-                    );
-                    for viol in &outcome.constitution_violations {
-                        eprintln!("  {}  {}", "\u{2022}".yellow(), viol.yellow());
-                    }
-                    Ok(StepExecution::halted(
-                        vec![verdict_path_rel],
-                        format!(
-                            "Constitution violations prevent auto-execute:\n{}",
-                            outcome.constitution_violations.join("\n")
-                        ),
-                    )
-                    .with_tokens(tokens_in, tokens_out))
                 } else {
+                    // Constitution risks noted — log and continue. They are
+                    // informational; only an explicit `reject` halts the pipeline.
                     eprintln!(
                         "  {} {} {}",
                         "\u{26a0}".yellow(),
-                        "Constitution violation detected".yellow(),
+                        "Constitution risks noted (accepted with conditions)".yellow(),
                         "\u{26a0}".yellow()
                     );
                     for viol in &outcome.constitution_violations {
                         eprintln!("  {}  {}", "\u{2022}".yellow(), viol.yellow());
                     }
-                    eprintln!(
-                        "  {} {}",
-                        "Constitution changes require human approval.".yellow(),
-                        "Override?".yellow()
-                    );
-                    eprint!("  {} Accept anyway? [y/N] ", "\u{276f}".cyan());
-                    std::io::stderr().flush().ok();
-                    let mut answer = String::new();
-                    std::io::stdin()
-                        .read_line(&mut answer)
-                        .map_err(|source| RunError::Io {
-                            path: PathBuf::from("<stdin>"),
-                            source,
-                        })?;
-                    if answer.trim().eq_ignore_ascii_case("y")
-                        || answer.trim().eq_ignore_ascii_case("yes")
-                    {
-                        Ok(StepExecution::success(vec![verdict_path_rel])
-                            .with_tokens(tokens_in, tokens_out))
-                    } else {
-                        Ok(StepExecution::halted(
-                            vec![verdict_path_rel],
-                            format!(
-                                "Constitution violations rejected by human:\n{}",
-                                outcome.constitution_violations.join("\n")
-                            ),
-                        )
+                    Ok(StepExecution::success(vec![verdict_path_rel])
                         .with_tokens(tokens_in, tokens_out))
-                    }
                 }
             }
             "reject" => Ok(
@@ -156,22 +113,29 @@ pub async fn execute_assay(
                     .with_tokens(tokens_in, tokens_out),
             ),
             _ => {
+                // `revise` after rounds exhausted = accept_with_conditions.
+                // Risks are logged; the pipeline continues autonomously.
                 let msg =
                     if outcome.verdict == "revise" && outcome.constitution_violations.is_empty() {
                         format!(
-                            "Revise loop exhausted after {} rounds. Latest review: {}",
-                            outcome.rounds_used, outcome.role
+                            "Review risks noted after {} rounds (continuing).",
+                            outcome.rounds_used
                         )
                     } else if outcome.verdict == "revise" {
                         format!(
-                            "Constitution violations persist after revise loop:\n{}",
+                            "Review risks noted (continuing):\n{}",
                             outcome.constitution_violations.join("\n")
                         )
                     } else {
                         format!("assay completed with verdict: {}", outcome.verdict)
                     };
-                eprintln!("  {} {}", "\u{26a0}".yellow(), msg.yellow());
-                Ok(StepExecution::halted(vec![verdict_path_rel], msg)
+                eprintln!(
+                    "  {} {} {}",
+                    "assay".cyan(),
+                    "\u{26a0}".yellow(),
+                    msg.yellow()
+                );
+                Ok(StepExecution::success(vec![verdict_path_rel])
                     .with_tokens(tokens_in, tokens_out))
             }
         };
@@ -339,8 +303,6 @@ pub async fn run_reviewer_rounds(
         );
         return Ok(ReviewerRoundOutcome::Skipped);
     }
-    let auto_execute = config.tools().assay().auto_execute();
-
     let codex_fallback = detect_codex_fallback(config, reviewer_role).await?;
     if codex_fallback {
         if hosts.get("claude").is_none() {
@@ -367,7 +329,7 @@ pub async fn run_reviewer_rounds(
     let mut tokens_in_total: u32 = 0;
     let mut tokens_out_total: u32 = 0;
     let mut last_constitution_violations: Vec<String> = Vec::new();
-    let mut max_rounds = rounds;
+    let max_rounds = rounds;
     let mut round = 1usize;
     let mut round_summaries: Vec<(usize, String, String, usize, String)> = Vec::new();
     let mut previous_objections: Option<String> = None;
@@ -665,60 +627,15 @@ pub async fn run_reviewer_rounds(
                 write_rebuttal_transcript(&transcript_path, &replan_delta)?;
             }
             "revise" => {
-                // Rounds exhausted
-                if auto_execute {
-                    eprintln!(
-                        "  {} {} Maximum {} rounds reached — models could not agree.",
-                        step.id().cyan(),
-                        "\u{26a0}".yellow(),
-                        max_rounds
-                    );
-                    write_verdict_transcript(&transcript_path, "revise", round)?;
-                    print_round_summaries(&round_summaries);
-                    let violations = last_constitution_violations.clone();
-                    return Ok(ReviewerRoundOutcome::Decided(ReviewerOutcome {
-                        role: reviewer_role.to_owned(),
-                        verdict: "revise".to_owned(),
-                        verdict_path: verdict_path.clone(),
-                        tokens_in: tokens_in_total,
-                        tokens_out: tokens_out_total,
-                        constitution_violations: violations,
-                        rounds_used: round as u32,
-                    }));
-                }
+                // Rounds exhausted — surface unresolved risks to the caller,
+                // which will treat them as accept_with_conditions and continue.
+                // No interactive prompt; the pipeline is fully autonomous.
                 eprintln!(
-                    "  {} {} Maximum {} rounds reached. Continue with more?",
-                    "\u{276f}".cyan(),
+                    "  {} {} Maximum {} rounds reached — unresolved risks logged.",
                     step.id().cyan(),
+                    "\u{26a0}".yellow(),
                     max_rounds
                 );
-                eprint!("  {} Continue assay rounds? [y/N] ", "\u{276f}".cyan());
-                std::io::stderr().flush().ok();
-                let mut answer = String::new();
-                std::io::stdin()
-                    .read_line(&mut answer)
-                    .map_err(|source| RunError::Io {
-                        path: PathBuf::from("<stdin>"),
-                        source,
-                    })?;
-                if answer.trim().eq_ignore_ascii_case("y")
-                    || answer.trim().eq_ignore_ascii_case("yes")
-                {
-                    let objections = suggested_revisions(&response_text).ok_or_else(|| {
-                        RunError::StepFailed {
-                            id: step.id().to_owned(),
-                            message: "could not parse suggested revisions from reviewer response"
-                                .to_owned(),
-                        }
-                    })?;
-                    let replan_delta =
-                        replan_from_objections(config, &hosts, working_dir, state, objections)
-                            .await?;
-                    write_rebuttal_transcript(&transcript_path, &replan_delta)?;
-                    max_rounds = max_rounds.saturating_add(10);
-                    round += 1;
-                    continue;
-                }
                 write_verdict_transcript(&transcript_path, "revise", round)?;
                 print_round_summaries(&round_summaries);
                 let violations = last_constitution_violations.clone();
@@ -816,6 +733,9 @@ pub fn reconcile_verdicts(
     combined_path: &Path,
     repo_root: &Path,
 ) -> Result<StepExecution, RunError> {
+    // A hard `reject` from any reviewer is a real blocker.
+    // A `revise` (rounds exhausted) is treated as accept_with_conditions.
+    let any_hard_reject = outcomes.iter().any(|o| o.verdict == "reject");
     let all_accept = outcomes.iter().all(|o| o.verdict == "accept");
     let summary = outcomes
         .iter()
@@ -823,47 +743,35 @@ pub fn reconcile_verdicts(
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Derive the final verdict respecting on_split policy but treating
+    // `revise` as `accept_with_conditions` rather than an automatic reject.
     let final_verdict: &str = match on_split {
         OnSplit::Reject => {
-            if all_accept {
-                "accept"
-            } else {
+            if any_hard_reject {
                 "reject"
+            } else {
+                "accept" // includes revise-exhausted outcomes
             }
         }
         OnSplit::Majority => {
-            let accepts = outcomes.iter().filter(|o| o.verdict == "accept").count();
-            let rejects = outcomes.iter().filter(|o| o.verdict != "accept").count();
-            if accepts > rejects {
+            // Count explicit rejects as blockers; revise counts as accept.
+            let hard_rejects = outcomes.iter().filter(|o| o.verdict == "reject").count();
+            let non_rejects = outcomes.len().saturating_sub(hard_rejects);
+            if non_rejects > hard_rejects {
                 "accept"
             } else {
                 "reject"
             }
         }
         OnSplit::Human => {
-            if all_accept {
-                "accept"
+            // `on_split: human` used to trigger an interactive prompt.
+            // In autonomous mode, fall back to majority semantics so the
+            // pipeline can proceed headlessly. A deliberate `reject` still
+            // halts the pipeline.
+            if any_hard_reject {
+                "reject"
             } else {
-                let mut stdout = std::io::stdout();
-                let _ = writeln!(stdout, "Reviewer split:");
-                for o in outcomes {
-                    let _ = writeln!(stdout, "  {}: {}", o.role, o.verdict);
-                }
-                let _ = write!(stdout, "Accept overall? [y/N] ");
-                let _ = stdout.flush();
-                let mut answer = String::new();
-                std::io::stdin()
-                    .read_line(&mut answer)
-                    .map_err(|source| RunError::Io {
-                        path: PathBuf::from("<stdin>"),
-                        source,
-                    })?;
-                let trimmed = answer.trim();
-                if trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
-                    "accept"
-                } else {
-                    "reject"
-                }
+                "accept"
             }
         }
     };
@@ -896,38 +804,37 @@ pub fn reconcile_verdicts(
         .map(|o| o.tokens_out)
         .fold(0u32, |a, b| a.saturating_add(b));
 
-    let all_constitution_clean = outcomes
-        .iter()
-        .all(|o| o.constitution_violations.is_empty());
-
     match final_verdict {
-        "accept" if all_constitution_clean => {
-            Ok(StepExecution::success(artifacts).with_tokens(tokens_in, tokens_out))
-        }
-        "accept" => {
-            let violations: Vec<&str> = outcomes
-                .iter()
-                .flat_map(|o| o.constitution_violations.iter().map(|s| s.as_str()))
-                .collect();
-            let msg = format!(
-                "Constitution violations detected:\n{}",
-                violations.join("\n")
-            );
-            eprintln!(
-                "  {} {}",
-                "\u{26a0}".yellow(),
-                "Constitution violations found in multi-reviewer assay".yellow()
-            );
-            for v in &violations {
-                eprintln!("  {}  {}", "\u{2022}".yellow(), v.yellow());
-            }
-            Ok(StepExecution::halted(artifacts, msg).with_tokens(tokens_in, tokens_out))
-        }
-        _ => Ok(StepExecution::halted(
+        "reject" => Ok(StepExecution::halted(
             artifacts,
             format!("assay rejected (on_split: {policy_name})"),
         )
         .with_tokens(tokens_in, tokens_out)),
+        _ => {
+            // accept or accept_with_conditions — log any constitution risks and continue.
+            let violations: Vec<&str> = outcomes
+                .iter()
+                .flat_map(|o| o.constitution_violations.iter().map(|s| s.as_str()))
+                .collect();
+            let has_revise = outcomes.iter().any(|o| o.verdict == "revise");
+            if !violations.is_empty() {
+                eprintln!(
+                    "  {} {}",
+                    "\u{26a0}".yellow(),
+                    "Constitution risks noted (continuing)".yellow()
+                );
+                for v in &violations {
+                    eprintln!("  {}  {}", "\u{2022}".yellow(), v.yellow());
+                }
+            } else if !all_accept && has_revise {
+                eprintln!(
+                    "  {} {}",
+                    "assay".cyan(),
+                    "Unresolved risks noted — continuing.".yellow()
+                );
+            }
+            Ok(StepExecution::success(artifacts).with_tokens(tokens_in, tokens_out))
+        }
     }
 }
 
