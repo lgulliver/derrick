@@ -429,6 +429,151 @@ fi
         Ok(())
     }
 
+    // ---- bridge auto-remediation tests ----
+
+    /// Pipeline with bridge only (no foreman) — tickets stay in `ready` state
+    /// after bridge, making it easy to move them to terminal states for tests.
+    fn add_feature_pipeline_bridge_only() -> String {
+        format!(
+            "{}\n  - id: bridge\n    runner: derrick\n    inputs: [\"{{{{feature_dir}}}}/tasks.md\"]\n    batch: \"br-{{{{run_id}}}}\"\n",
+            add_feature_pipeline()
+        )
+    }
+
+    #[tokio::test]
+    async fn bridge_recreates_tickets_that_are_terminal() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        // Use a pipeline WITHOUT foreman so tickets stay in `ready` (not in_flight)
+        // after run 1, allowing us to mark them done via the substrate API.
+        let (dir, runner) = runner(&yaml_crew(
+            &add_feature_pipeline_bridge_only(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+
+        // Run 1: creates tst-0 … tst-2 in `ready` state.
+        let outcome1 = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("remediate-run-1".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(outcome1.status, RunStatus::Success);
+
+        // Mark tickets as `done` via the substrate API (mark_ticket_done_manually
+        // works on any non-terminal ticket; they are currently `ready`).
+        use derrick_substrate::{ManualDoneAttestation, Substrate, TicketId};
+        let db_path = dir.path().join(".derrick/derrick.db");
+        {
+            let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
+            let substrate_for_setup = NativeSubstrate::open(
+                NativeConfig {
+                    db_path: db_path.clone(),
+                    worktree_root: dir.path().join(".derrick/worktrees"),
+                },
+                config.site().clone(),
+            )
+            .await?;
+            for id_str in &["tst-0", "tst-1", "tst-2"] {
+                let id = TicketId::new(*id_str)?;
+                substrate_for_setup
+                    .mark_ticket_done_manually(
+                        &id,
+                        ManualDoneAttestation {
+                            claimant: "test-automation".to_owned(),
+                            note: "terminal for re-dispatch test".to_owned(),
+                        },
+                    )
+                    .await?;
+            }
+            let conn = rusqlite::Connection::open(&db_path)?;
+            let done_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM tickets WHERE state = 'done'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(done_count, 3, "pre-condition: all 3 tickets should be done");
+        }
+
+        // Run 2: bridge should detect terminal tickets, delete and recreate them.
+        let outcome2 = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("remediate-run-2".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(outcome2.status, RunStatus::Success);
+
+        // All 3 tickets should be back in `ready` state.
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let ready_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tickets WHERE state = 'ready'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            ready_count, 3,
+            "tickets from run-2 should be recreated as ready; got {ready_count}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bridge_skips_tickets_that_are_active() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (dir, runner) = runner(&yaml_crew(
+            &add_feature_pipeline_with_dispatch(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+
+        // Run 1: creates tst-0 … tst-2 in `ready` state, then foreman dispatches
+        // them → `in_flight`.
+        let outcome1 = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("skip-run-1".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(outcome1.status, RunStatus::Success);
+
+        // Run 2: tickets are now `in_flight` (active). Bridge should skip them,
+        // not error, and the pipeline should succeed.
+        let outcome2 = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("skip-run-2".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(outcome2.status, RunStatus::Success);
+
+        // Total distinct ticket IDs should still be exactly 3 — no duplicates.
+        let db_path = dir.path().join(".derrick/derrick.db");
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let ticket_count: i64 =
+            conn.query_row("SELECT COUNT(DISTINCT id) FROM tickets", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(ticket_count, 3, "no duplicate tickets should be created");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn add_feature_happy_path_writes_all_artifacts() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
