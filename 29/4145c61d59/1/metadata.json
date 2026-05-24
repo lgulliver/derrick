@@ -1,0 +1,54 @@
+{
+  "cli_version": "0.5.4",
+  "checkpoint_id": "294145c61d59",
+  "session_id": "afe85386-afc1-42f7-8060-dafb2e333f54",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-24T20:36:33.207106Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "README.md"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "50bec904f880",
+  "token_usage": {
+    "input_tokens": 28,
+    "cache_creation_tokens": 80049,
+    "cache_read_tokens": 1559119,
+    "output_tokens": 4386,
+    "api_call_count": 23
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-24T20:36:33.100525Z",
+    "agent_lines": 1,
+    "agent_removed": 1,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "total_lines_changed": 2,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 160,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.local.json": 14,
+        ".claude/worktrees/agent-a33613ab74c871391/templates/.idea/runConfigurations/derrick_doctor.xml": 11,
+        ".claude/worktrees/agent-a33613ab74c871391/templates/.idea/runConfigurations/derrick_foreman_start.xml": 11,
+        ".claude/worktrees/agent-a33613ab74c871391/templates/.idea/runConfigurations/derrick_observe.xml": 11,
+        ".claude/worktrees/agent-a33613ab74c871391/templates/.vscode/tasks.json": 40,
+        ".claude/worktrees/agent-a79d8a1ec8886c75d/templates/.idea/runConfigurations/derrick_doctor.xml": 11,
+        ".claude/worktrees/agent-a79d8a1ec8886c75d/templates/.idea/runConfigurations/derrick_foreman_start.xml": 11,
+        ".claude/worktrees/agent-a79d8a1ec8886c75d/templates/.idea/runConfigurations/derrick_observe.xml": 11,
+        ".claude/worktrees/agent-a79d8a1ec8886c75d/templates/.vscode/tasks.json": 40
+      }
+    }
+  ]
+}
