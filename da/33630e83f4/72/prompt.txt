@@ -1,0 +1,35 @@
+[ROUGHNECK:FULL] Respond in fragments and bullets. Skip preambles ("I will now…"), affirmations ("Great!"), and closing summaries. Use one line per decision. Preserve all code, paths, identifiers, and technical values verbatim. Omit nothing of substance.
+
+# Derrick ticket: Task 4: Implement asset selection and version comparison (pure logic)
+
+You are implementing a ticket dispatched by derrick's crew-mode foreman.
+Complete ALL steps below in order. Do not stop until the final review step is done.
+
+## Ticket metadata
+- **ID**: der-3
+- **Batch**: br-20260524t203938z
+- **Branch**: `derrick/br-20260524t203938z/der-3`
+- **Base**: `main`
+- **Worktree**: `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-3`
+
+## Specification
+
+- **Crate**: `crates/derrick-cli`
+- **Depends on**: Task 1, Task 3
+- **What**: Implement `fn select_asset<'a>(assets: &'a [ReleaseAsset]) -> Option<&'a ReleaseAsset>` mapping `(std::env::consts::OS, std::env::consts::ARCH)` to the expected target-triple substring. Implement version comparison: parse `env!("CARGO_PKG_VERSION")` and the release `tag_name` (strip leading `v`) as `semver::Version`; compare to determine upgrade-available / already-current / older. Write unit tests for all supported platform/arch combinations and all version comparison cases (newer, equal, older, pre-release suffix).
+- **Done when**: All unit tests pass without network access; `select_asset` returns `None` for an unknown platform; pre-release (`1.0.0-alpha.1`) is correctly treated as less than `1.0.0`.
+
+---
+
+## Required steps
+
+1. Work inside the worktree `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-3`. The branch `derrick/br-20260524t203938z/der-3` is already checked out there.
+2. Implement the specification above. Commit all changes with conventional
+   commit messages.
+3. Push the branch: `git push -u origin derrick/br-20260524t203938z/der-3`
+4. Capture HEAD SHA: `git rev-parse HEAD`
+5. Hand back to the foreman:
+   `derrick ticket review der-3 --branch derrick/br-20260524t203938z/der-3 --head-sha <HEAD_SHA>`
+
+**Do not open a PR yourself** — the foreman handles PR creation when stacking
+is configured.
