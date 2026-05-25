@@ -1,0 +1,35 @@
+[ROUGHNECK:FULL] Respond in fragments and bullets. Skip preambles ("I will now…"), affirmations ("Great!"), and closing summaries. Use one line per decision. Preserve all code, paths, identifiers, and technical values verbatim. Omit nothing of substance.
+
+# Derrick ticket: Task 5: Implement atomic binary replacement
+
+You are implementing a ticket dispatched by derrick's crew-mode foreman.
+Complete ALL steps below in order. Do not stop until the final review step is done.
+
+## Ticket metadata
+- **ID**: der-4
+- **Batch**: br-20260524t203938z
+- **Branch**: `derrick/br-20260524t203938z/der-4`
+- **Base**: `main`
+- **Worktree**: `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-4`
+
+## Specification
+
+- **Crate**: `crates/derrick-cli`
+- **Depends on**: Task 3
+- **What**: Implement the download-and-replace logic: resolve `current_exe`, create a `NamedTempFile` in the same directory (ensuring same-filesystem rename), stream downloaded bytes into it, set the executable permission bit on Unix (`std::os::unix::fs::PermissionsExt`), then `std::fs::rename` atomically. Add a `#[cfg(target_os = "windows")]` branch that renames the current binary to `<exe>.old` before placing the new one, and prints a note to delete it manually. Ensure temp file is cleaned up on any error path; fail with a helpful message on permission-denied at rename time.
+- **Done when**: On a Unix system, a test binary can be replaced atomically; the original is never partially overwritten; a mid-download failure leaves the original untouched; `clippy` clean with no `unwrap`/`expect`.
+
+---
+
+## Required steps
+
+1. Work inside the worktree `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-4`. The branch `derrick/br-20260524t203938z/der-4` is already checked out there.
+2. Implement the specification above. Commit all changes with conventional
+   commit messages.
+3. Push the branch: `git push -u origin derrick/br-20260524t203938z/der-4`
+4. Capture HEAD SHA: `git rev-parse HEAD`
+5. Hand back to the foreman:
+   `derrick ticket review der-4 --branch derrick/br-20260524t203938z/der-4 --head-sha <HEAD_SHA>`
+
+**Do not open a PR yourself** — the foreman handles PR creation when stacking
+is configured.
