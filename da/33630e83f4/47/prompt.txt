@@ -1,0 +1,35 @@
+[ROUGHNECK:FULL] Respond in fragments and bullets. Skip preambles ("I will now…"), affirmations ("Great!"), and closing summaries. Use one line per decision. Preserve all code, paths, identifiers, and technical values verbatim. Omit nothing of substance.
+
+# Derrick ticket: Task 3: Implement `upgrade::github` — `ReleaseClient` trait and `ReqwestReleaseClient`
+
+You are implementing a ticket dispatched by derrick's crew-mode foreman.
+Complete ALL steps below in order. Do not stop until the final review step is done.
+
+## Ticket metadata
+- **ID**: der-2
+- **Batch**: br-20260524t203938z
+- **Branch**: `derrick/br-20260524t203938z/der-2`
+- **Base**: `main`
+- **Worktree**: `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-2`
+
+## Specification
+
+- **Crate**: `crates/derrick-cli`
+- **Depends on**: Task 1
+- **What**: Create a private `upgrade::github` sub-module (either a separate file or inline in `upgrade.rs`). Define `ReleaseAsset`, `GithubRelease`, and the `trait ReleaseClient` with `async fn latest_release` and `async fn download_asset`. Implement `ReqwestReleaseClient` using the existing workspace `reqwest` dependency, setting a `User-Agent: derrick/<version>` header. Use `const REPO: &str = "lgulliver/derrick"` as the single source of truth for the API endpoint.
+- **Done when**: `ReqwestReleaseClient::latest_release()` compiles; the trait boundary is satisfied; no `unwrap`/`expect` outside `#[cfg(test)]`; `clippy` clean.
+
+---
+
+## Required steps
+
+1. Work inside the worktree `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-2`. The branch `derrick/br-20260524t203938z/der-2` is already checked out there.
+2. Implement the specification above. Commit all changes with conventional
+   commit messages.
+3. Push the branch: `git push -u origin derrick/br-20260524t203938z/der-2`
+4. Capture HEAD SHA: `git rev-parse HEAD`
+5. Hand back to the foreman:
+   `derrick ticket review der-2 --branch derrick/br-20260524t203938z/der-2 --head-sha <HEAD_SHA>`
+
+**Do not open a PR yourself** — the foreman handles PR creation when stacking
+is configured.
