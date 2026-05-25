@@ -581,6 +581,7 @@ dependencies = [
  "derrick-config",
  "derrick-roughneck",
  "derrick-scrub",
+ "derrick-stack",
  "derrick-substrate",
  "derrick-substrate-native",
  "serde_json",

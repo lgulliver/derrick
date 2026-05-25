@@ -102,7 +102,6 @@ fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstra
         worktree_ttl: chrono::Duration::from_std(config.tools().foreman().worktree_ttl())
             .unwrap_or_else(|_| chrono::Duration::hours(24)),
     };
-    let dispatcher: Box<dyn HandDispatcher> = build_dispatcher(repo_root, config, &substrate);
     let stack_cfg = config.tools().git().stacking().clone();
     let stack_backend: Arc<dyn StackBackend> = match stack_cfg.backend() {
         StackBackendKind::Native => Arc::new(NativeStackBackend::new(
@@ -112,6 +111,8 @@ fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstra
         StackBackendKind::Graphite | StackBackendKind::GitSpice => Arc::new(GraphiteStackBackend),
         StackBackendKind::None => Arc::new(NoneStackBackend),
     };
+    let dispatcher: Box<dyn HandDispatcher> =
+        build_dispatcher(repo_root, config, &substrate, Arc::clone(&stack_backend));
     Foreman::new(
         substrate,
         config.clone(),
@@ -128,6 +129,7 @@ fn build_dispatcher(
     repo_root: &Path,
     config: &Config,
     substrate: &Arc<NativeSubstrate>,
+    stack_backend: Arc<dyn StackBackend>,
 ) -> Box<dyn HandDispatcher> {
     let copilot_enabled = config.tools().copilot().enabled();
     let claude_enabled = config.tools().claude().enabled();
@@ -160,11 +162,12 @@ fn build_dispatcher(
             allow_all_tools: true,
             roughneck_enabled: config.tools().roughneck().enabled(),
             roughneck_level: config.tools().roughneck().level().to_owned(),
+            stack_draft: config.tools().git().stacking().draft(),
         };
-        multi = multi.register(Box::new(LocalCopilotHandDispatcher::new(
-            Arc::clone(substrate),
-            copilot_config,
-        )));
+        multi = multi.register(Box::new(
+            LocalCopilotHandDispatcher::new(Arc::clone(substrate), copilot_config)
+                .with_stack_backend(Arc::clone(&stack_backend)),
+        ));
     }
 
     if claude_enabled {

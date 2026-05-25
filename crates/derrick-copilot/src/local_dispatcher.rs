@@ -15,8 +15,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use derrick_stack::{OpenPrParams, StackBackend};
 use derrick_substrate::{
-    EventKind, EventScope, Hand, HandId, HandKind, Substrate, SubstrateError, Ticket, TicketId,
+    EventKind, EventScope, Hand, HandId, HandKind, InReviewMetadata, ManualDoneAttestation,
+    Substrate, SubstrateError, Ticket, TicketId, TicketState,
 };
 use derrick_substrate_native::foreman::{
     DispatchContext, DispatchError, DispatchResult, HandDispatcher,
@@ -56,6 +58,8 @@ pub struct LocalCopilotHandDispatcherConfig {
     pub roughneck_enabled: bool,
     /// Roughneck level: "lite", "full", or "ultra".
     pub roughneck_level: String,
+    /// Open the PR as a draft when the post-dispatch stack hook fires.
+    pub stack_draft: bool,
 }
 
 impl Default for LocalCopilotHandDispatcherConfig {
@@ -73,6 +77,7 @@ impl Default for LocalCopilotHandDispatcherConfig {
             allow_all_tools: true,
             roughneck_enabled: true,
             roughneck_level: "full".to_owned(),
+            stack_draft: false,
         }
     }
 }
@@ -81,12 +86,23 @@ impl Default for LocalCopilotHandDispatcherConfig {
 pub struct LocalCopilotHandDispatcher {
     substrate: Arc<NativeSubstrate>,
     config: LocalCopilotHandDispatcherConfig,
+    stack_backend: Option<Arc<dyn StackBackend>>,
 }
 
 impl LocalCopilotHandDispatcher {
     /// Construct a dispatcher from its substrate and config.
     pub fn new(substrate: Arc<NativeSubstrate>, config: LocalCopilotHandDispatcherConfig) -> Self {
-        Self { substrate, config }
+        Self {
+            substrate,
+            config,
+            stack_backend: None,
+        }
+    }
+
+    /// Attach a stack backend used to open a PR after a successful copilot run.
+    pub fn with_stack_backend(mut self, backend: Arc<dyn StackBackend>) -> Self {
+        self.stack_backend = Some(backend);
+        self
     }
 
     fn target_branch(&self, ticket: &Ticket) -> String {
@@ -304,12 +320,18 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
                 hand_id: hand_id.clone(),
                 prompt: queue_body,
                 worktree: worktree_path,
+                repo_root: self.config.repo_root.clone(),
+                branch: branch.clone(),
+                parent_branch: ctx.parent_branch.clone(),
                 copilot_binary: self.config.copilot_binary.clone(),
                 allow_all_tools: self.config.allow_all_tools,
                 poll_interval: self.config.poll_interval,
                 poll_timeout: self.config.poll_timeout,
                 roughneck_enabled: self.config.roughneck_enabled,
                 roughneck_level: self.config.roughneck_level.clone(),
+                stack_backend: self.stack_backend.clone(),
+                stack_draft: self.config.stack_draft,
+                agent_identity: self.config.agent_identity.clone(),
             };
             tokio::spawn(task.run());
         }
@@ -328,12 +350,18 @@ struct PollTask {
     hand_id: HandId,
     prompt: String,
     worktree: PathBuf,
+    repo_root: PathBuf,
+    branch: String,
+    parent_branch: String,
     copilot_binary: PathBuf,
     allow_all_tools: bool,
     poll_interval: Duration,
     poll_timeout: Duration,
     roughneck_enabled: bool,
     roughneck_level: String,
+    stack_backend: Option<Arc<dyn StackBackend>>,
+    stack_draft: bool,
+    agent_identity: String,
 }
 
 impl PollTask {
@@ -413,6 +441,7 @@ impl PollTask {
                             };
                             self.record_hand_stats(&stdout_bytes).await;
                             self.check_terminal_state().await;
+                            self.open_stacked_pr().await;
                             return;
                         }
                         Ok(status) => {
@@ -532,6 +561,127 @@ impl PollTask {
             }
         }
     }
+
+    /// Open a stacked PR for this ticket's branch using the configured
+    /// [`StackBackend`], then transition the ticket to `Done`. If the PR
+    /// fails to open (e.g. nothing to diff, branch already has a PR), log a
+    /// warning and leave the ticket in `InReview`.
+    async fn open_stacked_pr(&self) {
+        let Some(backend) = self.stack_backend.as_ref() else {
+            return;
+        };
+
+        let ticket = match self.substrate.get_ticket(&self.ticket_id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                warn!(ticket = %self.ticket_id, "ticket missing when opening stacked PR");
+                return;
+            }
+            Err(error) => {
+                warn!(?error, ticket = %self.ticket_id, "read ticket before open_pr failed");
+                return;
+            }
+        };
+        if ticket.state != TicketState::InReview {
+            return;
+        }
+
+        let metadata = self
+            .substrate
+            .most_recent_in_review_metadata(&self.ticket_id)
+            .await
+            .ok()
+            .flatten();
+        if let Some(m) = metadata.as_ref() {
+            if m.pr_url.is_some() {
+                return;
+            }
+        }
+        let branch = metadata
+            .as_ref()
+            .map(|m| m.branch.clone())
+            .unwrap_or_else(|| self.branch.clone());
+        let head_sha_existing = metadata.as_ref().map(|m| m.head_sha.clone());
+
+        let body = format!("Closes {}\n\n{}", self.ticket_id, ticket.body);
+        let params = OpenPrParams {
+            branch: branch.clone(),
+            parent_branch: self.parent_branch.clone(),
+            title: ticket.title.clone(),
+            body,
+            draft: self.stack_draft,
+            repo_root: self.repo_root.clone(),
+        };
+
+        let info = match backend.open_pr(params).await {
+            Ok(info) => info,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    ticket = %self.ticket_id,
+                    branch = %branch,
+                    "gh pr create failed; leaving ticket in InReview"
+                );
+                let _ = self
+                    .substrate
+                    .record_typed_event(
+                        EventScope::Ticket(self.ticket_id.clone()),
+                        EventKind::Note {
+                            body: format!("open_pr failed: {error}"),
+                        },
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let head_sha = if info.head_sha.is_empty() {
+            head_sha_existing.unwrap_or_else(|| info.head_sha.clone())
+        } else {
+            info.head_sha.clone()
+        };
+        let new_metadata = InReviewMetadata {
+            branch,
+            pr_url: Some(info.url.clone()),
+            pr_number: Some(info.number),
+            head_sha,
+        };
+        if let Err(error) = self
+            .substrate
+            .transition_to_in_review(&self.ticket_id, new_metadata)
+            .await
+        {
+            warn!(?error, ticket = %self.ticket_id, "failed to update InReview metadata with pr_url");
+            return;
+        }
+
+        match self
+            .substrate
+            .mark_ticket_done_manually(
+                &self.ticket_id,
+                ManualDoneAttestation {
+                    claimant: self.agent_identity.clone(),
+                    note: format!("copilot hand opened {}", info.url),
+                },
+            )
+            .await
+        {
+            Ok(_) => {
+                info!(
+                    ticket = %self.ticket_id,
+                    pr = %info.url,
+                    "copilot hand opened stacked PR and marked ticket Done"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    ?error,
+                    ticket = %self.ticket_id,
+                    "mark_ticket_done_manually failed after PR open"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -608,6 +758,7 @@ mod tests {
             allow_all_tools: true,
             roughneck_enabled: false,
             roughneck_level: "full".to_owned(),
+            stack_draft: false,
         }
     }
 
