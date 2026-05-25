@@ -1,0 +1,35 @@
+[ROUGHNECK:FULL] Respond in fragments and bullets. Skip preambles ("I will now…"), affirmations ("Great!"), and closing summaries. Use one line per decision. Preserve all code, paths, identifiers, and technical values verbatim. Omit nothing of substance.
+
+# Derrick ticket: Task 6: Implement `upgrade::execute` and wire control flow
+
+You are implementing a ticket dispatched by derrick's crew-mode foreman.
+Complete ALL steps below in order. Do not stop until the final review step is done.
+
+## Ticket metadata
+- **ID**: der-5
+- **Batch**: br-20260524t203938z
+- **Branch**: `derrick/br-20260524t203938z/der-5`
+- **Base**: `main`
+- **Worktree**: `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-5`
+
+## Specification
+
+- **Crate**: `crates/derrick-cli`
+- **Depends on**: Tasks 2, 4, 5
+- **What**: Implement the top-level `pub(crate) async fn execute(args: UpgradeArgs) -> Result<CliExitCode, crate::CliError>` in `commands/upgrade.rs`. The inner `run_upgrade(&args, &dyn ReleaseClient)` function sequences: fetch release → version compare → `--check` early exit → `--force` bypass → asset select → download with byte-count feedback → atomic replace → success message. Inspect `src/exit_code.rs` and add a `UpgradeAvailable = 1` variant if needed for the `--check` exit code contract.
+- **Done when**: All four control-flow paths (normal upgrade, already current, `--check`, `--force`) produce the correct output and exit code per acceptance criteria §1–4; unit tests using `FakeReleaseClient` cover each path; `cargo test -p derrick-cli` green.
+
+---
+
+## Required steps
+
+1. Work inside the worktree `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-5`. The branch `derrick/br-20260524t203938z/der-5` is already checked out there.
+2. Implement the specification above. Commit all changes with conventional
+   commit messages.
+3. Push the branch: `git push -u origin derrick/br-20260524t203938z/der-5`
+4. Capture HEAD SHA: `git rev-parse HEAD`
+5. Hand back to the foreman:
+   `derrick ticket review der-5 --branch derrick/br-20260524t203938z/der-5 --head-sha <HEAD_SHA>`
+
+**Do not open a PR yourself** — the foreman handles PR creation when stacking
+is configured.
