@@ -18,6 +18,7 @@ pub(crate) mod status;
 pub(crate) mod switch;
 pub(crate) mod ticket;
 pub(crate) mod uninstall;
+pub(crate) mod upgrade;
 
 #[derive(Debug, Parser)]
 #[command(name = "derrick", version, about = "Derrick orchestration CLI")]
@@ -40,6 +41,8 @@ pub(crate) enum Command {
     Stack(StackArgs),
     Observe(ObserveArgs),
     Uninstall(UninstallArgs),
+    /// [reserved] Binary self-update (not yet implemented).
+    Upgrade(UpgradeArgs),
     Scrub(ScrubArgs),
     Caveman(CavemanArgs),
     Gain(GainArgs),
@@ -121,6 +124,16 @@ pub(crate) struct UninstallArgs {
     /// Remove all files without asking, including the state database.
     #[arg(long = "purge")]
     pub(crate) purge: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UpgradeArgs {
+    /// Check whether an upgrade is available without installing it.
+    #[arg(long)]
+    pub(crate) check: bool,
+    /// Run the upgrade flow even if the current version appears up to date.
+    #[arg(long)]
+    pub(crate) force: bool,
 }
 
 #[derive(Debug, Args)]

@@ -58,6 +58,7 @@ async fn dispatch(cli: Cli) -> Result<exit_code::CliExitCode, CliError> {
         Command::Stack(args) => commands::stack::execute(args).await,
         Command::Observe(args) => commands::observe::execute(args).await,
         Command::Uninstall(args) => commands::uninstall::execute(args).await,
+        Command::Upgrade(args) => commands::upgrade::execute(args).await,
         Command::Scrub(args) => commands::scrub::run(args)
             .await
             .map(|()| exit_code::CliExitCode::Success)
