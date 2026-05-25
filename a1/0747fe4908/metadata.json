@@ -3,7 +3,7 @@
   "checkpoint_id": "a10747fe4908",
   "strategy": "manual-commit",
   "branch": "main",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
     "crates/derrick-cli/src/commands/stack.rs",
     "crates/derrick-substrate-native/src/tests.rs"
@@ -32,13 +32,19 @@
       "transcript": "/a1/0747fe4908/3/full.jsonl",
       "content_hash": "/a1/0747fe4908/3/content_hash.txt",
       "prompt": "/a1/0747fe4908/3/prompt.txt"
+    },
+    {
+      "metadata": "/a1/0747fe4908/4/metadata.json",
+      "transcript": "/a1/0747fe4908/4/full.jsonl",
+      "content_hash": "/a1/0747fe4908/4/content_hash.txt",
+      "prompt": "/a1/0747fe4908/4/prompt.txt"
     }
   ],
   "token_usage": {
     "input_tokens": 32,
     "cache_creation_tokens": 47488,
     "cache_read_tokens": 1988863,
-    "output_tokens": 10801,
-    "api_call_count": 35
+    "output_tokens": 17760,
+    "api_call_count": 48
   }
 }
