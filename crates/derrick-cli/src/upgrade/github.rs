@@ -1,10 +1,14 @@
 //! GitHub release client for derrick upgrades.
 
+use std::time::Duration;
+
+use async_trait::async_trait;
 use serde::Deserialize;
 use thiserror::Error;
 
 const GITHUB_API: &str = "https://api.github.com";
 const REPO: &str = "lgulliver/derrick";
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub(super) struct ReleaseAsset {
@@ -28,6 +32,7 @@ pub(super) enum ReleaseClientError {
     Request(#[from] reqwest::Error),
 }
 
+#[async_trait]
 pub(super) trait ReleaseClient: Send + Sync {
     async fn latest_release(&self) -> Result<GithubRelease, ReleaseClientError>;
 
@@ -41,8 +46,13 @@ pub(super) struct ReqwestReleaseClient {
 
 impl ReqwestReleaseClient {
     pub(super) fn new() -> Result<Self, ReleaseClientError> {
+        Self::with_timeout(DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub(super) fn with_timeout(timeout: Duration) -> Result<Self, ReleaseClientError> {
         let client = reqwest::Client::builder()
             .user_agent(user_agent())
+            .timeout(timeout)
             .build()
             .map_err(ReleaseClientError::BuildClient)?;
         Ok(Self { client })
@@ -53,6 +63,7 @@ impl ReqwestReleaseClient {
     }
 }
 
+#[async_trait]
 impl ReleaseClient for ReqwestReleaseClient {
     async fn latest_release(&self) -> Result<GithubRelease, ReleaseClientError> {
         let release = self
