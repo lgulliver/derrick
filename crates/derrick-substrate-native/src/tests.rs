@@ -333,6 +333,59 @@ async fn transition_to_in_review_records_metadata_in_event() -> Result<(), Subst
     Ok(())
 }
 
+#[tokio::test]
+async fn stack_submit_idempotent_re_records_metadata_for_in_review_ticket(
+) -> Result<(), SubstrateError> {
+    // Reproduces the `derrick stack submit` idempotent path: a ticket
+    // is already InReview without a PR URL; submit publishes the PR
+    // and re-records `TicketTransitionedToInReview` with the fresh
+    // metadata. Calling `transition_to_in_review` here would fail
+    // (state must be InFlight), so submit emits the event directly
+    // via `record_typed_event`. `most_recent_in_review_metadata` must
+    // observe the newer payload.
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+    let h = register_hand_fixture(&substrate, "h1").await?;
+    substrate.create_ticket(new_ticket("drk-1")?).await?;
+    substrate.assign_to_hand(&ticket_id("drk-1")?, &h).await?;
+    substrate
+        .transition_to_in_review(
+            &ticket_id("drk-1")?,
+            InReviewMetadata {
+                branch: "derrick/feature".to_owned(),
+                pr_url: None,
+                pr_number: None,
+                head_sha: "headsha".to_owned(),
+            },
+        )
+        .await?;
+    // Re-recording while the ticket is already InReview — the path
+    // exercised by `stack_submit` after `open_pr` returns.
+    substrate
+        .record_typed_event(
+            EventScope::Ticket(ticket_id("drk-1")?),
+            EventKind::TicketTransitionedToInReview {
+                branch: "derrick/feature".to_owned(),
+                pr_url: Some("https://example/pr/7".to_owned()),
+                pr_number: Some(7),
+                head_sha: "headsha".to_owned(),
+            },
+        )
+        .await?;
+    let metadata = substrate
+        .most_recent_in_review_metadata(&ticket_id("drk-1")?)
+        .await?
+        .expect("metadata present");
+    assert_eq!(metadata.pr_url.as_deref(), Some("https://example/pr/7"));
+    assert_eq!(metadata.pr_number, Some(7));
+    let ticket = substrate
+        .get_ticket(&ticket_id("drk-1")?)
+        .await?
+        .expect("ticket present");
+    assert_eq!(ticket.state, TicketState::InReview);
+    Ok(())
+}
+
 // ---------------------- event log integrity ----------------------
 
 #[tokio::test]

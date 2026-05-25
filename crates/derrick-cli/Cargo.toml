@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
@@ -27,6 +28,7 @@ derrick-tools = { path = "../derrick-tools" }
 derrick-observe = { path = "../derrick-observe" }
 derrick-tui = { path = "../derrick-tui" }
 owo-colors = { workspace = true }
+reqwest = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
