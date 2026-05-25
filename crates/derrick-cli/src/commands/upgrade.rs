@@ -1,7 +1,9 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
+use tempfile::NamedTempFile;
 
 use crate::commands::UpgradeArgs;
 use crate::exit_code::CliExitCode;
@@ -64,13 +66,8 @@ async fn run_upgrade_with(
 
     let asset = select_asset(&release)?;
     reporter.line(&format!("downloading {}", asset.name));
-    let bytes = client
-        .download_asset(asset)
-        .await
-        .map_err(|error| message(error.to_string()))?;
-    reporter.line(&format!("downloaded {} bytes", bytes.len()));
-
-    replace_binary(target, &bytes)?;
+    let written = download_and_replace(target, client, asset).await?;
+    reporter.line(&format!("downloaded {written} bytes"));
     reporter.line(&format!("upgraded derrick to {latest}"));
     Ok(CliExitCode::Success)
 }
@@ -122,55 +119,102 @@ fn expected_asset_name() -> Result<&'static str, crate::CliError> {
     }
 }
 
-fn replace_binary(target: &Path, bytes: &[u8]) -> Result<(), crate::CliError> {
+async fn download_and_replace(
+    target: &Path,
+    client: &dyn ReleaseClient,
+    asset: &ReleaseAsset,
+) -> Result<u64, crate::CliError> {
     let parent = target
         .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .ok_or_else(|| message(format!("cannot determine parent for {}", target.display())))?;
-    let file_name = target
-        .file_name()
-        .ok_or_else(|| {
-            message(format!(
-                "cannot determine file name for {}",
-                target.display()
-            ))
-        })?
-        .to_string_lossy();
-    let tmp = parent.join(format!(".{file_name}.upgrade-{}.tmp", std::process::id()));
-    let cleanup = TempFileCleanup::new(tmp.clone());
 
-    fs::write(&tmp, bytes).map_err(|source| crate::CliError::Io {
-        path: tmp.clone(),
+    let mut tmp = NamedTempFile::new_in(parent).map_err(|source| crate::CliError::Io {
+        path: parent.to_path_buf(),
         source,
     })?;
-    make_executable(&tmp)?;
-    fs::rename(&tmp, target).map_err(|source| crate::CliError::Io {
-        path: target.to_path_buf(),
-        source,
+
+    let written = {
+        use std::io::Write as _;
+        let file = tmp.as_file_mut();
+        let total = client
+            .download_asset(asset, file)
+            .await
+            .map_err(|error| message(error.to_string()))?;
+        file.flush().map_err(|source| crate::CliError::Io {
+            path: tmp.path().to_path_buf(),
+            source,
+        })?;
+        total
+    };
+
+    apply_executable_permissions(tmp.path(), target)?;
+    let temp_path = tmp.into_temp_path();
+    let kept = temp_path.keep().map_err(|error| crate::CliError::Io {
+        path: error.path.to_path_buf(),
+        source: error.error,
     })?;
-    cleanup.persist();
-    Ok(())
+    if let Err(error) = rename_with_help(&kept, target) {
+        let _ = fs::remove_file(&kept);
+        return Err(error);
+    }
+    Ok(written)
 }
 
 #[cfg(unix)]
-fn make_executable(path: &Path) -> Result<(), crate::CliError> {
+fn apply_executable_permissions(temp: &Path, target: &Path) -> Result<(), crate::CliError> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let mut permissions = fs::metadata(path)
+    // Inherit the target's existing mode (preserving any deliberate
+    // restrictions like 0o700) and ensure the execute bits are set so the
+    // replacement is invocable.
+    let mode = match fs::metadata(target) {
+        Ok(metadata) => metadata.permissions().mode(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0o755,
+        Err(source) => {
+            return Err(crate::CliError::Io {
+                path: target.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut permissions = fs::metadata(temp)
         .map_err(|source| crate::CliError::Io {
-            path: path.to_path_buf(),
+            path: temp.to_path_buf(),
             source,
         })?
         .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).map_err(|source| crate::CliError::Io {
-        path: path.to_path_buf(),
+    permissions.set_mode((mode & 0o777) | 0o111);
+    fs::set_permissions(temp, permissions).map_err(|source| crate::CliError::Io {
+        path: temp.to_path_buf(),
         source,
     })
 }
 
 #[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<(), crate::CliError> {
+fn apply_executable_permissions(_temp: &Path, _target: &Path) -> Result<(), crate::CliError> {
     Ok(())
+}
+
+fn rename_with_help(from: &Path, to: &Path) -> Result<(), crate::CliError> {
+    fs::rename(from, to).map_err(|source| rename_error(to, source))
+}
+
+fn rename_error(target: &Path, source: io::Error) -> crate::CliError {
+    if source.kind() == io::ErrorKind::PermissionDenied {
+        let location = target.parent().map_or_else(
+            || target.display().to_string(),
+            |parent| parent.display().to_string(),
+        );
+        return message(format!(
+            "permission denied replacing {}; rerun with permission to write {location} or reinstall with the install script",
+            target.display()
+        ));
+    }
+    crate::CliError::Io {
+        path: target.to_path_buf(),
+        source,
+    }
 }
 
 trait UpgradeReporter {
@@ -182,32 +226,6 @@ struct StdoutUpgradeReporter;
 impl UpgradeReporter for StdoutUpgradeReporter {
     fn line(&self, text: &str) {
         println!("{text}");
-    }
-}
-
-struct TempFileCleanup {
-    path: PathBuf,
-    keep: std::cell::Cell<bool>,
-}
-
-impl TempFileCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            keep: std::cell::Cell::new(false),
-        }
-    }
-
-    fn persist(&self) {
-        self.keep.set(true);
-    }
-}
-
-impl Drop for TempFileCleanup {
-    fn drop(&mut self) {
-        if !self.keep.get() {
-            let _ = fs::remove_file(&self.path);
-        }
     }
 }
 
@@ -282,12 +300,16 @@ mod tests {
         async fn download_asset(
             &self,
             asset: &ReleaseAsset,
-        ) -> Result<Vec<u8>, ReleaseClientError> {
+            writer: &mut (dyn std::io::Write + Send),
+        ) -> Result<u64, ReleaseClientError> {
             self.downloaded_assets
                 .lock()
                 .unwrap()
                 .push(asset.name.clone());
-            Ok(self.bytes.clone())
+            writer
+                .write_all(&self.bytes)
+                .map_err(ReleaseClientError::Write)?;
+            Ok(self.bytes.len() as u64)
         }
     }
 
@@ -367,5 +389,49 @@ mod tests {
         assert_eq!(fs::read(&target)?, b"forced");
         assert!(reporter.text().contains("forcing upgrade to"));
         Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn upgrade_preserves_target_permissions_and_adds_execute_bits() -> TestResult {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_dir, target) = target_file(b"old")?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
+        let client = FakeReleaseClient::new("v999.0.0", b"new")?;
+        let reporter = CaptureReporter::default();
+
+        run_upgrade_with(&args(false, false), &client, &target, &reporter).await?;
+
+        let mode = fs::metadata(&target)?.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o711,
+            "expected inherited 0o600 plus execute bits, got {mode:o}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rename_error_permission_denied_is_actionable() {
+        let target = PathBuf::from("/usr/local/bin/derrick");
+        let error = rename_error(
+            &target,
+            io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+        );
+        let text = error.to_string();
+        assert!(text.contains("permission denied replacing /usr/local/bin/derrick"));
+        assert!(text.contains("permission to write /usr/local/bin"));
+        assert!(text.contains("install script"));
+    }
+
+    #[test]
+    fn upgrade_available_exit_code_is_distinct_from_failure() {
+        use std::process::ExitCode;
+        // Just confirm the typed enum maps to a non-1 process exit code so
+        // callers can disambiguate "upgrade available" from a generic failure.
+        let upgrade: ExitCode = CliExitCode::UpgradeAvailable.into();
+        let failure: ExitCode = CliExitCode::Failure.into();
+        // ExitCode lacks PartialEq, compare via Debug formatting.
+        assert_ne!(format!("{upgrade:?}"), format!("{failure:?}"));
     }
 }

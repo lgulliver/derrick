@@ -1,5 +1,6 @@
 //! GitHub release client for derrick upgrades.
 
+use std::io::{self, Write};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -29,13 +30,21 @@ pub(crate) enum ReleaseClientError {
     BuildClient(#[source] reqwest::Error),
     #[error("GitHub release request failed: {0}")]
     Request(#[from] reqwest::Error),
+    #[error("failed to write downloaded asset: {0}")]
+    Write(#[source] io::Error),
 }
 
 #[async_trait::async_trait]
 pub(crate) trait ReleaseClient: Send + Sync {
     async fn latest_release(&self) -> Result<GithubRelease, ReleaseClientError>;
 
-    async fn download_asset(&self, asset: &ReleaseAsset) -> Result<Vec<u8>, ReleaseClientError>;
+    /// Streams the asset body into `writer`, returning the total bytes written.
+    /// Avoids materialising multi-MB release binaries in memory.
+    async fn download_asset(
+        &self,
+        asset: &ReleaseAsset,
+        writer: &mut (dyn Write + Send),
+    ) -> Result<u64, ReleaseClientError>;
 }
 
 #[derive(Clone, Debug)]
@@ -68,16 +77,25 @@ impl ReleaseClient for ReqwestReleaseClient {
         Ok(release)
     }
 
-    async fn download_asset(&self, asset: &ReleaseAsset) -> Result<Vec<u8>, ReleaseClientError> {
-        let bytes = self
+    async fn download_asset(
+        &self,
+        asset: &ReleaseAsset,
+        writer: &mut (dyn Write + Send),
+    ) -> Result<u64, ReleaseClientError> {
+        let mut response = self
             .client
             .get(&asset.browser_download_url)
             .send()
             .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-        Ok(bytes.to_vec())
+            .error_for_status()?;
+        let mut total: u64 = 0;
+        while let Some(chunk) = response.chunk().await? {
+            writer
+                .write_all(&chunk)
+                .map_err(ReleaseClientError::Write)?;
+            total = total.saturating_add(chunk.len() as u64);
+        }
+        Ok(total)
     }
 }
 

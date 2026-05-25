@@ -18,9 +18,11 @@ impl From<CliExitCode> for ExitCode {
         match code {
             CliExitCode::Success => Self::SUCCESS,
             CliExitCode::Failure => Self::from(1),
-            CliExitCode::UpgradeAvailable => Self::from(1),
             CliExitCode::Refused => Self::from(2),
             CliExitCode::ReviewIssues => Self::from(3),
+            // Dedicated code so `upgrade --check` callers can distinguish
+            // "upgrade available" from generic command failure (1).
+            CliExitCode::UpgradeAvailable => Self::from(4),
             CliExitCode::DoctorFailures(count) => {
                 let capped = u8::try_from(count).unwrap_or(u8::MAX);
                 Self::from(capped)
