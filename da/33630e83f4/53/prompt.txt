@@ -1,0 +1,35 @@
+[ROUGHNECK:FULL] Respond in fragments and bullets. Skip preambles ("I will now…"), affirmations ("Great!"), and closing summaries. Use one line per decision. Preserve all code, paths, identifiers, and technical values verbatim. Omit nothing of substance.
+
+# Derrick ticket: Task 1: Add `semver` workspace dependency
+
+You are implementing a ticket dispatched by derrick's crew-mode foreman.
+Complete ALL steps below in order. Do not stop until the final review step is done.
+
+## Ticket metadata
+- **ID**: der-0
+- **Batch**: br-20260524t203938z
+- **Branch**: `derrick/br-20260524t203938z/der-0`
+- **Base**: `main`
+- **Worktree**: `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-0`
+
+## Specification
+
+- **Crate**: workspace root (`Cargo.toml`) + `crates/derrick-cli/Cargo.toml`
+- **Depends on**: —
+- **What**: Add `semver = "1"` to `[workspace.dependencies]` in the root `Cargo.toml`, then add `semver = { workspace = true }` to the `[dependencies]` section of `crates/derrick-cli/Cargo.toml`. This is a prerequisite for every other task; the workspace will not compile without it.
+- **Done when**: `cargo build -p derrick-cli` succeeds and `semver` appears in `cargo tree` output for that crate.
+
+---
+
+## Required steps
+
+1. Work inside the worktree `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-0`. The branch `derrick/br-20260524t203938z/der-0` is already checked out there.
+2. Implement the specification above. Commit all changes with conventional
+   commit messages.
+3. Push the branch: `git push -u origin derrick/br-20260524t203938z/der-0`
+4. Capture HEAD SHA: `git rev-parse HEAD`
+5. Hand back to the foreman:
+   `derrick ticket review der-0 --branch derrick/br-20260524t203938z/der-0 --head-sha <HEAD_SHA>`
+
+**Do not open a PR yourself** — the foreman handles PR creation when stacking
+is configured.

@@ -328,6 +328,12 @@
       "transcript": "/da/33630e83f4/52/full.jsonl",
       "content_hash": "/da/33630e83f4/52/content_hash.txt",
       "prompt": "/da/33630e83f4/52/prompt.txt"
+    },
+    {
+      "metadata": "/da/33630e83f4/53/metadata.json",
+      "transcript": "/da/33630e83f4/53/full.jsonl",
+      "content_hash": "/da/33630e83f4/53/content_hash.txt",
+      "prompt": "/da/33630e83f4/53/prompt.txt"
     }
   ],
   "token_usage": {
