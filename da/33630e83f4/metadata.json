@@ -370,6 +370,12 @@
       "transcript": "/da/33630e83f4/59/full.jsonl",
       "content_hash": "/da/33630e83f4/59/content_hash.txt",
       "prompt": "/da/33630e83f4/59/prompt.txt"
+    },
+    {
+      "metadata": "/da/33630e83f4/60/metadata.json",
+      "transcript": "/da/33630e83f4/60/full.jsonl",
+      "content_hash": "/da/33630e83f4/60/content_hash.txt",
+      "prompt": "/da/33630e83f4/60/prompt.txt"
     }
   ],
   "token_usage": {
