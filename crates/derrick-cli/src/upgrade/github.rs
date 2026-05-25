@@ -1,8 +1,8 @@
 //! GitHub release client for derrick upgrades.
 
+use std::io::{self, Write};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -11,59 +11,59 @@ const REPO: &str = "lgulliver/derrick";
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub(super) struct ReleaseAsset {
-    pub(super) name: String,
+pub(crate) struct ReleaseAsset {
+    pub(crate) name: String,
     #[serde(rename = "browser_download_url")]
-    pub(super) browser_download_url: String,
+    pub(crate) browser_download_url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub(super) struct GithubRelease {
+pub(crate) struct GithubRelease {
     #[serde(rename = "tag_name")]
-    pub(super) tag_name: String,
-    pub(super) assets: Vec<ReleaseAsset>,
+    pub(crate) tag_name: String,
+    pub(crate) assets: Vec<ReleaseAsset>,
 }
 
 #[derive(Debug, Error)]
-pub(super) enum ReleaseClientError {
+pub(crate) enum ReleaseClientError {
     #[error("failed to build GitHub release HTTP client: {0}")]
     BuildClient(#[source] reqwest::Error),
     #[error("GitHub release request failed: {0}")]
     Request(#[from] reqwest::Error),
+    #[error("failed to write downloaded asset: {0}")]
+    Write(#[source] io::Error),
 }
 
-#[async_trait]
-pub(super) trait ReleaseClient: Send + Sync {
+#[async_trait::async_trait]
+pub(crate) trait ReleaseClient: Send + Sync {
     async fn latest_release(&self) -> Result<GithubRelease, ReleaseClientError>;
 
-    async fn download_asset(&self, asset: &ReleaseAsset) -> Result<Vec<u8>, ReleaseClientError>;
+    /// Streams the asset body into `writer`, returning the total bytes written.
+    /// Avoids materialising multi-MB release binaries in memory.
+    async fn download_asset(
+        &self,
+        asset: &ReleaseAsset,
+        writer: &mut (dyn Write + Send),
+    ) -> Result<u64, ReleaseClientError>;
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ReqwestReleaseClient {
+pub(crate) struct ReqwestReleaseClient {
     client: reqwest::Client,
 }
 
 impl ReqwestReleaseClient {
-    pub(super) fn new() -> Result<Self, ReleaseClientError> {
-        Self::with_timeout(DEFAULT_REQUEST_TIMEOUT)
-    }
-
-    pub(super) fn with_timeout(timeout: Duration) -> Result<Self, ReleaseClientError> {
+    pub(crate) fn new() -> Result<Self, ReleaseClientError> {
         let client = reqwest::Client::builder()
             .user_agent(user_agent())
-            .timeout(timeout)
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .build()
             .map_err(ReleaseClientError::BuildClient)?;
         Ok(Self { client })
     }
-
-    pub(super) fn with_client(client: reqwest::Client) -> Self {
-        Self { client }
-    }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl ReleaseClient for ReqwestReleaseClient {
     async fn latest_release(&self) -> Result<GithubRelease, ReleaseClientError> {
         let release = self
@@ -77,16 +77,25 @@ impl ReleaseClient for ReqwestReleaseClient {
         Ok(release)
     }
 
-    async fn download_asset(&self, asset: &ReleaseAsset) -> Result<Vec<u8>, ReleaseClientError> {
-        let bytes = self
+    async fn download_asset(
+        &self,
+        asset: &ReleaseAsset,
+        writer: &mut (dyn Write + Send),
+    ) -> Result<u64, ReleaseClientError> {
+        let mut response = self
             .client
             .get(&asset.browser_download_url)
             .send()
             .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
-        Ok(bytes.to_vec())
+            .error_for_status()?;
+        let mut total: u64 = 0;
+        while let Some(chunk) = response.chunk().await? {
+            writer
+                .write_all(&chunk)
+                .map_err(ReleaseClientError::Write)?;
+            total = total.saturating_add(chunk.len() as u64);
+        }
+        Ok(total)
     }
 }
 
@@ -125,8 +134,8 @@ mod tests {
                 "tag_name": "v1.2.3",
                 "assets": [
                     {
-                        "name": "derrick-aarch64-apple-darwin.tar.gz",
-                        "browser_download_url": "https://github.com/lgulliver/derrick/releases/download/v1.2.3/derrick-aarch64-apple-darwin.tar.gz"
+                        "name": "derrick-macos-arm64",
+                        "browser_download_url": "https://github.com/lgulliver/derrick/releases/download/v1.2.3/derrick-macos-arm64"
                     }
                 ]
             }"#,
@@ -135,13 +144,10 @@ mod tests {
 
         assert_eq!(release.tag_name, "v1.2.3");
         assert_eq!(release.assets.len(), 1);
-        assert_eq!(
-            release.assets[0].name,
-            "derrick-aarch64-apple-darwin.tar.gz"
-        );
+        assert_eq!(release.assets[0].name, "derrick-macos-arm64");
         assert_eq!(
             release.assets[0].browser_download_url,
-            "https://github.com/lgulliver/derrick/releases/download/v1.2.3/derrick-aarch64-apple-darwin.tar.gz"
+            "https://github.com/lgulliver/derrick/releases/download/v1.2.3/derrick-macos-arm64"
         );
     }
 

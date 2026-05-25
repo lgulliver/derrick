@@ -4,6 +4,7 @@ use std::process::ExitCode;
 pub(crate) enum CliExitCode {
     Success,
     Failure,
+    UpgradeAvailable,
     /// Refused for a user-facing policy reason (e.g. mode guard); the
     /// command printed an explanatory message to stderr.
     Refused,
@@ -19,6 +20,9 @@ impl From<CliExitCode> for ExitCode {
             CliExitCode::Failure => Self::from(1),
             CliExitCode::Refused => Self::from(2),
             CliExitCode::ReviewIssues => Self::from(3),
+            // Dedicated code so `upgrade --check` callers can distinguish
+            // "upgrade available" from generic command failure (1).
+            CliExitCode::UpgradeAvailable => Self::from(4),
             CliExitCode::DoctorFailures(count) => {
                 let capped = u8::try_from(count).unwrap_or(u8::MAX);
                 Self::from(capped)
