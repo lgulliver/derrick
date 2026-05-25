@@ -1,0 +1,33 @@
+[ROUGHNECK:FULL] Respond in fragments and bullets. Skip preambles ("I will now…"), affirmations ("Great!"), and closing summaries. Use one line per decision. Preserve all code, paths, identifiers, and technical values verbatim. Omit nothing of substance.
+
+# Derrick ticket: Task 7: Integration test and final lint gate
+
+You are implementing a ticket dispatched by derrick's crew-mode foreman.
+Complete ALL steps below in order. Do not stop until the final review step is done.
+
+## Ticket metadata
+- **ID**: der-6
+- **Batch**: br-20260524t203938z
+- **Branch**: `derrick/br-20260524t203938z/der-6`
+- **Base**: `main`
+- **Worktree**: `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-6`
+
+## Specification
+
+- **Crate**: `crates/derrick-cli`
+- **Depends on**: Task 6
+- **What**: Add `tests/integration/upgrade.rs` gated on `std::env::var("DERRICK_TEST_NETWORK").is_ok()` that calls the real `ReqwestReleaseClient::latest_release()`, asserts `tag_name` is non-empty and valid semver, and asserts at least one asset is present. Run `cargo clippy --workspace -- -D warnings` and `cargo test --workspace` locally; confirm no `unwrap`/`expect`/`println!`/`eprintln!` outside allowed scopes. Verify `derrick upgrade --help` output is accurate.
+- **Done when**: `DERRICK_TEST_NETWORK=1 cargo test -p derrick-cli -- upgrade::integration` passes against the real GitHub API; `cargo clippy --workspace -- -D warnings` and `cargo test --workspace` (without the env var) are both green; 80%+ line coverage on the new module.
+
+## Required steps
+
+1. Work inside the worktree `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-6`. The branch `derrick/br-20260524t203938z/der-6` is already checked out there.
+2. Implement the specification above. Commit all changes with conventional
+   commit messages.
+3. Push the branch: `git push -u origin derrick/br-20260524t203938z/der-6`
+4. Capture HEAD SHA: `git rev-parse HEAD`
+5. Hand back to the foreman:
+   `derrick ticket review der-6 --branch derrick/br-20260524t203938z/der-6 --head-sha <HEAD_SHA>`
+
+**Do not open a PR yourself** — the foreman handles PR creation when stacking
+is configured.
