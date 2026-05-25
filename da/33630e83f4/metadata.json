@@ -424,6 +424,12 @@
       "transcript": "/da/33630e83f4/68/full.jsonl",
       "content_hash": "/da/33630e83f4/68/content_hash.txt",
       "prompt": "/da/33630e83f4/68/prompt.txt"
+    },
+    {
+      "metadata": "/da/33630e83f4/69/metadata.json",
+      "transcript": "/da/33630e83f4/69/full.jsonl",
+      "content_hash": "/da/33630e83f4/69/content_hash.txt",
+      "prompt": "/da/33630e83f4/69/prompt.txt"
     }
   ],
   "token_usage": {

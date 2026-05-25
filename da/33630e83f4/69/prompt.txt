@@ -1,0 +1,35 @@
+[ROUGHNECK:FULL] Respond in fragments and bullets. Skip preambles ("I will now…"), affirmations ("Great!"), and closing summaries. Use one line per decision. Preserve all code, paths, identifiers, and technical values verbatim. Omit nothing of substance.
+
+# Derrick ticket: Task 2: Define CLI surface — `UpgradeArgs` and `Command::Upgrade`
+
+You are implementing a ticket dispatched by derrick's crew-mode foreman.
+Complete ALL steps below in order. Do not stop until the final review step is done.
+
+## Ticket metadata
+- **ID**: der-1
+- **Batch**: br-20260524t203938z
+- **Branch**: `derrick/br-20260524t203938z/der-1`
+- **Base**: `main`
+- **Worktree**: `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-1`
+
+## Specification
+
+- **Crate**: `crates/derrick-cli`
+- **Depends on**: —
+- **What**: In `src/commands/mod.rs`, add `pub(crate) mod upgrade;`, add `Upgrade(UpgradeArgs)` to the `Command` enum (with a clap `about` doc comment), and define `UpgradeArgs` with `--check` and `--force` boolean flags. In `src/lib.rs`, add the routing match arm `Command::Upgrade(args) => upgrade::execute(args).await`.
+- **Done when**: `derrick upgrade --help` prints accurate descriptions for both flags and compiles without warnings. `cargo clippy -- -D warnings` passes on the crate.
+
+---
+
+## Required steps
+
+1. Work inside the worktree `/Users/lgulliver/repos/derrick/.derrick/copilot-worktrees/der-1`. The branch `derrick/br-20260524t203938z/der-1` is already checked out there.
+2. Implement the specification above. Commit all changes with conventional
+   commit messages.
+3. Push the branch: `git push -u origin derrick/br-20260524t203938z/der-1`
+4. Capture HEAD SHA: `git rev-parse HEAD`
+5. Hand back to the foreman:
+   `derrick ticket review der-1 --branch derrick/br-20260524t203938z/der-1 --head-sha <HEAD_SHA>`
+
+**Do not open a PR yourself** — the foreman handles PR creation when stacking
+is configured.
