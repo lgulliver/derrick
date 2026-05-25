@@ -295,7 +295,10 @@ mod tests {
         replacement.commit()?;
 
         let mode = fs::metadata(&target)?.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o755, "expected target perms + execute bits, got {mode:o}");
+        assert_eq!(
+            mode, 0o755,
+            "expected target perms + execute bits, got {mode:o}"
+        );
 
         Ok(())
     }
