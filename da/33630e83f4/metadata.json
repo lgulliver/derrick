@@ -280,6 +280,12 @@
       "transcript": "/da/33630e83f4/44/full.jsonl",
       "content_hash": "/da/33630e83f4/44/content_hash.txt",
       "prompt": "/da/33630e83f4/44/prompt.txt"
+    },
+    {
+      "metadata": "/da/33630e83f4/45/metadata.json",
+      "transcript": "/da/33630e83f4/45/full.jsonl",
+      "content_hash": "/da/33630e83f4/45/content_hash.txt",
+      "prompt": "/da/33630e83f4/45/prompt.txt"
     }
   ],
   "token_usage": {
