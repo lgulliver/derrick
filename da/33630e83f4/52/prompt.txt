@@ -1,0 +1,168 @@
+We're dogfooding — use Derrick to build the `derrick upgrade` command inside the Derrick repo itself.
+
+Run:
+```
+derrick add "add a derrick upgrade command that self-updates the derrick binary. It should check the latest release on GitHub (MaxContact/derrick repo), compare against the running version (from --version / built-in VERSION constant), download the new binary for the current platform/arch if a newer version exists, replace the current binary atomically (write to a temp file beside the current binary, then rename), and print a clear success/failure message. Support --check flag to dry-run (report whether an upgrade is available without installing). Support --force to skip the version check and always install latest."
+```
+
+This will kick off the full dark-factory pipeline (specify → clarify → plan → assay → tasks → analyze → bridge → foreman) and the crew will implement it.
+
+Monitor progress and report back when the run completes or if anything needs attention. Use `derrick observe` output or check `.derrick/runs/` for status.
+
+---
+
+What's the current status of the derrick add pipeline? Check .derrick/runs/ for the active run, show me which step we're on, and tail any recent output. If it's still running, keep monitoring and report back when it reaches bridge/foreman or if anything blocks.
+
+---
+
+The run bailed silently — status shows success but no steps ran, spec dir is empty, finished_at is null. Try running derrick add again with full stderr capture this time so we can see the failure:
+
+```
+derrick add "add a derrick upgrade command that self-updates the derrick binary. It should check the latest release on GitHub (MaxContact/derrick repo), compare against the running version (from --version / built-in VERSION constant), download the new binary for the current platform/arch if a newer version exists, replace the current binary atomically (write to a temp file beside the current binary, then rename), and print a clear success/failure message. Support --check flag to dry-run (report whether an upgrade is available without installing). Support --force to skip the version check and always install latest." 2>&1 | tee /tmp/derrick-add-output.txt
+```
+
+Then show me the full output from /tmp/derrick-add-output.txt and the manifest from the new run. If it fails again, diagnose the root cause and fix it.
+
+---
+
+Good — keep monitoring. Report back each time a major step completes (clarify, plan, assay, bridge, foreman). If anything blocks or errors, report immediately. When foreman dispatches hands, show me how many tickets/hands went out and what they're working on.
+
+---
+
+<task-notification>
+<task-id>b67p7ig6o</task-id>
+<summary>Monitor event: "derrick add pipeline progress"</summary>
+<event>[32m✓[39m Specification loaded for review (147 lines)
+No clarifying questions needed. Proceeding.
+[36mclarify[39m [32m✓[39m [32mdone[39m</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b67p7ig6o</task-id>
+<summary>Monitor event: "derrick add pipeline progress"</summary>
+<event>[36mplan[39m ▓           ...  [36mplan[39m  ▓          ...  [36mplan[39m   ▓         ...  [36mplan[39m    ▓        ...  [36mplan[39m     ▓       ...  [36mplan[39m      ▓      ...  [36mplan[39m       ▓     ...  [36mplan[39m        ▓    ...  [36mplan[39m         ▓   ...  [36mplan[39m          ▓  ...  [36mplan[39m           ▓ ...  [36mplan[39m            ▓...  [36mplan[39m           ▓ ...  [36mplan[39m          ▓  ...  [36mplan[39m         ▓   ...  [36m...(truncated)
+[96m└[39m [36m142 lines[39m [36m→[39m [36m/Users/lgulliver/repos/derrick/.derrick/worktrees/20260524T203938Z/specs/self-upgrade-command/plan.md[39m
+[36massay[39m...</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b67p7ig6o</task-id>
+<summary>Monitor event: "derrick add pipeline progress"</summary>
+<event>[36massay[39m [36m⚖[39m [36mCross-Examination[39m (round 1/1)...                                                 [36massay[39m [36m⚖[39m [36mCross-Examination[39m [90m(4 objections)[39m [36m→[39m [97mall API calls will 404 or succeed against the wrong repo[39m
+[36massay[39m [33m⚠[39m Maximum 1 rounds reached — unresolved risks logged.
+[36massay[39m [33m⚠[39m [33mReview risks noted (continuing):
+The constitution's SOLID Open/Closed principle says "extension through traits, not by editing existing implementations." Adding `Upgrade(UpgradeArgs)` to the `Command` enum is an edit to an existing type. This is unavoidable for a new subcommand, but note it is an implicit exception to the OCP principle acknowledged elsewhere in the design. The plan does not call this out.
+The constitution requires "every bug fix gets a regression test." Step 9 covers the happy-path unit tests, but none of the failure modes in the risks table (Windows rollback failure, missing asset, rate limit, EXDEV) have explicit test cases mapped to them. The coverage gate (80%) may be met while these critical paths go untested.[39m
+[36massay[39m [32m✓[39m [32mdone[39m
+[96m│[39m [36mAssay complete.[39m</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b67p7ig6o</task-id>
+<summary>Monitor event: "derrick add pipeline progress"</summary>
+<event>[36mtasks[39m ▓           ...  [36mtasks[39m  ▓          ...  [36mtasks[39m   ▓         ...  [36mtasks[39m    ▓        ...  [36mtasks[39m     ▓       ...  [36mtasks[39m      ▓      ...  [36mtasks[39m       ▓     ...  [36mtasks[39m        ▓    ...  [36mtasks[39m         ▓   ...  [36mtasks[39m          ▓  ...  [36mtasks[39m           ▓ ...  [36mtasks[39m            ▓...  [36mtasks[39m           ▓ ...  [36mtasks[39m          ▓  ...  [36mtasks[39m         ...(truncated)
+[96m│[39m [36m7 tasks[39m [90m(62 lines)[39m [36m→[39m
+[96m└[39m [36m/Users/lgulliver/repos/derrick/.derrick/worktrees/20260524T203938Z/specs/self-upgrade-command/tasks.md[39m</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b67p7ig6o</task-id>
+<summary>Monitor event: "derrick add pipeline progress"</summary>
+<event>[36manalyze[39m ▓           ...  [36manalyze[39m  ▓          ...  [36manalyze[39m   ▓         ...  [36manalyze[39m    ▓        ...  [36manalyze[39m     ▓       ...  [36manalyze[39m      ▓      ...  [36manalyze[39m       ▓     ...  [36manalyze[39m        ▓    ...  [36manalyze[39m         ▓   ...  [36manalyze[39m          ▓  ...  [36manalyze[39m           ▓ ...  [36manalyze[39m            ▓...  [36manalyze[39m           ▓ ...  [36manalyze[39m          ▓  .....(truncated)
+[36mbridge[39m ▓           ...
+[96m└[39m [36m7 tickets[39m [90mcreated in batch[39m [36mbr-20260524t203938z[39m [32m✓[39m
+[36mbridge[39m [32m✓[39m [32mdone[39m
+[36mforeman[39m ▓           ...
+[96m│[39m [36mder-1[39m [36m→[39m [90mdispatched to[39m [36mder-copilot-hand[39m [32m✓[39m
+[96m│[39m [36mder-2[39m [36m→[39m [90mdispatched to[39m [36mder-copilot-hand[39m [32m✓[39m
+[96m│[39m [36mder-3[39m [36m→[39m [90mdispatched to[39m [36mder-copilot-hand[39m [32m✓[39m
+[96m│[39m [36mder-4[39m [36m→[39m [90mdispatched to[39m [36mder-copilot-hand[39m [32m✓[39m
+[96m│[39m [36mder-5[39m [36m→[39m [90mdispatched to[39m [36mder-copilot-hand[39m [32m✓[39m
+[96m│[39m [36mder-6[39m [36m→[39m [90mdispatched to[39m [36mder-copilot-hand[39m [32m✓[39m
+[96m│[39m [36mder-7[39m [36m→[39m [90mdispatched to[39m [36mder-copilot-hand[39m [32m✓[39m</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b2cznwbwv</task-id>
+<summary>Monitor event: "ticket completion progress"</summary>
+<event>der-0 in_flight
+der-1 in_flight
+der-2 in_flight
+der-3 in_flight
+der-4 in_flight
+der-5 in_flight
+der-6 in_flight</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b67p7ig6o</task-id>
+<summary>Monitor event: "derrick add pipeline progress"</summary>
+<event>[Monitor timed out — re-arm if needed.]</event>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b2cznwbwv</task-id>
+<summary>Monitor event: "ticket completion progress"</summary>
+<event>[Monitor timed out — re-arm if needed.]</event>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b0br33toi</task-id>
+<summary>Monitor event: "ticket state changes"</summary>
+<event>---22:56:27---
+der-0 ready
+der-1 in_flight
+der-2 in_flight
+der-3 in_flight
+der-4 in_flight
+der-5 in_flight
+der-6 in_flight</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>b0br33toi</task-id>
+<summary>Monitor event: "ticket state changes"</summary>
+<event>---22:57:28---
+der-0 in_flight
+der-1 in_flight
+der-2 in_flight
+der-3 in_flight
+der-4 in_flight
+der-5 in_flight
+der-6 in_flight</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ba6t49vgn</task-id>
+<summary>Monitor event: "foreman log errors/dispatch"</summary>
+<event>foreman exited with error: substrate error: backend error: Conversion error from type Text at index: 0, premature end of input</event>
+If this event is something the user would act on now, send a PushNotification. Routine or benign output doesn't need one.
+</task-notification>
