@@ -7,7 +7,7 @@ picks up this file automatically.
 
 1. [`/AGENTS.md`](../AGENTS.md) — operational contract for all
    agents building derrick. **Required reading.**
-2. [`/DESIGN.md`](../DESIGN.md) — full architecture and 26
+2. [`/DESIGN.md`](../DESIGN.md) — full architecture and 53
    recorded decisions (§12). This is the source of truth.
 3. `.github/agents/<name>.md` — pick your specialist via the
    routing table in `AGENTS.md`. The body of each specialist
@@ -30,7 +30,7 @@ ticket asks for it. Engineering standards in
   created your branch off the correct parent (see D20). Don't
   create your own branch — push to the one derrick named in the
   dispatch payload.
-- **D1–D26 are decided.** Don't re-litigate.
+- **D1–D53 are decided.** Don't re-litigate.
 - **No mocks.** Tests use real SQLite via `tempfile`.
 
 The rest is in AGENTS.md. Don't duplicate it here.

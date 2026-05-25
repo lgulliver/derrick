@@ -7,7 +7,7 @@ file automatically when invoked here.
 
 1. [`/AGENTS.md`](../AGENTS.md) — operational contract for all
    agents building derrick. **Required reading.**
-2. [`/DESIGN.md`](../DESIGN.md) — full architecture and 26
+2. [`/DESIGN.md`](../DESIGN.md) — full architecture and 53
    recorded decisions (§12). This is the source of truth.
 3. `.codex/agents/<name>.md` — pick your specialist via the
    routing table in `AGENTS.md`. The body of each specialist
@@ -32,7 +32,7 @@ You are **Codex** in derrick's orchestration model
 ## House rules (Codex-specific reminders)
 - **Vocabulary**: site / ticket / batch / hand / foreman / dispatch /
   activity. Never the gastown words.
-- **D1–D26 are decided.** Don't re-litigate. If you spot a real
+- **D1–D53 are decided.** Don't re-litigate. If you spot a real
   problem with one, surface it; don't silently work around it.
 - **No mocks.** Tests use real SQLite via `tempfile`.
 

@@ -67,15 +67,58 @@ Independent work runs concurrently. Each `/add-feature` run gets an isolated git
 
 ---
 
-## Getting started
+## Installation
+
+### Nightly (recommended until v1.0)
+
+Built weekly (Sunday 06:00 UTC) from `main`. This is the working install path today.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lgulliver/derrick/main/scripts/install.sh | bash -s -- --nightly
+```
+
+### Stable (not yet available)
+
+Stable `v*` releases will be cut starting at v1.0. The default (no flag) install will work then. Until then, use `--nightly` or install from source below.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lgulliver/derrick/main/scripts/install.sh | bash
 ```
 
-Supports macOS (Apple Silicon + Intel) and Linux (x86\_64). Homebrew tap and Windows support coming in v1.1.
+### Pin a specific version
 
-> **Rust-native?** `cargo install --git https://github.com/lgulliver/derrick derrick-cli` also works.
+```bash
+DERRICK_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/lgulliver/derrick/main/scripts/install.sh | bash
+```
+
+### Custom install directory
+
+Defaults to `/usr/local/bin`. Override with `DERRICK_INSTALL_DIR`:
+
+```bash
+DERRICK_INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/lgulliver/derrick/main/scripts/install.sh | bash
+```
+
+### From source (Rust toolchain required)
+
+```bash
+cargo install --git https://github.com/lgulliver/derrick derrick-cli
+```
+
+### Platform support
+
+| Platform | Architecture | Status |
+|---|---|---|
+| Linux | x86_64 | Supported |
+| macOS | Apple Silicon (arm64) | Supported |
+| macOS | Intel (x86_64) | Supported |
+| Windows | — | Planned for v1.1 |
+
+Homebrew tap also planned for v1.1.
+
+---
+
+## Getting started
 
 Then adopt a repo:
 
@@ -169,7 +212,7 @@ derrick gain
 
 ## Architecture
 
-17 crates, one binary:
+18 crates, one binary:
 
 | Crate | Role |
 |---|---|
@@ -275,7 +318,7 @@ What's landed and tested:
 - ✅ Per-session token telemetry in `derrick gain` — `derrick gain --run <id>` for per-step breakdown
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 
-431 tests passing across 17 crates.
+431 tests passing across 18 crates.
 
 ## Coverage
 

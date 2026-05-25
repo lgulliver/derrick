@@ -66,18 +66,18 @@ resolve_stable() {
     return
   fi
 
-  curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+  curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
     | grep '"tag_name"' \
-    | sed 's/.*"tag_name": *"\(.*\)".*/\1/'
+    | sed 's/.*"tag_name": *"\(.*\)".*/\1/' || true
 }
 
 # ── resolve latest nightly version ────────────────────────────────────────────
 resolve_nightly() {
-  curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=100" \
+  curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=100" 2>/dev/null \
     | grep '"tag_name"' \
     | sed 's/.*"tag_name": *"\(.*\)".*/\1/' \
     | grep '^nightly-' \
-    | head -1
+    | head -1 || true
 }
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ main() {
     channel="stable"
     info "Fetching latest stable release tag…"
     version=$(resolve_stable)
-    [ -n "$version" ] || die "Could not determine release version. Set DERRICK_VERSION=vX.Y.Z to override."
+    [ -n "$version" ] || die "No stable release found. Use --nightly for the latest nightly build, or set DERRICK_VERSION=vX.Y.Z to pin a version."
   fi
 
   artifact="${BIN}-${platform}"
