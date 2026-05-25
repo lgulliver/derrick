@@ -9,7 +9,7 @@ use derrick_stack::{
     RestackParams, StackBackend,
 };
 use derrick_substrate::{
-    BatchName, BlockReason, InReviewMetadata, Substrate, TicketFilter, TicketState,
+    BatchName, BlockReason, EventKind, EventScope, Substrate, TicketFilter, TicketState,
 };
 use derrick_substrate_native::NativeSubstrate;
 
@@ -268,15 +268,21 @@ async fn stack_submit(
             .await
             .map_err(|error| message(format!("open_pr: {error}")))?;
         // Re-record InReview metadata with the new pr_url / pr_number /
-        // head_sha so future ticks see the published PR.
-        let new_metadata = InReviewMetadata {
-            branch: metadata.branch.clone(),
-            pr_url: Some(info.url.clone()),
-            pr_number: Some(info.number),
-            head_sha: info.head_sha,
-        };
+        // head_sha so future ticks see the published PR. The ticket is
+        // already InReview (we filtered on it), so we emit a fresh
+        // `TicketTransitionedToInReview` event directly rather than
+        // calling `transition_to_in_review`, which would reject because
+        // the substrate requires the current state to be InFlight.
         substrate
-            .transition_to_in_review(&ticket.id, new_metadata)
+            .record_typed_event(
+                EventScope::Ticket(ticket.id.clone()),
+                EventKind::TicketTransitionedToInReview {
+                    branch: metadata.branch.clone(),
+                    pr_url: Some(info.url.clone()),
+                    pr_number: Some(info.number),
+                    head_sha: info.head_sha,
+                },
+            )
             .await
             .map_err(|error| message(format!("update metadata: {error}")))?;
         println!("opened {} for {} → {}", info.url, ticket.id, info.number);
