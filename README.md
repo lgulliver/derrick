@@ -7,7 +7,7 @@
 > *The load-bearing tower over an oil well — the structure that lifts every length of pipe in and out of the hole.*
 
 [![CI](https://github.com/lgulliver/derrick/actions/workflows/ci.yml/badge.svg)](https://github.com/lgulliver/derrick/actions/workflows/ci.yml)
-[![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 **derrick** is a Rust CLI that turns a single command into a full dark-factory feature pipeline — spec, adversarial review, tickets, dispatch, PR stacking — without asking you to wire each underlying tool by hand.
@@ -54,13 +54,14 @@ Every byte across a model boundary earns its place.
 
 | What | How | Typical saving |
 |---|---|---|
+| **Survey** (`derrick-survey`) | Pre-indexes symbols + call-graph (SQLite + FTS5); agents query the graph instead of fanning out across Read/grep calls. Savings tracked in `derrick gain`. | **~300 input tokens** per avoided Read fan-out |
 | **Scrub** (`derrick-scrub`) | Strips CLI noise (progress bars, spinners, ANSI codes) before tool output reaches the model. Records `bytes_raw`/`bytes_saved` per step. | **88% on `git fetch`**, 94% on `cargo build` |
 | **Roughneck** (`derrick-roughneck`) | LLM output compression via prompt injection — model emits a compressed form of its own output before handoff. Three levels: lite (~30%), full (~65%, default), ultra (~75%). | **~65% at Full** on typical model output |
 | **Caveman** | Compresses verbose prose in inter-step handoffs (lite / full / ultra) | **62% at Full** on typical AI-generated text |
 | **Model tiering** | Routes cheap steps to lighter models; expensive reasoning to frontier models | Configurable per pipeline step |
 | **Prompt caching** | Anthropic cache headers on repeated context | Up to 90% on repeated prefixes |
 
-Scrub and caveman fire automatically at every model boundary via Claude Code / Codex hooks written by `derrick init`. Roughneck fires at every model step via prompt injection; configure via `tools.roughneck` in `derrick.yaml`.
+Survey is wired automatically via MCP by `derrick init` — agents query it instead of fanning out across reads without any extra setup. Scrub and caveman fire automatically at every model boundary via Claude Code / Codex hooks written by `derrick init`. Roughneck fires at every model step via prompt injection; configure via `tools.roughneck` in `derrick.yaml`.
 
 ### 🔀 Parallelism
 Independent work runs concurrently. Each `/add-feature` run gets an isolated git worktree. The foreman dispatches multiple hands (agents) in parallel via `join_all`. Multi-reviewer assay fans reviewers out concurrently, bounded by `parallelism.assay_max` (§9.C.5).
@@ -125,6 +126,7 @@ Then adopt a repo:
 ```bash
 cd ~/repos/my-project
 derrick init                     # brownfield-safe: won't clobber your AGENTS.md
+derrick survey build             # index symbols + call-graph for agent queries
 derrick doctor                   # checks toolchain, hooks, squash-merge policy
 derrick foreman start --attached # start the dispatch loop
 ```
@@ -185,10 +187,19 @@ TICKET MANAGEMENT
 STACKING
   stack        show / restack / submit — PR stack management
 
+SURVEY (CODE-GRAPH INDEX)
+  survey       build / search / context / impact / status / serve
+               build    — (re)index the repo
+               search   — FTS symbol search
+               context  — entry points + related symbols + snippets
+               impact   — callers / callees / impact radius
+               status   — freshness report
+               serve    — run MCP server (--mcp for stdio transport)
+
 TOKEN TOOLS
   scrub        Filter CLI noise from stdin (git, cargo, claude, gh, ...)
   caveman      Compress verbose prose from stdin (lite / full / ultra)
-  gain         Show scrub and caveman status
+  gain         Show scrub, caveman, and survey token savings
 
 SHELL
   completions  Generate shell completions (bash / zsh / fish / elvish / powershell)
@@ -198,13 +209,21 @@ SHELL
 ### Token tools in action
 
 ```bash
+# Build (or rebuild) the code-graph index
+derrick survey build
+
+# Query the index — agents do this via MCP; you can also use the CLI
+derrick survey search "parse_session"
+derrick survey impact "TokenUsage"
+derrick survey context "foreman loop"
+
 # Strip git fetch noise before feeding output to a model
 git fetch 2>&1 | derrick scrub --tool git
 
 # Compress an inter-step summary
 echo "I would like to let you know that in order to..." | derrick caveman --intensity full
 
-# Show what's active
+# Show what's active — scrub, caveman, and survey savings
 derrick gain
 ```
 
@@ -336,7 +355,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 53 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 57 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 
