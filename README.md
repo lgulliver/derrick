@@ -358,6 +358,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 - [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 57 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
+- [docs/survey.md](./docs/survey.md) — derrick survey deep-dive: how it works, setup, CLI reference, MCP tools, token accounting
 
 ---
 
