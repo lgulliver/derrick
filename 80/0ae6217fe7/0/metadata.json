@@ -1,0 +1,108 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "800ae6217fe7",
+  "session_id": "1ab747f4-007c-46c5-b660-7d1f4507cd43",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-28T22:52:10.642578Z",
+  "branch": "main",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".gitignore",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "DESIGN.md",
+    "README.md",
+    "crates/derrick-adopt/src/lib.rs",
+    "crates/derrick-caveman/src/lib.rs",
+    "crates/derrick-cli/Cargo.toml",
+    "crates/derrick-cli/src/commands/gain.rs",
+    "crates/derrick-cli/src/commands/init.rs",
+    "crates/derrick-cli/src/commands/mod.rs",
+    "crates/derrick-cli/src/commands/survey.rs",
+    "crates/derrick-cli/src/commands/uninstall.rs",
+    "crates/derrick-cli/src/lib.rs",
+    "crates/derrick-cli/src/telemetry.rs",
+    "crates/derrick-memory/src/lib.rs",
+    "crates/derrick-scrub/src/lib.rs",
+    "crates/derrick-survey/Cargo.toml",
+    "crates/derrick-survey/migrations/0001_initial.sql",
+    "crates/derrick-survey/src/build.rs",
+    "crates/derrick-survey/src/db.rs",
+    "crates/derrick-survey/src/lib.rs",
+    "crates/derrick-survey/src/mcp.rs",
+    "crates/derrick-survey/src/model.rs",
+    "crates/derrick-survey/src/parse/mod.rs",
+    "crates/derrick-survey/src/parse/queries.rs",
+    "crates/derrick-survey/src/query.rs",
+    "crates/derrick-survey/src/walk.rs",
+    "crates/derrick-survey/src/watch.rs",
+    "crates/derrick-survey/tests/end_to_end.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8",
+  "turn_id": "406918606953",
+  "token_usage": {
+    "input_tokens": 746,
+    "cache_creation_tokens": 771294,
+    "cache_read_tokens": 42345494,
+    "output_tokens": 245142,
+    "api_call_count": 374
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-28T22:52:10.537747Z",
+    "agent_lines": 3255,
+    "agent_removed": 28,
+    "human_added": 0,
+    "human_modified": 11,
+    "human_removed": 2,
+    "total_committed": 3266,
+    "total_lines_changed": 3296,
+    "agent_percentage": 99.60558252427184,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 3051,
+      "agent_lines_removed": 19
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 3051,
+      "agent_lines_removed": 19
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 3271,
+      "agent_lines_removed": 21
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 1,
+      "user_lines_removed": 0,
+      "agent_lines_added": 3269,
+      "agent_lines_removed": 28,
+      "user_added_per_file": {
+        ".gitignore": 1
+      }
+    }
+  ]
+}

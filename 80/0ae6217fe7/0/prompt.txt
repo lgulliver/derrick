@@ -1,0 +1,15 @@
+I believe we should support something like this to also help reduce token usage https://github.com/colbymchenry/codegraph
+
+Whether or not that's our own native implementation or not, I will leave for you to decide, but derrick should ideal be a batteries included CLI tool
+
+---
+
+/anthropic-skills:thermo-nuclear-code-quality-review
+
+---
+
+resolve all the findings
+
+---
+
+yeah do that AND update docs

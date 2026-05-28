@@ -1,0 +1,56 @@
+{
+  "cli_version": "0.6.2",
+  "checkpoint_id": "800ae6217fe7",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 5,
+  "files_touched": [
+    ".gitignore",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Cargo.lock",
+    "Cargo.toml",
+    "DESIGN.md",
+    "README.md",
+    "crates/derrick-adopt/src/lib.rs",
+    "crates/derrick-caveman/src/lib.rs",
+    "crates/derrick-cli/Cargo.toml",
+    "crates/derrick-cli/src/commands/gain.rs",
+    "crates/derrick-cli/src/commands/init.rs",
+    "crates/derrick-cli/src/commands/mod.rs",
+    "crates/derrick-cli/src/commands/survey.rs",
+    "crates/derrick-cli/src/commands/uninstall.rs",
+    "crates/derrick-cli/src/lib.rs",
+    "crates/derrick-cli/src/telemetry.rs",
+    "crates/derrick-memory/src/lib.rs",
+    "crates/derrick-scrub/src/lib.rs",
+    "crates/derrick-survey/Cargo.toml",
+    "crates/derrick-survey/migrations/0001_initial.sql",
+    "crates/derrick-survey/src/build.rs",
+    "crates/derrick-survey/src/db.rs",
+    "crates/derrick-survey/src/lib.rs",
+    "crates/derrick-survey/src/mcp.rs",
+    "crates/derrick-survey/src/model.rs",
+    "crates/derrick-survey/src/parse/mod.rs",
+    "crates/derrick-survey/src/parse/queries.rs",
+    "crates/derrick-survey/src/query.rs",
+    "crates/derrick-survey/src/walk.rs",
+    "crates/derrick-survey/src/watch.rs",
+    "crates/derrick-survey/tests/end_to_end.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/80/0ae6217fe7/0/metadata.json",
+      "transcript": "/80/0ae6217fe7/0/full.jsonl",
+      "content_hash": "/80/0ae6217fe7/0/content_hash.txt",
+      "prompt": "/80/0ae6217fe7/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 746,
+    "cache_creation_tokens": 771294,
+    "cache_read_tokens": 42345494,
+    "output_tokens": 245142,
+    "api_call_count": 374
+  }
+}
