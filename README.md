@@ -169,8 +169,8 @@ PIPELINE
   add          Run the full pipeline — prompt is a positional argument
   init         Adopt a repo (brownfield-safe, VS Code / JetBrains opt-in)
   switch       Upgrade a solo-mode repo to crew (or copilot) mode
-  upgrade      [reserved] Binary self-update (not yet implemented)
-  run          add-feature — canonical form of `add` (scripts / CI)
+  upgrade      Binary self-update from the latest GitHub release (--check, --force)
+  run          add-feature / resume — canonical forms for scripts / CI
   foreman      start / stop / tick the dispatch loop
 
 VISIBILITY
@@ -199,7 +199,7 @@ SHELL
 
 ```bash
 # Strip git fetch noise before feeding output to a model
-git fetch 2>&1 | derrick scrub git
+git fetch 2>&1 | derrick scrub --tool git
 
 # Compress an inter-step summary
 echo "I would like to let you know that in order to..." | derrick caveman --intensity full
@@ -302,6 +302,7 @@ What's landed and tested:
 - ✅ Bridge auto-remediation — terminal ticket delete+recreate, active ticket skip
 - ✅ Assay headless mode — CI-safe; only `reject` blocks the pipeline
 - ✅ `derrick switch` — solo → crew upgrade command
+- ✅ `derrick upgrade` — binary self-update from GitHub releases (`--check`, `--force`, atomic replacement with permission preservation)
 - ✅ Constitution seeding in `derrick init` wizard
 - ✅ `derrick init` initial commit fix — creates HEAD before first `derrick add`
 - ✅ Pipeline step order fix — `tasks` before `analyze`
@@ -314,11 +315,10 @@ What's landed and tested:
 - ✅ `scripts/install.sh` — curl-able, platform-detecting (linux-x86\_64, macos-arm64, macos-x86\_64)
 - ✅ GitHub release workflow — builds on `v*` tag push, attaches binaries + checksums
 - ✅ `marketplace.json` — Claude Code plugin discovery
-- 🔜 Homebrew tap (v1.1)
-- ✅ Per-session token telemetry in `derrick gain` — `derrick gain --run <id>` for per-step breakdown
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
+- 🔜 Homebrew tap (v1.1)
 
-431 tests passing across 18 crates.
+631 tests passing across 18 crates.
 
 ## Coverage
 
