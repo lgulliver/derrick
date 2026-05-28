@@ -130,6 +130,7 @@ modules can be tested, profiled, and (later) ported in isolation.
 | Substrate trait | `crates/derrick-substrate` | One async trait (`Substrate`); a native impl, future impls slot in behind it |
 | Native substrate | `crates/derrick-substrate-native` | SQLite-backed execution substrate + in-process foreman |
 | Stack | `crates/derrick-stack` | PR stacking: trait + native / graphite / git-spice backends (see §8.5) |
+| Survey | `crates/derrick-survey` | Native code-graph index: SQLite + FTS5 symbol/reference/call-graph index at `.derrick/index.db`; MCP server surface for agent queries; CLI subcommands `build|search|context|impact|status` for ad-hoc/Bash parity (see §9.B.8) |
 | TUI | `crates/derrick-tui` | `derrick observe` — ratatui-based interactive dashboard (see §5.7) |
 | Observe | `crates/derrick-observe` | Aggregated read-only view (talks to substrate trait) |
 | Config | `crates/derrick-config` | Load + validate `derrick.yaml` (serde) |
@@ -1746,6 +1747,23 @@ across all turns (including sub-agent ones), and writes the real
 number into the run manifest. Falls back to estimate when no
 transcript is available (codex, copilot, raw API).
 
+**9.B.8 Survey index (`derrick-survey`).** A pre-built SQLite + FTS5 index of repository symbols, call relationships, and cross-file references that AI agents query directly instead of fanning out across `grep`/`glob`/`Read` calls. This replaces expensive multi-file reads with cheap structured queries and feeds savings through the existing scrub/caveman/`derrick gain` machinery. Inspired by CodeGraph's data model (symbols + `references` edges + FTS5); the runtime is native Rust, not a Node wrapper. The index lives at `.derrick/index.db` (distinct from the substrate DB at `.derrick/derrick.db`). Gitignored via `.derrick/index.db*`.
+
+The agent-facing surface is an MCP server (`derrick survey serve --mcp`). `derrick-adopt` wires Claude Code MCP support across two files: the **server declaration** goes into `.mcp.json` at the repo root (project-scoped, checked into VCS) as `{ "mcpServers": { "derrick-survey": { "type": "stdio", "command": "derrick", "args": ["survey","serve","--mcp"] } } }` — Claude Code does not honour a `mcpServers` key in `.claude/settings.json` for project scope; the **permissions** (`mcp__derrick-survey__*` tool allow-list) go into `.claude/settings.json` under `permissions.allow` so per-call trust prompts are suppressed for known tools. A known gap: Claude Code still requires a one-time interactive project-trust prompt on first load of `.mcp.json`; there is no settings key to auto-skip it (same "document the gap" posture as D34). Opencode/codex/copilot MCP support is documented and handled where each host supports it, with gaps noted (same posture as D34's Codex-hook deferral). CLI subcommands (`derrick survey build|search|context|impact|status`) ship for ad-hoc and Bash parity. This is the first MCP surface in derrick — today the tool boundary is host CLI subprocess (D30) + hooks (D29); survey adds MCP as a third seam. See D57 for the formal correction to D54 clause (b).
+
+Config:
+
+```yaml
+tools:
+  survey:
+    enabled: true
+    languages: [rust, typescript, javascript, python, go]   # v1 scope
+    db: .derrick/index.db    # rebuildable cache; always gitignored
+    reader_pool: 4           # shared read-only across worktree runs per D38
+```
+
+Per-step manifest fields: `survey_queries` (count of MCP queries issued by agents), `survey_tokens_saved` (estimated tokens saved vs. equivalent Read/grep calls, owner: token-economist role so numbers reconcile with `derrick gain`). `derrick gain --pillars` surfaces survey savings on the Tokens line. `derrick-memory` seeds the index location as a reference memory entry on `derrick init` (Memory pillar). Parse fan-out is per-file and parallel at index-build time (Parallelism pillar; the index DB is shared read-only across worktree runs per D38, behind a reader pool sized by `reader_pool`).
+
 ### 9.C — Parallelism
 
 The pipeline has a sequential spine (`specify → plan → assay →
@@ -2042,10 +2060,16 @@ links back to the section where it lives.
 | D51 | **Pipeline step order fix: `tasks` runs before `analyze`.** Task generation depends on the accepted plan but not on codebase analysis. `analyze` then has the full task list available as context. Canonical order: `specify → clarify → plan → tasks → analyze → assay → bridge → foreman`. All pipeline config, step descriptions, and the §9.B.1 table updated to match. | §4 pipeline yaml / §9.B.1 / §9.C |
 | D52 | **`derrick switch`: solo → crew upgrade command.** New subcommand upgrades a repo from `mode: solo` to `mode: crew` (or `copilot` via `--mode`). Patches `tools.substrate.mode`, adds `peers:` stanza, writes foreman defaults. Idempotent. `--dry-run` previews the yaml diff. | §5.2.2 / §11 |
 | D53 | **`derrick upgrade` name reserved for binary self-update.** The subcommand is registered in the CLI but not yet implemented. It prints a clear "not yet available" message rather than a "command not found" error, preserving the name for the future self-update feature (check GitHub releases, download, replace running binary). | §11 |
+| D54 | **Native code-graph index (`derrick-survey`): native Rust, own SQLite, MCP agent surface.** A pre-built symbol/reference/call-graph index that AI agents query via MCP instead of fanning out across file reads. Three locked choices: (a) **Native Rust, not a Node wrapper** — preserves the single-static-binary, no-external-runtime ethos and D11 substrate/scope discipline; CodeGraph's data model (symbols + `references` edges + FTS5) is the reference, not its runtime. (b) **MCP server as the agent-facing surface** — `derrick survey serve --mcp`; `derrick-adopt` wires the `mcpServers` stanza into Claude Code settings and documents the gap for other hosts (same posture as D34). This is the first MCP seam in derrick; today the boundary is host CLI subprocess (D30) + hooks (D29). CLI subcommands (`build|search|context|impact|status`) ship for Bash/ad-hoc parity. (c) **Separate SQLite DB at `.derrick/index.db`, not the substrate DB** — different schema, rebuildable-cache lifecycle (gitignored), and read-heavy concurrency profile incompatible with the substrate's single-writer contract. | §3.1 / §9.B.8 |
+| D55 | **Survey v1 language scope and pillar wiring.** Language scope: Rust, TypeScript/JavaScript, Python, Go. Symbol index + FTS5 full-text search + caller/callee/impact. Long-tail languages, framework-aware routing, and iOS/RN cross-language bridging deferred. Pillar wiring: Tokens — a `derrick gain` line for survey (`survey_tokens_saved`), owned by the token-economist role so numbers reconcile; Memory — `derrick init` seeds the index location as a reference memory entry; Parallelism — per-file parse fan-out at build time; index DB shared read-only across worktree runs per D38, behind a reader pool (`tools.survey.reader_pool`). Config knob at §9.B.8. | §9.B.8 / §9.A.1 / §9.C |
+| D56 | **Workspace MSRV bump to unlock `derrick-survey` dependencies.** The declared `rust-version = "1.75"` floor (root `Cargo.toml`) blocked the official MCP SDK (`rmcp`, edition 2024 / Rust ≥ 1.85) and current `tree-sitter` (≥ 1.76). The floor was declared but never enforced — CI and release build on `@stable` (1.95 at decision time), with no `rust-toolchain.toml` and no MSRV gate. Resolution: raise `rust-version` to a modern floor (≥ 1.85, the edition-2024 minimum) so survey can depend on `rmcp` and the latest `tree-sitter` grammar line rather than hand-rolling an MCP transport and pinning stale grammars. Supersedes rust-architect's hold-1.75 fallback (which assumed the floor was load-bearing). Other crates' dependencies are upgraded as required by the bump. No MSRV CI gate is added — the floor remains advisory, matching prior practice. | §3.1 / D54 / root `Cargo.toml` |
+| D57 | **MCP host-wiring split: `.mcp.json` for the server stanza, `settings.json` for permissions.** Corrects D54 clause (b), which stated "`derrick-adopt` wires the `mcpServers` stanza into Claude Code's `settings.json`". Claude Code does not honour `mcpServers` in `.claude/settings.json` for project-scoped servers. The correct split: (i) the server declaration is written to `.mcp.json` at the repo root (project-scoped, checked into VCS), shaped as `{ "mcpServers": { "derrick-survey": { "type": "stdio", "command": "derrick", "args": ["survey","serve","--mcp"] } } }`; (ii) per-tool permissions are written to `.claude/settings.json` under `permissions.allow`, using the `mcp__derrick-survey__<tool>` naming convention, to suppress per-call trust prompts for known tools. Known gap: Claude Code still requires a one-time interactive project-trust prompt on first load of `.mcp.json`; no settings key eliminates it (same "document the gap" posture as D34). All other host-wiring statements in D54 and §9.B.8 remain valid. Supersedes D54 clause (b) only. | §9.B.8 / D54 |
 
 ### Remaining open questions
 
-None blocking. All v1 design questions resolved (D1–D53).
+| # | Question | Leaning | Related |
+|---|---|---|---|
+| OQ1 | **Survey index location as reference memory.** Should `derrick init` write a flat root `~/.claude/projects/<repo-key>/memory/MEMORY.md` summary pointing at `.derrick/index.db` (bypassing the `derrick/<site>/` namespace that Claude Code does not recursively load), or defer until Claude Code supports recursive memory-dir discovery? For v1 the survey index is discoverable via the `.mcp.json` MCP registration (D57), so the memory seed is deferred — not load-bearing. | Defer; revisit if Claude Code adds recursive memory-dir support. | D55 / D57 |
 
 New questions raised during implementation will be tracked as
 GitHub issues with the `design-question` label, and locked-in
@@ -2067,3 +2091,12 @@ We're calling it **derrick**. Reasons:
   the time of writing; will re-check before publishing).
 
 Binary: `derrick`. Repo: `derrick`. Plugin: `derrick`.
+
+**Crate vocabulary — petroleum metaphor lineage:**
+
+| Name | Petroleum meaning | Derrick meaning |
+|---|---|---|
+| `derrick` | Load-bearing rig tower | The whole system |
+| `survey` | Seismic survey: map subsurface structure before drilling | Code-graph index: map code structure before working it |
+
+`survey` was chosen over `core` (too overloaded in computing: CPU cores, core dumps) and retains the petroleum-metaphor lineage: a seismic survey is exactly what you do before putting pipe in the ground. `derrick survey …` reads naturally as a command. It does not collide with the reserved vocabulary (site / ticket / batch / hand / foreman / dispatch / activity) or any existing subcommand.

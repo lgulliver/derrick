@@ -84,6 +84,22 @@ fn print_human(
                 );
             }
 
+            // Survey section — only rendered when queries were observed (§9.B.8 / D55).
+            if u.survey_queries > 0 {
+                println!();
+                println!("  Survey ({scope})");
+                println!(
+                    "  {:<28} {:>12}",
+                    "queries (mcp__derrick-survey__*)", u.survey_queries
+                );
+                println!(
+                    "  {:<28} {:>12}  \u{2190} est. ~{} tokens/query saved vs grep/Read fan-out",
+                    "tokens saved (estimate)",
+                    fmt_tokens(u.survey_tokens_saved()),
+                    telemetry::SURVEY_TOKENS_SAVED_PER_QUERY,
+                );
+            }
+
             println!();
             let input_cost = (u.input_tokens as f64 / 1_000_000.0) * 3.0;
             let output_cost = (u.output_tokens as f64 / 1_000_000.0) * 15.0;
@@ -141,6 +157,10 @@ fn print_json(usage: &Option<telemetry::TokenUsage>, all_sessions: bool) {
             "total_tokens": u.total_tokens(),
             "cache_savings_tokens": u.cache_savings_tokens(),
             "estimated_cost_usd": telemetry::estimate_session_cost_usd(u),
+            // Survey savings (§9.B.8 / D55). survey_tokens_saved is an estimate;
+            // see SURVEY_TOKENS_SAVED_PER_QUERY for the documented assumption.
+            "survey_queries": u.survey_queries,
+            "survey_tokens_saved": u.survey_tokens_saved(),
         }),
         None => serde_json::json!({ "scope": "none", "reason": "no_session_data" }),
     };
@@ -454,6 +474,7 @@ mod tests {
             cache_creation_input_tokens: 300,
             session_count: 1,
             message_count: 10,
+            survey_queries: 0,
         };
         let val = serde_json::json!({
             "total_tokens": u.total_tokens(),
@@ -461,6 +482,31 @@ mod tests {
         });
         assert_eq!(val["total_tokens"], 6500);
         assert_eq!(val["cache_savings_tokens"], 4500);
+    }
+
+    #[test]
+    fn gain_json_with_survey_queries_includes_savings() {
+        use crate::telemetry::{TokenUsage, SURVEY_TOKENS_SAVED_PER_QUERY};
+        let u = TokenUsage {
+            input_tokens: 500,
+            output_tokens: 100,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            session_count: 1,
+            message_count: 5,
+            survey_queries: 4,
+        };
+        assert_eq!(u.survey_tokens_saved(), 4 * SURVEY_TOKENS_SAVED_PER_QUERY);
+        // Verify the JSON shape that print_json would emit.
+        let val = serde_json::json!({
+            "survey_queries": u.survey_queries,
+            "survey_tokens_saved": u.survey_tokens_saved(),
+        });
+        assert_eq!(val["survey_queries"], 4);
+        assert_eq!(
+            val["survey_tokens_saved"],
+            4 * SURVEY_TOKENS_SAVED_PER_QUERY
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ Derrick is a unified front door over **speckit**, an in-process
 one primary command (`/add-feature`).
 
 The full design is in [`DESIGN.md`](./DESIGN.md). It is the source
-of truth. Fifty-three decisions are recorded in §12 as **D1–D53**;
+of truth. Fifty-seven decisions are recorded in §12 as **D1–D57**;
 do not re-litigate them without filing a `design-question` issue
 and updating §12 with a new `D` entry.
 

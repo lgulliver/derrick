@@ -16,6 +16,7 @@ pub(crate) async fn execute(args: UninstallArgs) -> Result<CliExitCode, crate::C
     let config_path = repo_root.join("derrick.yaml");
     let state_dir = repo_root.join(".derrick");
     let codex_instructions = repo_root.join(".codex/instructions.md");
+    let mcp_json = repo_root.join(".mcp.json");
 
     // Summarise what will be removed.
     let mut will_remove: Vec<String> = Vec::new();
@@ -29,6 +30,12 @@ pub(crate) async fn execute(args: UninstallArgs) -> Result<CliExitCode, crate::C
         will_remove.push(format!(
             "{} (derrick block stripped)",
             codex_instructions.display()
+        ));
+    }
+    if mcp_json.exists() {
+        will_remove.push(format!(
+            "{} (derrick-survey MCP server stripped)",
+            mcp_json.display()
         ));
     }
 
@@ -91,6 +98,17 @@ fn remove_items(
         println!("removed  {}", codex_instructions.display());
     } else {
         println!("stripped {}", codex_instructions.display());
+    }
+
+    let mcp_json = repo_root.join(".mcp.json");
+    let had_mcp_json = mcp_json.exists();
+    derrick_adopt::remove_survey_mcp(repo_root).map_err(|e| message(e.to_string()))?;
+    if had_mcp_json {
+        if mcp_json.exists() {
+            println!("stripped {}", mcp_json.display());
+        } else {
+            println!("removed  {}", mcp_json.display());
+        }
     }
 
     println!("done");

@@ -15,6 +15,7 @@ pub(crate) mod run;
 pub(crate) mod scrub;
 pub(crate) mod stack;
 pub(crate) mod status;
+pub(crate) mod survey;
 pub(crate) mod switch;
 pub(crate) mod ticket;
 pub(crate) mod uninstall;
@@ -48,6 +49,8 @@ pub(crate) enum Command {
     Gain(GainArgs),
     /// Switch the repo's substrate mode in-place (e.g. solo → crew).
     Switch(SwitchArgs),
+    /// Query the native code-graph index (symbols, references, impact).
+    Survey(SurveyArgs),
 }
 
 /// Arguments for `derrick add` — positional prompt shorthand for `run add-feature`.
@@ -470,6 +473,76 @@ pub(crate) struct SwitchArgs {
     /// Preview changes without writing derrick.yaml.
     #[arg(long)]
     pub(crate) dry_run: bool,
+}
+
+// ---------- Survey subcommand group (D54/D55) ----------------------------
+
+#[derive(Debug, Args)]
+pub(crate) struct SurveyArgs {
+    #[command(subcommand)]
+    pub(crate) command: SurveyCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SurveyCommand {
+    /// (Re)build the index from the working tree.
+    Build(SurveyBuildArgs),
+    /// Full-text search over symbol names and signatures.
+    Search(SurveyQueryArgs),
+    /// Show entry-point symbols for a query plus what they reference.
+    Context(SurveyQueryArgs),
+    /// Show direct callers and callees of a symbol.
+    Impact(SurveyImpactArgs),
+    /// Index freshness and size summary.
+    Status(SurveyStatusArgs),
+    /// Run the MCP server over stdio (what coding-agent hosts launch).
+    Serve(SurveyServeArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SurveyBuildArgs {
+    /// Reparse every file, ignoring unchanged content hashes.
+    #[arg(long)]
+    pub(crate) full: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SurveyQueryArgs {
+    /// Search terms.
+    pub(crate) query: String,
+    /// Maximum number of entry-point hits.
+    #[arg(long, default_value_t = 20)]
+    pub(crate) limit: usize,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SurveyImpactArgs {
+    /// Symbol name to resolve.
+    pub(crate) symbol: String,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SurveyStatusArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SurveyServeArgs {
+    /// Serve over the Model Context Protocol on stdio. Accepted for forward
+    /// compatibility; stdio MCP is currently the only transport.
+    #[arg(long, default_value_t = true)]
+    pub(crate) mcp: bool,
 }
 
 impl From<CompletionShell> for clap_complete::Shell {

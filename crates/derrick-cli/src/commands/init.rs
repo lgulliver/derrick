@@ -302,7 +302,7 @@ async fn greenfield_init(
     let config = read_config(repo_root)?;
     create_dir_all(&repo_root.join(config.state().dir()))?;
     let gitignore = repo_root.join(config.state().dir()).join(".gitignore");
-    write_file(&gitignore, "runs/\nstate.json\nworktrees/\n")?;
+    write_file(&gitignore, "runs/\nstate.json\nindex.db*\nworktrees/\n")?;
 
     let substrate =
         NativeSubstrate::open(native_paths(repo_root, &config), config.site().clone()).await?;
@@ -322,7 +322,17 @@ async fn greenfield_init(
         for path in &written_commands {
             print_written(path);
         }
+    } else {
+        // --no-hooks still needs the survey MCP tools auto-allowed, or the
+        // server registered below would require manual per-tool approval.
+        derrick_adopt::write_survey_permissions(repo_root).map_err(|e| message(e.to_string()))?;
+        print_written(".claude/settings.json");
     }
+
+    // Register the survey MCP server regardless of --no-hooks; the server
+    // declaration is independent of the D29 hook config (D54/D57).
+    derrick_adopt::write_mcp_json(repo_root).map_err(|e| message(e.to_string()))?;
+    print_written(".mcp.json");
 
     if resolved.vscode {
         write_vscode_configs(repo_root)?;

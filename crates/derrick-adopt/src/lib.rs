@@ -66,6 +66,16 @@ const COMMAND_NAMES: [&str; 10] = [
     "speckit.constitution.md",
 ];
 const AGENT_NAMES: [&str; 2] = ["foreman.md", "hand-copilot.md"];
+/// Name of the survey MCP server as registered in `.mcp.json` (D54/D57).
+const SURVEY_MCP_SERVER: &str = "derrick-survey";
+/// Survey MCP tools auto-allowed in `.claude/settings.json` `permissions.allow`.
+/// Naming follows Claude Code's `mcp__<server>__<tool>` convention (D57).
+const SURVEY_MCP_TOOLS: [&str; 4] = [
+    "derrick_survey_search",
+    "derrick_survey_context",
+    "derrick_survey_impact",
+    "derrick_survey_status",
+];
 const CONSTITUTION_CANDIDATES: [&str; 8] = [
     ".specify/memory/constitution.md",
     "CONSTITUTION.md",
@@ -104,6 +114,7 @@ impl Adopter {
         report.claude_md = self.relative_if_file("CLAUDE.md");
         report.claude_dir = self.relative_if_dir(".claude");
         report.claude_settings = self.relative_if_file(".claude/settings.json");
+        report.mcp_json = self.relative_if_file(".mcp.json");
         report.codex_dir = self.relative_if_dir(".codex");
         report.codex_instructions = self.relative_if_file(".codex/instructions.md");
         report.codex_config = self
@@ -245,8 +256,11 @@ impl Adopter {
         self.add_append_writes(detection, opts, &mut plan);
         self.add_commands_and_agents(detection, opts, &mut plan, &mut warnings);
         self.add_codex_instructions(detection, &mut plan);
+        self.add_mcp_write(detection, &mut plan)?;
         if !opts.no_hooks {
             self.add_hook_write(detection, opts, &mut plan, &mut blockers, &mut warnings)?;
+        } else {
+            self.add_survey_permissions_write(detection, &mut plan)?;
         }
         self.add_warnings(detection, opts, &mut warnings);
 
@@ -403,9 +417,7 @@ impl Adopter {
             })?;
             let path = entry.path();
             if path.is_file()
-                && extension.map_or(true, |expected| {
-                    path.extension() == Some(OsStr::new(expected))
-                })
+                && extension.is_none_or(|expected| path.extension() == Some(OsStr::new(expected)))
             {
                 files.push(relative_path(&path, &self.repo_root));
             }
@@ -444,6 +456,7 @@ impl Adopter {
             &report.agents_md,
             &report.claude_md,
             &report.claude_settings,
+            &report.mcp_json,
             &report.codex_instructions,
             &report.readme,
             &report.contributing,
@@ -556,7 +569,8 @@ impl Adopter {
         });
         plan.writes.push(PlannedWrite {
             path: PathBuf::from(".derrick/.gitignore"),
-            content: "runs/\nstate.json\nderrick.db*\nworktrees/\n.adopt-stage-*/\n".to_owned(),
+            content: "runs/\nstate.json\nderrick.db*\nindex.db*\nworktrees/\n.adopt-stage-*/\n"
+                .to_owned(),
             mode: WriteMode::Create,
             rationale: "keep local derrick state out of git".to_owned(),
         });
@@ -709,6 +723,28 @@ impl Adopter {
         });
     }
 
+    /// Registers the survey MCP server in `.mcp.json` (D54/D57). The server
+    /// declaration must live in `.mcp.json` at the repo root — Claude Code does
+    /// not honour `mcpServers` in `.claude/settings.json` for project scope.
+    fn add_mcp_write(
+        &self,
+        detection: &DetectionReport,
+        plan: &mut AdoptionPlan,
+    ) -> Result<(), AdoptError> {
+        let existing = detection
+            .mcp_json
+            .as_ref()
+            .and_then(|path| detection.file_contents.get(path))
+            .map(String::as_str);
+        plan.writes.push(PlannedWrite {
+            path: PathBuf::from(".mcp.json"),
+            content: render_mcp_json(existing)?,
+            mode: WriteMode::MergeJson,
+            rationale: "register the derrick-survey MCP server for agent queries".to_owned(),
+        });
+        Ok(())
+    }
+
     fn add_hook_write(
         &self,
         detection: &DetectionReport,
@@ -725,6 +761,43 @@ impl Adopter {
             content,
             mode: WriteMode::MergeJson,
             rationale: "Claude Code D29 scrub and caveman hooks".to_owned(),
+        });
+        Ok(())
+    }
+
+    /// On the `--no-hooks` path the scrub/caveman settings write is skipped, so
+    /// the survey MCP server registered by [`Self::add_mcp_write`] would have no
+    /// auto-allowed tools. Write a permissions-only `.claude/settings.json` so
+    /// the server is usable without manual per-tool approval.
+    fn add_survey_permissions_write(
+        &self,
+        detection: &DetectionReport,
+        plan: &mut AdoptionPlan,
+    ) -> Result<(), AdoptError> {
+        let mut root = match &detection.claude_settings {
+            Some(path) => match detection.file_contents.get(path) {
+                Some(contents) => serde_json::from_str::<Value>(contents).map_err(|error| {
+                    AdoptError::InvalidOptions(format!(
+                        "{} is corrupt JSON: {error}",
+                        path.display()
+                    ))
+                })?,
+                None => json!({}),
+            },
+            None => json!({}),
+        };
+        if !root.is_object() {
+            return Err(AdoptError::InvalidOptions(
+                ".claude/settings.json must contain a JSON object".to_owned(),
+            ));
+        }
+        merge_survey_permissions(&mut root);
+        let content = serde_json::to_string_pretty(&root)?;
+        plan.writes.push(PlannedWrite {
+            path: PathBuf::from(".claude/settings.json"),
+            content: format!("{content}\n"),
+            mode: WriteMode::MergeJson,
+            rationale: "auto-allow derrick-survey MCP tools".to_owned(),
         });
         Ok(())
     }
@@ -826,6 +899,8 @@ pub struct DetectionReport {
     pub claude_dir: Option<PathBuf>,
     /// Existing `.claude/settings.json`.
     pub claude_settings: Option<PathBuf>,
+    /// Existing `.mcp.json` at the repo root.
+    pub mcp_json: Option<PathBuf>,
     /// Existing `.claude/agents/*.md`.
     pub claude_agents: Vec<PathBuf>,
     /// Existing `.claude/commands/*.md`.
@@ -1088,6 +1163,75 @@ fn substrate_mode_name(mode: SubstrateMode) -> &'static str {
     }
 }
 
+/// Merges the `derrick-survey` stdio server into `.mcp.json`, preserving any
+/// existing `mcpServers` entries and other top-level keys (D57).
+fn render_mcp_json(existing: Option<&str>) -> Result<String, AdoptError> {
+    let mut root = match existing {
+        Some(contents) if !contents.trim().is_empty() => serde_json::from_str::<Value>(contents)
+            .map_err(|error| {
+                AdoptError::InvalidOptions(format!(".mcp.json is corrupt JSON: {error}"))
+            })?,
+        _ => json!({}),
+    };
+    if !root.is_object() {
+        return Err(AdoptError::InvalidOptions(
+            ".mcp.json must contain a JSON object".to_owned(),
+        ));
+    }
+    let servers = root
+        .as_object_mut()
+        .and_then(|object| {
+            object
+                .entry("mcpServers")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        })
+        .ok_or_else(|| {
+            AdoptError::InvalidOptions(".mcp.json mcpServers must be an object".to_owned())
+        })?;
+    servers.insert(
+        SURVEY_MCP_SERVER.to_owned(),
+        json!({
+            "type": "stdio",
+            "command": "derrick",
+            "args": ["survey", "serve", "--mcp"],
+        }),
+    );
+    let content = serde_json::to_string_pretty(&root)?;
+    Ok(format!("{content}\n"))
+}
+
+/// Adds the survey MCP tools to `permissions.allow`, de-duplicating so repeated
+/// adopt runs stay idempotent (D57).
+fn merge_survey_permissions(root: &mut Value) {
+    let Some(allow) = root
+        .as_object_mut()
+        .and_then(|object| {
+            object
+                .entry("permissions")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+        })
+        .and_then(|permissions| {
+            permissions
+                .entry("allow")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+        })
+    else {
+        return;
+    };
+    for tool in SURVEY_MCP_TOOLS {
+        let entry = format!("mcp__{SURVEY_MCP_SERVER}__{tool}");
+        if !allow
+            .iter()
+            .any(|value| value.as_str() == Some(entry.as_str()))
+        {
+            allow.push(Value::String(entry));
+        }
+    }
+}
+
 fn render_settings_json(
     detection: &DetectionReport,
     force: bool,
@@ -1138,6 +1282,7 @@ fn render_settings_json(
         &mut blockers,
         &mut warnings,
     );
+    merge_survey_permissions(&mut root);
     let content = serde_json::to_string_pretty(&root)?;
     Ok((format!("{content}\n"), blockers, warnings))
 }
@@ -1393,6 +1538,163 @@ pub fn write_claude_settings(repo_root: &Path, force: bool) -> Result<(), AdoptE
         return Err(AdoptError::InvalidOptions(blockers.join("; ")));
     }
     let _ = warnings;
+    merge_survey_permissions(&mut root);
+    let content = serde_json::to_string_pretty(&root)?;
+    fs::write(&path, format!("{content}\n")).map_err(|source| AdoptError::Io { path, source })?;
+    Ok(())
+}
+
+/// Writes a permissions-only `.claude/settings.json` that auto-allows the
+/// survey MCP tools, without the scrub/caveman hooks. Used by the greenfield
+/// `--no-hooks` path so the registered MCP server is still usable.
+pub fn write_survey_permissions(repo_root: &Path) -> Result<(), AdoptError> {
+    let dir = repo_root.join(".claude");
+    fs::create_dir_all(&dir).map_err(|source| AdoptError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+    let path = dir.join("settings.json");
+    let mut root = if path.exists() {
+        let contents = fs::read_to_string(&path).map_err(|source| AdoptError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        serde_json::from_str::<Value>(&contents).map_err(|error| {
+            AdoptError::InvalidOptions(format!("{} is corrupt JSON: {error}", path.display()))
+        })?
+    } else {
+        json!({})
+    };
+    if !root.is_object() {
+        return Err(AdoptError::InvalidOptions(
+            ".claude/settings.json must contain a JSON object".to_owned(),
+        ));
+    }
+    merge_survey_permissions(&mut root);
+    let content = serde_json::to_string_pretty(&root)?;
+    fs::write(&path, format!("{content}\n")).map_err(|source| AdoptError::Io { path, source })?;
+    Ok(())
+}
+
+/// Writes `.mcp.json` registering the derrick-survey MCP server (D54/D57).
+///
+/// Merges into any existing `.mcp.json`, preserving other servers and keys.
+/// Called by the greenfield init path; the brownfield adopt path drives the
+/// same write through [`AdoptionPlan`].
+pub fn write_mcp_json(repo_root: &Path) -> Result<(), AdoptError> {
+    let path = repo_root.join(".mcp.json");
+    let existing = if path.exists() {
+        Some(fs::read_to_string(&path).map_err(|source| AdoptError::Io {
+            path: path.clone(),
+            source,
+        })?)
+    } else {
+        None
+    };
+    let content = render_mcp_json(existing.as_deref())?;
+    atomic_write(&path, content.as_bytes())?;
+    Ok(())
+}
+
+/// Write `contents` to `path` atomically: stage to a sibling temp file then
+/// rename over the target, so a crash mid-write can't leave a truncated
+/// `.mcp.json` that Claude Code would refuse to parse on next launch.
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), AdoptError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(".{}.tmp-{}", file_name_str(path), Uuid::new_v4()));
+    fs::write(&tmp, contents).map_err(|source| AdoptError::Io {
+        path: tmp.clone(),
+        source,
+    })?;
+    fs::rename(&tmp, path).map_err(|source| {
+        let _ = fs::remove_file(&tmp);
+        AdoptError::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+fn file_name_str(path: &Path) -> &str {
+    path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+}
+
+/// Removes the derrick-survey MCP registration written by [`write_mcp_json`]
+/// and the adopt path: strips the `derrick-survey` server from `.mcp.json` and
+/// the `mcp__derrick-survey__*` entries from `.claude/settings.json`
+/// `permissions.allow`. Cleans up containers that become empty. No-op when the
+/// files or keys are absent.
+pub fn remove_survey_mcp(repo_root: &Path) -> Result<(), AdoptError> {
+    remove_survey_from_mcp_json(repo_root)?;
+    remove_survey_from_settings(repo_root)?;
+    Ok(())
+}
+
+fn remove_survey_from_mcp_json(repo_root: &Path) -> Result<(), AdoptError> {
+    let path = repo_root.join(".mcp.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents = fs::read_to_string(&path).map_err(|source| AdoptError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let mut root: Value = match serde_json::from_str(&contents) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    let mut servers_empty = false;
+    if let Some(servers) = root
+        .as_object_mut()
+        .and_then(|object| object.get_mut("mcpServers"))
+        .and_then(Value::as_object_mut)
+    {
+        servers.remove(SURVEY_MCP_SERVER);
+        servers_empty = servers.is_empty();
+    }
+    if let Some(object) = root.as_object_mut() {
+        if servers_empty {
+            object.remove("mcpServers");
+        }
+        if object.is_empty() {
+            fs::remove_file(&path).map_err(|source| AdoptError::Io { path, source })?;
+            return Ok(());
+        }
+    }
+    let content = serde_json::to_string_pretty(&root)?;
+    fs::write(&path, format!("{content}\n")).map_err(|source| AdoptError::Io { path, source })?;
+    Ok(())
+}
+
+fn remove_survey_from_settings(repo_root: &Path) -> Result<(), AdoptError> {
+    let path = repo_root.join(".claude/settings.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents = fs::read_to_string(&path).map_err(|source| AdoptError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let mut root: Value = match serde_json::from_str(&contents) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    let survey_entries: BTreeSet<String> = SURVEY_MCP_TOOLS
+        .iter()
+        .map(|tool| format!("mcp__{SURVEY_MCP_SERVER}__{tool}"))
+        .collect();
+    if let Some(allow) = root
+        .get_mut("permissions")
+        .and_then(Value::as_object_mut)
+        .and_then(|permissions| permissions.get_mut("allow"))
+        .and_then(Value::as_array_mut)
+    {
+        allow.retain(|value| {
+            value
+                .as_str()
+                .is_none_or(|entry| !survey_entries.contains(entry))
+        });
+    }
     let content = serde_json::to_string_pretty(&root)?;
     fs::write(&path, format!("{content}\n")).map_err(|source| AdoptError::Io { path, source })?;
     Ok(())
@@ -1990,6 +2292,102 @@ mod tests {
     }
 
     #[test]
+    fn propose_registers_survey_mcp_server_and_permissions() {
+        let report = DetectionReport {
+            git_repo: true,
+            ..DetectionReport::default()
+        };
+        let plan = Adopter::new(".")
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+
+        let mcp = plan
+            .writes
+            .iter()
+            .find(|write| write.path == Path::new(".mcp.json"))
+            .unwrap_or_else(|| panic!("missing .mcp.json write"));
+        let parsed: Value = serde_json::from_str(&mcp.content)
+            .unwrap_or_else(|error| panic!("mcp json invalid: {error}"));
+        assert_eq!(
+            parsed["mcpServers"]["derrick-survey"]["command"],
+            json!("derrick")
+        );
+        assert_eq!(
+            parsed["mcpServers"]["derrick-survey"]["args"],
+            json!(["survey", "serve", "--mcp"])
+        );
+
+        let settings = plan
+            .writes
+            .iter()
+            .find(|write| write.path == Path::new(".claude/settings.json"))
+            .unwrap_or_else(|| panic!("missing settings write"));
+        assert!(settings
+            .content
+            .contains("mcp__derrick-survey__derrick_survey_search"));
+        assert!(settings
+            .content
+            .contains("mcp__derrick-survey__derrick_survey_status"));
+    }
+
+    #[test]
+    fn mcp_json_merge_preserves_existing_servers_and_is_idempotent() {
+        let existing = r#"{"mcpServers":{"other":{"type":"stdio","command":"foo"}}}"#;
+        let first = render_mcp_json(Some(existing))
+            .unwrap_or_else(|error| panic!("render failed: {error}"));
+        let parsed: Value =
+            serde_json::from_str(&first).unwrap_or_else(|error| panic!("invalid: {error}"));
+        assert_eq!(parsed["mcpServers"]["other"]["command"], json!("foo"));
+        assert_eq!(
+            parsed["mcpServers"]["derrick-survey"]["command"],
+            json!("derrick")
+        );
+
+        let second = render_mcp_json(Some(&first))
+            .unwrap_or_else(|error| panic!("second render failed: {error}"));
+        assert_eq!(first, second, "merge must be idempotent");
+    }
+
+    #[test]
+    fn remove_survey_mcp_strips_server_and_permissions() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        write(
+            &dir.path().join(".mcp.json"),
+            r#"{"mcpServers":{"derrick-survey":{"type":"stdio","command":"derrick","args":["survey","serve","--mcp"]},"other":{"command":"foo"}}}"#,
+        );
+        write(
+            &dir.path().join(".claude/settings.json"),
+            r#"{"permissions":{"allow":["mcp__derrick-survey__derrick_survey_search","Bash(ls)"]}}"#,
+        );
+
+        remove_survey_mcp(dir.path()).unwrap_or_else(|error| panic!("remove failed: {error}"));
+
+        let mcp = fs::read_to_string(dir.path().join(".mcp.json"))
+            .unwrap_or_else(|error| panic!("read mcp failed: {error}"));
+        let parsed: Value =
+            serde_json::from_str(&mcp).unwrap_or_else(|error| panic!("invalid: {error}"));
+        assert!(parsed["mcpServers"].get("derrick-survey").is_none());
+        assert_eq!(parsed["mcpServers"]["other"]["command"], json!("foo"));
+
+        let settings = fs::read_to_string(dir.path().join(".claude/settings.json"))
+            .unwrap_or_else(|error| panic!("read settings failed: {error}"));
+        assert!(!settings.contains("derrick-survey"));
+        assert!(settings.contains("Bash(ls)"));
+    }
+
+    #[test]
+    fn remove_survey_mcp_deletes_mcp_json_when_only_survey() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        write_mcp_json(dir.path()).unwrap_or_else(|error| panic!("write failed: {error}"));
+        assert!(dir.path().join(".mcp.json").exists());
+        remove_survey_mcp(dir.path()).unwrap_or_else(|error| panic!("remove failed: {error}"));
+        assert!(
+            !dir.path().join(".mcp.json").exists(),
+            ".mcp.json should be deleted when only the survey server was present"
+        );
+    }
+
+    #[test]
     fn no_hooks_and_invalid_prefix_are_respected() {
         let report = DetectionReport {
             git_repo: true,
@@ -2000,10 +2398,26 @@ mod tests {
         let plan = Adopter::new(".")
             .propose(&report, &options, None)
             .unwrap_or_else(|error| panic!("propose failed: {error}"));
-        assert!(!plan
+        // --no-hooks skips scrub/caveman hooks but still writes a
+        // permissions-only settings.json so the survey MCP tools are allowed.
+        let settings = plan
             .writes
             .iter()
-            .any(|write| write.path == Path::new(".claude/settings.json")));
+            .find(|write| write.path == Path::new(".claude/settings.json"))
+            .unwrap_or_else(|| panic!("missing permissions-only settings.json"));
+        let value: Value = serde_json::from_str(&settings.content)
+            .unwrap_or_else(|error| panic!("settings.json not valid JSON: {error}"));
+        assert!(
+            value.get("hooks").is_none(),
+            "--no-hooks must not write any hooks: {}",
+            settings.content
+        );
+        let allow = value["permissions"]["allow"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing permissions.allow"));
+        assert!(allow
+            .iter()
+            .any(|v| v.as_str() == Some("mcp__derrick-survey__derrick_survey_search")));
 
         options.site_prefix = "TOOLONG".to_owned();
         let error = Adopter::new(".")

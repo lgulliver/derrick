@@ -40,10 +40,15 @@ Thumbs.db
 .derrick/derrick.db
 .derrick/derrick.db-shm
 .derrick/derrick.db-wal
+.derrick/index.db
+.derrick/index.db-shm
+.derrick/index.db-wal
 .derrick/worktrees/
 
-# Claude Code agent worktrees (runtime state, never committed)
+# Claude Code agent worktrees and plan files (runtime state, never committed)
 .claude/worktrees/
+.claude/plans/
+.claude/settings.local.json
 
 # Local secrets (never committed)
 .env

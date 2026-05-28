@@ -505,7 +505,7 @@ fn prose_tokens(input: &str) -> Vec<ProseToken<'_>> {
                 if input
                     .get(pos..peek)
                     .and_then(|slice| slice.chars().next())
-                    .map_or(true, |c| !c.is_whitespace())
+                    .is_none_or(|c| !c.is_whitespace())
                 {
                     break;
                 }

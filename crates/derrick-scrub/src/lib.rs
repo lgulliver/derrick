@@ -297,7 +297,7 @@ impl<'a> Engine<'a> {
 
     fn process_line(&mut self, line: &Line<'_>) {
         self.stats.lines_in += 1;
-        if self.rules.map_or(true, RuleSet::is_empty) {
+        if self.rules.is_none_or(RuleSet::is_empty) {
             self.emit_raw(line);
             return;
         }

@@ -212,11 +212,12 @@ derrick gain
 
 ## Architecture
 
-18 crates, one binary:
+19 crates, one binary:
 
 | Crate | Role |
 |---|---|
 | `derrick-cli` | Binary, all subcommands |
+| `derrick-survey` | Native code-graph index: SQLite + FTS5 symbol/reference/call-graph at `.derrick/index.db`, queried by agents over MCP; CLI `survey build/search/context/impact/status` |
 | `derrick-flow` | Pipeline executor, state machine |
 | `derrick-assay` | Multi-reviewer adversarial assay + shared pipeline types (RunError, StepExecution, io helpers) |
 | `derrick-config` | Typed schema, layered loader, 14 validation rules |
@@ -228,7 +229,7 @@ derrick gain
 | `derrick-observe` | TUI wiring, stack refresh, event loop |
 | `derrick-stack` | PR stacking (native / Graphite / git-spice) |
 | `derrick-models` | Model trait + provider implementations (anthropic, openai-cli, opencode, shell) |
-| `derrick-adopt` | Brownfield adoption — detects AGENTS.md, writes hooks |
+| `derrick-adopt` | Brownfield adoption — detects AGENTS.md, writes hooks + survey MCP wiring |
 | `derrick-substrate` | Substrate trait + ticket/batch/hand state types |
 | `derrick-substrate-native` | SQLite-backed substrate + foreman loop |
 | `derrick-claude` | Claude substrate |
@@ -284,7 +285,7 @@ You can override any role binding in `roles`.
 
 ## Status
 
-**Active development.** Architecture and 53 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 57 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -308,6 +309,7 @@ What's landed and tested:
 - ✅ Pipeline step order fix — `tasks` before `analyze`
 - ✅ `derrick observe` — live ratatui dashboard
 - ✅ Tiered memory with tag index and lesson retrieval
+- ✅ `derrick survey` — native code-graph index (SQLite + FTS5) over Rust/TS/JS/Python/Go; MCP server (`survey serve --mcp`) so agents query symbols/callers/impact instead of fanning out across reads; debounced watcher keeps it fresh
 - ✅ `derrick init` — brownfield-safe, VS Code + JetBrains opt-in, Codex instructions
 - ✅ `derrick doctor` — live squash-merge policy check via GitHub API
 - ✅ PR stacking: `stack show / restack / submit`
@@ -318,7 +320,7 @@ What's landed and tested:
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 - 🔜 Homebrew tap (v1.1)
 
-631 tests passing across 18 crates.
+650 tests passing across 19 crates.
 
 ## Coverage
 

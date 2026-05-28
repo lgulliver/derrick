@@ -315,7 +315,7 @@ impl MemoryStore {
         let lessons = read_lessons(&self.paths.repo_state.join(LESSONS_FILE))?;
         Ok(lessons
             .into_iter()
-            .filter(|lesson| since.map_or(true, |since| lesson.at > since))
+            .filter(|lesson| since.is_none_or(|since| lesson.at > since))
             .collect())
     }
 

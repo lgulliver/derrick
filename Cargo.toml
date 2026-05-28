@@ -19,12 +19,13 @@ members = [
     "crates/derrick-observe",
     "crates/derrick-config",
     "crates/derrick-roughneck",
+    "crates/derrick-survey",
 ]
 
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/lgulliver/derrick"
 authors = ["Liam Gulliver and derrick contributors"]
@@ -59,6 +60,19 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 notify = "8"
 owo-colors = "4"
+# Survey index (derrick-survey, D54/D55)
+rayon = "1"
+blake3 = "1"
+walkdir = "2"
+rmcp = { version = "0.9", features = ["server", "transport-io", "macros"] }
+schemars = "1"
+tree-sitter = "0.24"
+streaming-iterator = "0.1"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
 tempfile = "3"
 assert_cmd = "2"
 ratatui = "0.30"
