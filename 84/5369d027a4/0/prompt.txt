@@ -1,0 +1,6 @@
+<bash-input>git push</bash-input>
+<bash-stdout>     ~/repos/derrick     main ●     23:56:22 </bash-stdout><bash-stderr></bash-stderr>
+
+---
+
+docs require updating still, especially the readme
