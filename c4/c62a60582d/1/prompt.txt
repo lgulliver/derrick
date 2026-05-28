@@ -1,0 +1,1 @@
+Review the derrick application - update the documentation across the board as required, especially our readme.md to be an accurate reflection of where the project is currently, its capabilities, pre-requisites and how to use derrick
