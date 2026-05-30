@@ -1,0 +1,49 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "2c5d590f62ed",
+  "session_id": "ee1a4069-d828-47a2-9d6f-57c4ba260f68",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-30T21:19:12.575691Z",
+  "branch": "feat/foreman-adaptive-model-selection",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "DESIGN.md",
+    "crates/derrick-copilot/src/local_dispatcher.rs",
+    "crates/derrick-hand/src/lib.rs",
+    "crates/derrick-tools/src/catalogue.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-haiku-4-5-20251001",
+  "turn_id": "d8924aa91f74",
+  "token_usage": {
+    "input_tokens": 57133,
+    "cache_creation_tokens": 1066879,
+    "cache_read_tokens": 51557689,
+    "output_tokens": 239684,
+    "api_call_count": 170
+  },
+  "session_metrics": {
+    "turn_count": 12
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-30T21:19:12.500144Z",
+    "agent_lines": 194,
+    "agent_removed": 12,
+    "human_added": 0,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 195,
+    "total_lines_changed": 207,
+    "agent_percentage": 99.51690821256038,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
