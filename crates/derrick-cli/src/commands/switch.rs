@@ -6,12 +6,12 @@
 //!   derrick switch --mode solo           # crew → solo
 //!   derrick switch --mode crew --dry-run # preview only
 
-use std::io::IsTerminal;
 use std::path::Path;
 
 use crate::commands::init::{available_model_ids, nested_mapping, recommended_role_bindings};
 use crate::commands::InitMode;
 use crate::exit_code::CliExitCode;
+use crate::ui;
 use crate::{current_repo_root, message, write_file};
 
 /// Changes accumulated during a mode switch, used both for dry-run output
@@ -53,14 +53,11 @@ pub(crate) async fn execute(
     let target_mode = args.mode.as_str();
 
     if current_mode == target_mode {
-        let styled = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
-        if styled {
-            println!(
-                "  \x1b[33m·\x1b[0m  Already in \x1b[1m{target_mode}\x1b[0m mode — nothing to do."
-            );
-        } else {
-            println!("  ·  Already in {target_mode} mode — nothing to do.");
-        }
+        println!(
+            "  {}  Already in {} mode — nothing to do.",
+            ui::yellow("\u{b7}"),
+            ui::bold(target_mode)
+        );
         return Ok(CliExitCode::Success);
     }
 
@@ -298,12 +295,8 @@ fn update_roles(
     Ok(changes)
 }
 
-fn is_styled() -> bool {
-    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
-}
-
 fn print_dry_run(changes: &SwitchChanges) {
-    let styled = is_styled();
+    let styled = ui::styled();
     println!();
     if styled {
         println!("  \x1b[1mDry run — no files will be changed.\x1b[0m");
@@ -315,7 +308,7 @@ fn print_dry_run(changes: &SwitchChanges) {
 }
 
 fn print_summary(changes: &SwitchChanges) {
-    let styled = is_styled();
+    let styled = ui::styled();
     println!();
     if styled {
         println!(

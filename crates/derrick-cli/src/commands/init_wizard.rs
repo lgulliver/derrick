@@ -11,30 +11,26 @@ use crate::commands::init::{
 };
 
 // ─── terminal style ──────────────────────────────────────────────────────────
+//
+// Styling is centralised in `crate::ui`; these thin aliases keep the local call
+// sites readable and the splash banner self-contained.
+
+use crate::ui;
 
 fn is_styled() -> bool {
-    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    ui::styled()
 }
 
 fn bold(s: &str) -> String {
-    if is_styled() {
-        format!("\x1b[1m{s}\x1b[0m")
-    } else {
-        s.to_owned()
-    }
+    ui::bold(s)
 }
 
 fn dim(s: &str) -> String {
-    if is_styled() {
-        format!("\x1b[2m{s}\x1b[0m")
-    } else {
-        s.to_owned()
-    }
+    ui::dim(s)
 }
 
 fn section_rule(title: &str) -> String {
-    let fill = 62usize.saturating_sub(title.len() + 5);
-    format!("  ─── {title} {}", "─".repeat(fill))
+    ui::section(title)
 }
 
 // ─── types ───────────────────────────────────────────────────────────────────

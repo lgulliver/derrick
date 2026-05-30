@@ -16,6 +16,7 @@ mod exit_code;
 mod output;
 mod progress;
 mod telemetry;
+mod ui;
 mod upgrade;
 
 /// Runs the CLI with an argument iterator and returns the process exit code.

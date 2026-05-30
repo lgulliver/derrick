@@ -9,6 +9,7 @@ use derrick_substrate_native::NativeSubstrate;
 use crate::commands::init_wizard::{AiConfigurationStyle, WizardInput, WizardSelection};
 use crate::commands::InitArgs;
 use crate::exit_code::CliExitCode;
+use crate::ui;
 use crate::{create_dir_all, current_repo_root, message, native_paths, read_config, write_file};
 
 const INIT_TEMPLATE: &str = include_str!(concat!(
@@ -241,14 +242,7 @@ async fn brownfield_init(
 
     let outcome = adopter.apply(&plan).await?;
     println!();
-    if is_styled() {
-        println!(
-            "  \x1b[32m✓\x1b[0m  \x1b[1m{}\x1b[0m  ready",
-            opts.site_name
-        );
-    } else {
-        println!("  ✓  {}  ready", opts.site_name);
-    }
+    println!("{}", ui::ready(&opts.site_name));
     println!();
     for path in &outcome.written {
         print_written(&path.display().to_string());
@@ -266,11 +260,7 @@ async fn brownfield_init(
     }
     if !resolved.yes {
         println!();
-        if is_styled() {
-            println!("  \x1b[36m›\x1b[0m  review `git status` before committing");
-        } else {
-            println!("  ›  review `git status` before committing");
-        }
+        println!("{}", ui::hint("review `git status` before committing"));
     }
     println!();
     Ok(CliExitCode::Success)
@@ -742,16 +732,15 @@ fn ensure_git_repo(yes: bool) -> Result<std::path::PathBuf, crate::CliError> {
         source,
     })?;
 
-    if is_styled() {
-        eprintln!("  \x1b[33m⚠\x1b[0m  No git repository found in this directory or any parent.");
-    } else {
-        eprintln!("  ⚠  No git repository found in this directory or any parent.");
-    }
+    eprintln!(
+        "{}",
+        ui::warn("No git repository found in this directory or any parent.")
+    );
 
     let confirmed = if yes {
         true
     } else if std::io::stdin().is_terminal() {
-        if is_styled() {
+        if ui::styled() {
             eprint!(
                 "  \x1b[36m›\x1b[0m  Run \x1b[1mgit init\x1b[0m in {}? [Y/n] ",
                 cwd.display()
@@ -790,17 +779,13 @@ fn ensure_git_repo(yes: bool) -> Result<std::path::PathBuf, crate::CliError> {
         return Err(message("git init failed"));
     }
 
-    if is_styled() {
-        println!("  \x1b[32m·\x1b[0m  git repository initialised");
-    } else {
-        println!("  ·  git repository initialised");
-    }
+    println!("{}", ui::done("git repository initialised"));
 
     Ok(cwd)
 }
 
 fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
-    if is_styled() {
+    if ui::styled() {
         eprintln!(
             "  \x1b[33m⚠\x1b[0m  \x1b[1mspeckit\x1b[0m (\x1b[1mspecify\x1b[0m) is not installed."
         );
@@ -819,7 +804,7 @@ fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
     let install = if yes {
         true
     } else if std::io::stdin().is_terminal() {
-        if is_styled() {
+        if ui::styled() {
             eprint!("  \x1b[36m›\x1b[0m  Install speckit now (\x1b[1muv tool install specify-cli\x1b[0m)? [Y/n] ");
         } else {
             eprint!("  ›  Install speckit now (uv tool install specify-cli)? [Y/n] ");
@@ -839,7 +824,7 @@ fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
     };
 
     if !install {
-        if is_styled() {
+        if ui::styled() {
             eprintln!("  \x1b[33m·\x1b[0m  Skipping speckit install — using fallback shims.");
         } else {
             eprintln!("  ·  Skipping speckit install — using fallback shims.");
@@ -855,7 +840,7 @@ fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // `uv` is not on PATH — treat the same as a failed install.
-            if is_styled() {
+            if ui::styled() {
                 eprintln!("  \x1b[33m⚠\x1b[0m  speckit install failed — `uv` not found on PATH.");
                 eprintln!("     Install uv (<https://docs.astral.sh/uv/>) then run \x1b[1muv tool install specify-cli\x1b[0m.");
             } else {
@@ -873,7 +858,7 @@ fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
     };
 
     if !status.success() {
-        if is_styled() {
+        if ui::styled() {
             eprintln!("  \x1b[33m⚠\x1b[0m  speckit install failed — falling back to shims.");
             eprintln!("     Run \x1b[1muv tool install specify-cli\x1b[0m manually and re-run \x1b[1mderrick init\x1b[0m.");
         } else {
@@ -883,32 +868,16 @@ fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
         return Ok(());
     }
 
-    if is_styled() {
-        println!("  \x1b[32m·\x1b[0m  speckit installed");
-    } else {
-        println!("  ·  speckit installed");
-    }
+    println!("{}", ui::done("speckit installed"));
     Ok(())
 }
 
 fn print_written(path: &str) {
-    if is_styled() {
-        println!("  \x1b[32m·\x1b[0m  {path}");
-    } else {
-        println!("  ·  {path}");
-    }
+    println!("{}", ui::written(path));
 }
 
 fn print_skipped(path: &str) {
-    if is_styled() {
-        println!("  \x1b[2m·  {path}  (skipped, already exists)\x1b[0m");
-    } else {
-        println!("  ·  {path}  (skipped, already exists)");
-    }
-}
-
-fn is_styled() -> bool {
-    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    println!("{}", ui::skipped(path));
 }
 
 fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
@@ -924,20 +893,16 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
     let ai = ai_style.label();
 
     println!();
-    if is_styled() {
-        println!("  \x1b[32m✓\x1b[0m  \x1b[1m{name}\x1b[0m  ready");
-    } else {
-        println!("  ✓  {name}  ready");
-    }
+    println!("{}", ui::ready(name));
     println!();
     println!("  {:<11}  {mode}", "mode");
     println!("  {:<11}  {prefix}", "prefix");
     println!("  {:<11}  {ai}", "ai config");
     println!("  {:<11}  {steps}", "pipeline");
     println!();
-    if is_styled() {
-        println!("  \x1b[2m{}\x1b[0m", "─".repeat(62));
-        println!();
+    println!("{}", ui::rule());
+    println!();
+    if ui::styled() {
         println!("  \x1b[36m›\x1b[0m  run \x1b[1mderrick doctor\x1b[0m to verify the install");
         println!(
             "  \x1b[36m›\x1b[0m  refine your constitution at \x1b[1m.specify/memory/constitution.md\x1b[0m"
@@ -946,8 +911,6 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
         println!();
         println!("      \x1b[1mderrick add\x1b[0m \x1b[2m\"describe your feature\"\x1b[0m");
     } else {
-        println!("  {}", "─".repeat(62));
-        println!();
         println!("  ›  run `derrick doctor` to verify the install");
         println!("  ›  refine your constitution at .specify/memory/constitution.md");
         println!("  ›  start your first feature:");
@@ -1012,7 +975,7 @@ fn maybe_initial_commit(repo_root: &Path) -> Result<(), crate::CliError> {
         })?;
     if !add_status.success() {
         // Non-fatal: the user can commit manually if something is odd.
-        if is_styled() {
+        if ui::styled() {
             eprintln!("  \x1b[33m⚠\x1b[0m  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`.");
         } else {
             eprintln!("  ⚠  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`.");
@@ -1029,7 +992,7 @@ fn maybe_initial_commit(repo_root: &Path) -> Result<(), crate::CliError> {
             source,
         })?;
     if !commit_status.success() {
-        if is_styled() {
+        if ui::styled() {
             eprintln!("  \x1b[33m⚠\x1b[0m  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`.");
         } else {
             eprintln!("  ⚠  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`.");
@@ -1037,7 +1000,7 @@ fn maybe_initial_commit(repo_root: &Path) -> Result<(), crate::CliError> {
         return Ok(());
     }
 
-    if is_styled() {
+    if ui::styled() {
         println!("  \x1b[32m·\x1b[0m  initial commit created");
     } else {
         println!("  ·  initial commit created");
@@ -1094,7 +1057,7 @@ fn check_prerequisites() -> Result<(), crate::CliError> {
     for tool in &tools {
         let found = tool.bins.iter().any(|b| which::which(b).is_ok());
         if !found && tool.required {
-            if is_styled() {
+            if ui::styled() {
                 missing.push(format!(
                     "  \x1b[31m✗\x1b[0m  \x1b[1m{}\x1b[0m\n     install: \x1b[2m{}\x1b[0m",
                     tool.name, tool.install
@@ -1116,13 +1079,11 @@ fn check_prerequisites() -> Result<(), crate::CliError> {
             .map(|(bin, url)| format!("           {bin}  {url}"))
             .collect::<Vec<_>>()
             .join("\n");
-        if is_styled() {
-            missing.push(format!(
-                "  \x1b[31m✗\x1b[0m  \x1b[1mAI provider CLI\x1b[0m  (need at least one)\n{list}"
-            ));
-        } else {
-            missing.push(format!("  ✗  AI provider CLI  (need at least one)\n{list}"));
-        }
+        missing.push(format!(
+            "  {}  {}  (need at least one)\n{list}",
+            ui::cross(),
+            ui::bold("AI provider CLI"),
+        ));
     }
 
     if missing.is_empty() {
@@ -1130,7 +1091,7 @@ fn check_prerequisites() -> Result<(), crate::CliError> {
     }
 
     let mut message = String::new();
-    if is_styled() {
+    if ui::styled() {
         message.push_str(
             "\x1b[1mMissing required tools — install them and re-run `derrick init`:\x1b[0m\n\n",
         );
