@@ -118,17 +118,28 @@ pub fn parse_model_choice(raw: &str) -> ModelChoice {
 /// Resolves the model id to pass to `host` for `choice` given the ticket's
 /// resolved `tier` (D67).
 ///
-/// - [`ModelChoice::Pinned`] with non-blank content → that id;
+/// - [`ModelChoice::Pinned`] with non-blank content → that id, normalised
+///   for `host`;
 /// - [`ModelChoice::Pinned`] that is blank → `None` (host picks its default);
-/// - [`ModelChoice::Auto`] → the host's model for `bias.unwrap_or(tier)`.
+/// - [`ModelChoice::Auto`] → the host's model for `bias.unwrap_or(tier)`,
+///   normalised for `host`.
+///
+/// The chosen id is always passed through [`HostCatalogue::normalize`] before
+/// returning, so a pinned `provider/model` reaches a bare-id host
+/// (claude/codex/copilot) with the leading `provider/` stripped (D65). This
+/// matters for the dispatchers that spawn their CLI directly with this value
+/// (`ClaudeHandDispatcher`, `LocalCopilotHandDispatcher`); `normalize` is
+/// idempotent, so the generic [`HostCliHandDispatcher`] re-normalising inside
+/// the adapter is a safe no-op, and auto-tier ids (already correctly shaped)
+/// are unaffected.
 pub fn select_model(host: &str, choice: &ModelChoice, tier: Tier) -> Option<String> {
     match choice {
-        ModelChoice::Pinned(id) if !id.trim().is_empty() => Some(id.clone()),
+        ModelChoice::Pinned(id) if !id.trim().is_empty() => Some(normalize(host, id.trim())),
         ModelChoice::Pinned(_) => None,
         ModelChoice::Auto { bias } => builtin()
             .host(host)?
             .model_for_tier(bias.unwrap_or(tier))
-            .map(str::to_owned),
+            .map(|m| normalize(host, m)),
     }
 }
 
@@ -464,6 +475,39 @@ mod tests {
         assert_eq!(
             select_model("claude", &ModelChoice::Pinned(String::new()), Tier::Heavy),
             None
+        );
+    }
+
+    #[test]
+    fn select_model_normalises_pin_per_host() {
+        // A pinned provider/model on a bare-id host (claude) has its leading
+        // `provider/` stripped, so the value reaching a directly-spawned CLI is
+        // already shaped correctly.
+        assert_eq!(
+            select_model(
+                "claude",
+                &ModelChoice::Pinned("anthropic/claude-sonnet-4-6".to_owned()),
+                Tier::Standard,
+            ),
+            Some("claude-sonnet-4-6".to_owned())
+        );
+        // The same pin on a provider/model host (opencode) is left unchanged.
+        assert_eq!(
+            select_model(
+                "opencode",
+                &ModelChoice::Pinned("anthropic/claude-sonnet-4-6".to_owned()),
+                Tier::Standard,
+            ),
+            Some("anthropic/claude-sonnet-4-6".to_owned())
+        );
+        // An openai-prefixed pin on codex (bare-id) is stripped to the bare id.
+        assert_eq!(
+            select_model(
+                "codex",
+                &ModelChoice::Pinned("openai/gpt-5.4".to_owned()),
+                Tier::Standard,
+            ),
+            Some("gpt-5.4".to_owned())
         );
     }
 

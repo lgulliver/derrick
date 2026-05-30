@@ -817,14 +817,17 @@ mod tests {
             .unwrap_or_else(|message| panic!("{message}"));
         assert!(!result.completed_synchronously);
 
-        // (2) Captured request carries the RAW model, headless = true, and the
-        // cwd is the per-ticket worktree (NOT the shared worktree_root).
+        // (2) Captured request carries the per-host-normalised model (the
+        // pinned `openai/gpt-5.5` has its `openai/` prefix stripped for the
+        // bare-id codex host by `select_model`; the adapter re-normalising is a
+        // no-op), headless = true, and the cwd is the per-ticket worktree (NOT
+        // the shared worktree_root).
         let request = captured
             .lock()
             .expect("lock")
             .clone()
             .unwrap_or_else(|| panic!("host run was invoked"));
-        assert_eq!(request.model, Some("openai/gpt-5.5".to_owned()));
+        assert_eq!(request.model, Some("gpt-5.5".to_owned()));
         assert!(request.headless);
         let expected_worktree = worktree_root.join("drk-200");
         assert_eq!(request.cwd, expected_worktree);

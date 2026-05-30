@@ -299,6 +299,65 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
             return Err(DispatchError::Substrate(error));
         }
 
+        // 3+. Everything past worktree registration is fallible and must not
+        //     leak the tracked worktree (queue dir/file, assignment, dispatch
+        //     note). Mirror `HostCliHandDispatcher`: on any error prune the
+        //     worktree dir + forget the ticket-worktree row (and release the
+        //     ticket if it was already assigned) before propagating. Without
+        //     this a tracked worktree leaks until TTL and a redispatch can
+        //     reuse a stale queue/worktree.
+        let mut assigned = false;
+        let outcome = self
+            .dispatch_after_registration(
+                ctx,
+                &branch,
+                &worktree_path,
+                model,
+                hand_id,
+                &mut assigned,
+            )
+            .await;
+        match outcome {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                if assigned {
+                    let reason = format!("copilot dispatch failed after assignment: {error}");
+                    if let Err(release_error) =
+                        self.substrate.release_from_hand(&ticket.id, reason).await
+                    {
+                        warn!(
+                            ?release_error,
+                            ticket = %ticket.id,
+                            "release_from_hand failed during copilot dispatch cleanup"
+                        );
+                    }
+                }
+                self.cleanup_ticket_worktree(ticket.id.as_str(), &worktree_path)
+                    .await;
+                Err(error)
+            }
+        }
+    }
+}
+
+impl LocalCopilotHandDispatcher {
+    /// Post-registration body of `dispatch`. Any `Err` returned here triggers
+    /// the caller's cleanup (prune the worktree dir + forget the tracked row,
+    /// and release the ticket when `*assigned` is true). `*assigned` is set
+    /// once `assign_to_hand` succeeds so the caller knows whether a release is
+    /// required.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_after_registration(
+        &self,
+        ctx: &DispatchContext<'_>,
+        branch: &str,
+        worktree_path: &std::path::Path,
+        model: Option<String>,
+        hand_id: HandId,
+        assigned: &mut bool,
+    ) -> Result<DispatchResult, DispatchError> {
+        let ticket = ctx.ticket;
+
         // 3. Render the queue file and write it.
         tokio::fs::create_dir_all(&self.config.queue_dir)
             .await
@@ -312,9 +371,9 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
             batch,
             &ticket.title,
             &ticket.body,
-            &branch,
+            branch,
             &ctx.parent_branch,
-            &worktree_path,
+            worktree_path,
             self.config.roughneck_enabled,
             &self.config.roughneck_level,
         );
@@ -328,6 +387,7 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
 
         // 4. Atomic Ready -> InFlight + owner = hand.
         self.substrate.assign_to_hand(&ticket.id, &hand_id).await?;
+        *assigned = true;
 
         // 5. Surface dispatch in the activity log.
         let queue_path_display = queue_file.display().to_string();
@@ -344,7 +404,7 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
             .await?;
         info!(
             ticket = %ticket.id,
-            branch = branch.as_str(),
+            branch = branch,
             queue_file = %queue_path_display,
             worktree = %worktree_display,
             auto_dispatch = self.config.auto_dispatch,
@@ -358,9 +418,9 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
                 ticket_id: ticket.id.clone(),
                 hand_id: hand_id.clone(),
                 prompt: queue_body,
-                worktree: worktree_path,
+                worktree: worktree_path.to_path_buf(),
                 repo_root: self.config.repo_root.clone(),
-                branch: branch.clone(),
+                branch: branch.to_owned(),
                 parent_branch: ctx.parent_branch.clone(),
                 copilot_binary: self.config.copilot_binary.clone(),
                 model: model.clone(),
@@ -380,6 +440,20 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
             hand: hand_id,
             completed_synchronously: false,
         })
+    }
+
+    /// Remove a per-ticket worktree (on-disk directory + tracked substrate row)
+    /// after a failed dispatch. Best-effort: the foreman TTL cleanup pass is
+    /// the backstop for anything left behind.
+    async fn cleanup_ticket_worktree(&self, ticket_id: &str, worktree_path: &std::path::Path) {
+        prune_ticket_worktree_dir(&self.config.repo_root, worktree_path).await;
+        if let Err(error) = self.substrate.forget_ticket_worktree(ticket_id).await {
+            warn!(
+                ?error,
+                ticket = %ticket_id,
+                "forget_ticket_worktree failed during copilot dispatch cleanup"
+            );
+        }
     }
 }
 
@@ -946,6 +1020,68 @@ mod tests {
             body.starts_with("[ROUGHNECK:FULL]"),
             "expected queue body to begin with ROUGHNECK header, got: {}",
             &body[..body.len().min(80)]
+        );
+    }
+
+    #[tokio::test]
+    async fn post_registration_failure_does_not_strand_worktree() {
+        // Force a failure on a post-registration step (`assign_to_hand`) by
+        // pre-assigning the ticket to another hand so it is no longer Ready.
+        // The worktree row is registered before the assign, so this exercises
+        // the cleanup-on-error path: no tracked worktree row may remain and the
+        // worktree dir must be removed (mirrors derrick-hand's failure tests).
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let repo = tempdir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        init_repo(&repo);
+
+        let state_td = TempDir::new_in(tempdir.path()).expect("state td");
+        let substrate = open_substrate(&state_td).await;
+        let ticket = make_ticket(&substrate, "drk-504").await;
+
+        // Pre-assign the ticket to a separate hand so the dispatcher's own
+        // `assign_to_hand` fails (ticket is InFlight, not Ready).
+        let blocker = Hand {
+            id: HandId::new("blocker-hand").expect("hand id"),
+            kind: HandKind::Copilot,
+            last_seen: Some(Utc::now()),
+        };
+        substrate
+            .register_hand(blocker.clone())
+            .await
+            .expect("register blocker");
+        substrate
+            .assign_to_hand(&ticket.id, &blocker.id)
+            .await
+            .expect("pre-assign");
+
+        let worktree_root = tempdir.path().join("copilot-worktrees");
+        let queue_dir = tempdir.path().join("queue");
+        let dispatcher = LocalCopilotHandDispatcher::new(
+            Arc::clone(&substrate),
+            dispatcher_config(repo, worktree_root.clone(), queue_dir),
+        );
+
+        let result = dispatcher.dispatch(&ctx(&ticket, tempdir.path())).await;
+        assert!(
+            result.is_err(),
+            "dispatch must surface Err when a post-registration step fails"
+        );
+
+        // The worktree dir is removed and its tracked row is forgotten, so a
+        // redispatch does not reuse a stale checkout and the foreman TTL pass
+        // has nothing to reclaim.
+        assert!(
+            !worktree_root.join("drk-504").join(".git").exists(),
+            "worktree should be removed after a failed post-registration step"
+        );
+        assert!(
+            substrate
+                .list_worktrees(true)
+                .await
+                .expect("list worktrees")
+                .is_empty(),
+            "ticket worktree row should be forgotten after a failed dispatch"
         );
     }
 
