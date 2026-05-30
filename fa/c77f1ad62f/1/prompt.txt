@@ -1,0 +1,1 @@
+<ci-monitor-event>lgulliver/derrick PR #19 has merge conflicts. Please resolve the conflicts so the PR can be merged.</ci-monitor-event>
