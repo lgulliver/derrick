@@ -109,10 +109,22 @@ mod tests {
             found,
             "watcher did not re-index the new file within the deadline"
         );
-        // A successful rebuild clears the dirty flag.
+
+        // Stop mutating the tree so no fresh event re-arms `dirty`, then poll
+        // until the in-flight rebuild settles and clears the flag. Checking it
+        // once would race the write above, which sets `dirty` on every touch.
+        let settle = Instant::now() + Duration::from_secs(10);
+        let mut cleared = false;
+        while Instant::now() < settle {
+            if !dirty.load(Ordering::Relaxed) {
+                cleared = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         assert!(
-            !dirty.load(Ordering::Relaxed),
-            "dirty flag should be cleared after rebuild"
+            cleared,
+            "dirty flag should be cleared after the rebuild settles"
         );
 
         watcher.abort();
