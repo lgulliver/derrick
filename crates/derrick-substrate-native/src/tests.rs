@@ -704,7 +704,7 @@ async fn migration_0002_upgrades_v1_db_in_place() -> Result<(), SubstrateError> 
     let v: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(sql_error)?;
-    assert_eq!(v, 3);
+    assert_eq!(v, SCHEMA_VERSION);
     Ok(())
 }
 
@@ -872,7 +872,7 @@ async fn migration_0003_preserves_hand_references_from_v2() -> Result<(), Substr
     let v: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(sql_error)?;
-    assert_eq!(v, 3);
+    assert_eq!(v, SCHEMA_VERSION);
 
     let owner: Option<String> = connection
         .query_row(
@@ -921,6 +921,105 @@ async fn migration_0003_preserves_hand_references_from_v2() -> Result<(), Substr
     Ok(())
 }
 
+/// Build a v3 DB (user_version = 3) by running 0001 + 0002 + 0003 and seeding
+/// a site row. Used to prove 0004 adds the `complexity` column without losing
+/// data or breaking referential integrity.
+fn write_v3_db(db_path: &Path) -> Result<(), SubstrateError> {
+    let mut connection = open_writer_connection(db_path)?;
+    connection
+        .execute_batch(MIGRATION_0001)
+        .map_err(sql_error)?;
+    let s = site_for_v1();
+    connection
+        .execute(
+            "INSERT INTO site (name, prefix, created_at) VALUES (?1, ?2, ?3)",
+            params![s.name(), s.prefix(), now_text()],
+        )
+        .map_err(sql_error)?;
+    run_migration_0002(&mut connection)?;
+    run_migration_0003(&mut connection)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, 3, "write_v3_db must leave the DB at user_version = 3");
+    Ok(())
+}
+
+#[tokio::test]
+async fn migration_0004_adds_complexity_column_and_round_trips() -> Result<(), SubstrateError> {
+    // A v3 DB (no complexity column) seeded with a ticket must migrate to v4
+    // and then accept/read-back every Complexity value plus NULL, with no FK
+    // violations and user_version == 4.
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let config = native_config_fixture(&tempdir);
+    write_v3_db(&config.db_path)?;
+
+    // Seed a pre-existing ticket into the v3 schema (no complexity column).
+    {
+        let connection = open_writer_connection(&config.db_path)?;
+        connection
+            .execute(
+                "INSERT INTO tickets (id, batch, ordinal, title, body, state, owner,
+                                      merge_sha, block_reason, block_reason_detail,
+                                      created_at, updated_at)
+                 VALUES (?1, NULL, NULL, 'title', 'body', 'ready', NULL,
+                         NULL, NULL, NULL, ?2, ?2)",
+                params!["drk-900", now_text()],
+            )
+            .map_err(sql_error)?;
+    }
+
+    // open() runs migrate() -> 0004 adds the complexity column.
+    let substrate = NativeSubstrate::open(config.clone(), site_for_v1()).await?;
+
+    // The pre-existing ticket survives with NULL complexity.
+    let legacy = substrate
+        .get_ticket(&ticket_id("drk-900")?)
+        .await?
+        .expect("legacy ticket survived 0004");
+    assert_eq!(legacy.complexity, None);
+
+    // Insert tickets carrying each Complexity value plus an explicit None.
+    for (id, complexity) in [
+        ("drk-901", Some(Complexity::Low)),
+        ("drk-902", Some(Complexity::Standard)),
+        ("drk-903", Some(Complexity::Heavy)),
+        ("drk-904", None),
+    ] {
+        let mut nt = new_ticket(id)?;
+        nt.complexity = complexity;
+        let created = substrate.create_ticket(nt).await?;
+        assert_eq!(created.complexity, complexity);
+        let read_back = substrate
+            .get_ticket(&ticket_id(id)?)
+            .await?
+            .expect("ticket persisted");
+        assert_eq!(read_back.complexity, complexity);
+    }
+
+    let connection = open_writer_connection(&config.db_path)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, 4);
+
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check;")
+        .map_err(sql_error)?;
+    let violations: Vec<(String, i64, String, i64)> = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    assert!(
+        violations.is_empty(),
+        "no FK violations after 0004, got: {violations:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn migration_refuses_newer_than_supported_db() -> Result<(), SubstrateError> {
     let tempdir = tempfile::tempdir().map_err(io_error)?;
@@ -929,7 +1028,7 @@ async fn migration_refuses_newer_than_supported_db() -> Result<(), SubstrateErro
     drop(s);
     let connection = open_writer_connection(&config.db_path)?;
     connection
-        .pragma_update(None, "user_version", 4u32)
+        .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
         .map_err(sql_error)?;
     drop(connection);
     let result = NativeSubstrate::open(config, site_fixture()).await;
@@ -1420,6 +1519,48 @@ async fn worktree_lifecycle_round_trip() -> Result<(), SubstrateError> {
     substrate.finalize_worktree("run-1").await?;
     substrate.close_worktree("run-1").await?;
     assert!(substrate.list_worktrees(false).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn ticket_worktree_register_and_forget() -> Result<(), SubstrateError> {
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+
+    // Hand dispatchers pick their own root + ticket-id dir, so the row stores
+    // the caller-supplied path verbatim (NOT worktree_root.join(...)).
+    let explicit = tempdir.path().join("host-worktrees").join("drk-1");
+    substrate
+        .register_ticket_worktree("drk-1", "derrick/ad-hoc/drk-1", &explicit)
+        .await?;
+
+    let rows = substrate.list_worktrees(false).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].run_id, "ticket:drk-1");
+    assert_eq!(rows[0].path, explicit);
+
+    // Re-dispatch reopens the same row rather than duplicating it.
+    substrate
+        .register_ticket_worktree("drk-1", "derrick/ad-hoc/drk-1", &explicit)
+        .await?;
+    assert_eq!(substrate.list_worktrees(false).await?.len(), 1);
+
+    // Backdated rows are eligible for the foreman TTL backstop.
+    let stale_text = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+    let conn = rusqlite::Connection::open(tempdir.path().join("derrick.db")).map_err(sql_error)?;
+    conn.execute(
+        "UPDATE worktrees SET created_at = ?1 WHERE run_id = ?2",
+        rusqlite::params![stale_text, "ticket:drk-1"],
+    )
+    .map_err(sql_error)?;
+    drop(conn);
+    let stale = substrate.list_stale_open_worktrees(Utc::now()).await?;
+    assert!(stale.iter().any(|w| w.run_id == "ticket:drk-1"));
+
+    // Forget removes the row; a second forget is a no-op.
+    substrate.forget_ticket_worktree("drk-1").await?;
+    assert!(substrate.list_worktrees(true).await?.is_empty());
+    substrate.forget_ticket_worktree("drk-1").await?;
     Ok(())
 }
 

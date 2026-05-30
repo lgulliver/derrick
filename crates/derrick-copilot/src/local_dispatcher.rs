@@ -17,13 +17,14 @@ use async_trait::async_trait;
 use chrono::Utc;
 use derrick_stack::{OpenPrParams, StackBackend};
 use derrick_substrate::{
-    EventKind, EventScope, Hand, HandId, HandKind, InReviewMetadata, ManualDoneAttestation,
-    Substrate, SubstrateError, Ticket, TicketId, TicketState,
+    Complexity, EventKind, EventScope, Hand, HandId, HandKind, InReviewMetadata,
+    ManualDoneAttestation, Substrate, SubstrateError, Ticket, TicketId, TicketState,
 };
 use derrick_substrate_native::foreman::{
-    DispatchContext, DispatchError, DispatchResult, HandDispatcher,
+    prune_ticket_worktree_dir, DispatchContext, DispatchError, DispatchResult, HandDispatcher,
 };
 use derrick_substrate_native::NativeSubstrate;
+use derrick_tools::{select_model, ModelChoice, Tier};
 use tokio::process::Command;
 use tracing::{error, info, instrument, warn};
 
@@ -87,21 +88,42 @@ pub struct LocalCopilotHandDispatcher {
     substrate: Arc<NativeSubstrate>,
     config: LocalCopilotHandDispatcherConfig,
     stack_backend: Option<Arc<dyn StackBackend>>,
+    model_choice: ModelChoice,
+}
+
+/// Map a ticket's optional [`Complexity`] to a [`Tier`] for adaptive model
+/// selection (D67). `None` and `Standard` both resolve to `Standard`.
+fn tier_for(complexity: Option<Complexity>) -> Tier {
+    match complexity {
+        Some(Complexity::Low) => Tier::Light,
+        Some(Complexity::Heavy) => Tier::Heavy,
+        _ => Tier::Standard,
+    }
 }
 
 impl LocalCopilotHandDispatcher {
-    /// Construct a dispatcher from its substrate and config.
+    /// Construct a dispatcher from its substrate and config. The model choice
+    /// defaults to foreman-selected [`ModelChoice::Auto`]; override it with
+    /// [`Self::with_model_choice`].
     pub fn new(substrate: Arc<NativeSubstrate>, config: LocalCopilotHandDispatcherConfig) -> Self {
         Self {
             substrate,
             config,
             stack_backend: None,
+            model_choice: ModelChoice::Auto { bias: None },
         }
     }
 
     /// Attach a stack backend used to open a PR after a successful copilot run.
     pub fn with_stack_backend(mut self, backend: Arc<dyn StackBackend>) -> Self {
         self.stack_backend = Some(backend);
+        self
+    }
+
+    /// Set the executor [`ModelChoice`] used to resolve the per-ticket model
+    /// (D67).
+    pub fn with_model_choice(mut self, model_choice: ModelChoice) -> Self {
+        self.model_choice = model_choice;
         self
     }
 
@@ -227,6 +249,10 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
         let ticket = ctx.ticket;
         let branch = self.target_branch(ticket);
 
+        // Resolve the per-ticket model from the executor's ModelChoice and the
+        // ticket's complexity (D67). `None` means: let copilot pick its default.
+        let model = select_model("copilot", &self.model_choice, tier_for(ticket.complexity));
+
         // 1. Mint a hand id and register it.
         let hand_id = self.mint_hand_id()?;
         let hand = Hand {
@@ -258,6 +284,19 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
                     "git worktree add failed: {stderr}"
                 ))));
             }
+        }
+
+        // 2b. Track the worktree as a ticket-keyed substrate row so the foreman
+        //     TTL cleanup pass can reclaim it if this process dies before the
+        //     PollTask removes it. Still pre-assign, so a failure leaves the
+        //     ticket Ready.
+        if let Err(error) = self
+            .substrate
+            .register_ticket_worktree(ticket.id.as_str(), &branch, &worktree_path)
+            .await
+        {
+            prune_ticket_worktree_dir(&self.config.repo_root, &worktree_path).await;
+            return Err(DispatchError::Substrate(error));
         }
 
         // 3. Render the queue file and write it.
@@ -324,6 +363,7 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
                 branch: branch.clone(),
                 parent_branch: ctx.parent_branch.clone(),
                 copilot_binary: self.config.copilot_binary.clone(),
+                model: model.clone(),
                 allow_all_tools: self.config.allow_all_tools,
                 poll_interval: self.config.poll_interval,
                 poll_timeout: self.config.poll_timeout,
@@ -354,6 +394,8 @@ struct PollTask {
     branch: String,
     parent_branch: String,
     copilot_binary: PathBuf,
+    /// Resolved per-ticket model id (D67). `None` omits `--model`.
+    model: Option<String>,
     allow_all_tools: bool,
     poll_interval: Duration,
     poll_timeout: Duration,
@@ -375,6 +417,9 @@ impl PollTask {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(model) = &self.model {
+            cmd.arg("--model").arg(model);
+        }
         if self.allow_all_tools {
             cmd.arg("--allow-all-tools");
         }
@@ -442,6 +487,9 @@ impl PollTask {
                             self.record_hand_stats(&stdout_bytes).await;
                             self.check_terminal_state().await;
                             self.open_stacked_pr().await;
+                            // The branch is pushed (and a PR may be open), so the
+                            // checkout is dead weight once the ticket is terminal.
+                            self.prune_if_terminal().await;
                             return;
                         }
                         Ok(status) => {
@@ -530,6 +578,40 @@ impl PollTask {
                 },
             )
             .await;
+        // The work is abandoned; a re-dispatch recreates the checkout. Remove
+        // the worktree dir + tracked row now rather than waiting for the TTL.
+        self.prune_worktree().await;
+    }
+
+    /// Remove the per-ticket worktree directory and forget its tracked row.
+    /// Best-effort: the foreman TTL pass is the backstop for anything left.
+    async fn prune_worktree(&self) {
+        prune_ticket_worktree_dir(&self.repo_root, &self.worktree).await;
+        if let Err(error) = self
+            .substrate
+            .forget_ticket_worktree(self.ticket_id.as_str())
+            .await
+        {
+            warn!(
+                ?error,
+                ticket = %self.ticket_id,
+                "forget_ticket_worktree failed during copilot cleanup"
+            );
+        }
+    }
+
+    /// Remove the worktree only if the ticket reached a terminal hand state
+    /// (`InReview`/`Done`). Otherwise leave it: the hand may not have handed
+    /// back yet, and the foreman TTL pass reclaims genuinely abandoned ones.
+    async fn prune_if_terminal(&self) {
+        match self.substrate.get_ticket(&self.ticket_id).await {
+            Ok(Some(ticket))
+                if matches!(ticket.state, TicketState::InReview | TicketState::Done) =>
+            {
+                self.prune_worktree().await;
+            }
+            _ => {}
+        }
     }
 
     async fn check_terminal_state(&self) {
@@ -809,6 +891,17 @@ mod tests {
             "worktree .git not found at {wt:?}"
         );
 
+        // auto_dispatch is off (no PollTask), so the worktree is kept for the
+        // operator and tracked as a ticket-keyed row for the foreman backstop.
+        let rows = substrate
+            .list_worktrees(false)
+            .await
+            .expect("list worktrees");
+        assert!(
+            rows.iter().any(|w| w.run_id == "ticket:drk-501"),
+            "expected a tracked ticket worktree row, got {rows:?}"
+        );
+
         // Ticket is now InFlight, owned by the registered hand.
         let refreshed = substrate
             .get_ticket(&ticket.id)
@@ -868,7 +961,7 @@ mod tests {
         let ticket = make_ticket(&substrate, "drk-503").await;
         let worktree_root = tempdir.path().join("copilot-worktrees");
         let queue_dir = tempdir.path().join("queue");
-        let mut cfg = dispatcher_config(repo, worktree_root, queue_dir);
+        let mut cfg = dispatcher_config(repo, worktree_root.clone(), queue_dir);
         cfg.auto_dispatch = true;
         cfg.poll_timeout = Duration::from_millis(200);
         // Point at a binary that definitely doesn't exist so spawn fails.
@@ -881,7 +974,8 @@ mod tests {
             .await
             .expect("dispatch");
 
-        // Wait for the background task to release the hand.
+        // Wait for the background task to release the hand AND prune the
+        // worktree (release sets Ready first, then prunes, so poll on both).
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let mut released = false;
         while std::time::Instant::now() < deadline {
@@ -890,12 +984,26 @@ mod tests {
                 .await
                 .expect("get")
                 .expect("present");
-            if refreshed.state == TicketState::Ready && refreshed.owner.is_none() {
+            let rows_empty = substrate
+                .list_worktrees(true)
+                .await
+                .expect("list worktrees")
+                .is_empty();
+            if refreshed.state == TicketState::Ready && refreshed.owner.is_none() && rows_empty {
                 released = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
-        assert!(released, "expected copilot poll task to release the hand");
+        assert!(
+            released,
+            "expected copilot poll task to release the hand and prune the worktree"
+        );
+        // The on-disk worktree is removed on the release path too (previously it
+        // leaked on every copilot non-success path).
+        assert!(
+            !worktree_root.join("drk-503").join(".git").exists(),
+            "worktree should be removed after the hand is released"
+        );
     }
 }

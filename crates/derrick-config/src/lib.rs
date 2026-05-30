@@ -130,7 +130,9 @@ impl Config {
             "copilot".to_owned(),
             ModelDef {
                 provider: "copilot".to_owned(),
-                model: "gpt-5.4".to_owned(),
+                // `auto` (D67): the foreman selects the best model within the
+                // copilot host per ticket by complexity.
+                model: "auto".to_owned(),
                 cli: None,
                 max_tokens: None,
                 temperature: None,

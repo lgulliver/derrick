@@ -18,7 +18,7 @@ use derrick_substrate_native::foreman::{
     Foreman, ForemanTtls, GhRepoState, HandDispatcher, MultiDispatcher,
 };
 use derrick_substrate_native::NativeSubstrate;
-use derrick_tools::HostRegistry;
+use derrick_tools::{parse_model_choice, HostRegistry, ModelChoice};
 
 use crate::commands::{
     ForemanArgs, ForemanCommand, ForemanStartArgs, ForemanStartMode, ForemanStopArgs,
@@ -150,6 +150,14 @@ fn build_dispatcher(
     let executor_host = executor
         .as_ref()
         .and_then(|(kind, _)| host_name_for_kind(*kind));
+    // Per-dispatcher model choice: the executor's choice when the dispatcher's
+    // hand kind matches the resolved executor, else foreman-selected Auto (D67).
+    let model_choice_for = |kind: HandKind| -> ModelChoice {
+        match &executor {
+            Some((executor_kind, choice)) if *executor_kind == kind => choice.clone(),
+            _ => ModelChoice::Auto { bias: None },
+        }
+    };
     let default_kind = if let Some(host_name) = executor_host {
         host_name
     } else if copilot_enabled {
@@ -161,7 +169,9 @@ fn build_dispatcher(
     };
     let mut multi = MultiDispatcher::new(default_kind);
 
-    if let Some((kind, model)) = executor {
+    if let Some((kind, choice)) = &executor {
+        let kind = *kind;
+        let choice = choice.clone();
         if let Some(host_name) = host_name_for_kind(kind) {
             // Shared registry of the five host CLIs. HostRegistry is !Clone,
             // so construct once and share via Arc.
@@ -180,7 +190,7 @@ fn build_dispatcher(
                 hosts,
                 host_name,
                 kind,
-                model,
+                choice,
                 host_config,
             )));
         }
@@ -208,7 +218,8 @@ fn build_dispatcher(
         };
         multi = multi.register(Box::new(
             LocalCopilotHandDispatcher::new(Arc::clone(substrate), copilot_config)
-                .with_stack_backend(Arc::clone(&stack_backend)),
+                .with_stack_backend(Arc::clone(&stack_backend))
+                .with_model_choice(model_choice_for(HandKind::Copilot)),
         ));
     }
 
@@ -225,10 +236,10 @@ fn build_dispatcher(
             roughneck_enabled: config.tools().roughneck().enabled(),
             roughneck_level: config.tools().roughneck().level().to_owned(),
         };
-        multi = multi.register(Box::new(ClaudeHandDispatcher::new(
-            Arc::clone(substrate),
-            dispatcher_config,
-        )));
+        multi = multi.register(Box::new(
+            ClaudeHandDispatcher::new(Arc::clone(substrate), dispatcher_config)
+                .with_model_choice(model_choice_for(HandKind::Claude)),
+        ));
     }
 
     if multi.is_empty() {
@@ -244,10 +255,15 @@ fn build_dispatcher(
     }
 }
 
-/// Resolve the crew executor `(HandKind, raw model id)` from config, mirroring
+/// Resolve the crew executor `(HandKind, ModelChoice)` from config, mirroring
 /// the pipeline foreman step's resolution. Returns `None` when the role or
 /// model is missing so the foreman falls back to copilot/claude/stub.
-fn resolve_executor(config: &Config) -> Option<(HandKind, Option<String>)> {
+///
+/// The configured model id is parsed via [`parse_model_choice`] (D67): the
+/// literal `auto` (and `auto:<tier>`) becomes [`ModelChoice::Auto`], so the
+/// foreman selects the best model per ticket within the host; anything else is
+/// an explicit pin that always wins.
+fn resolve_executor(config: &Config) -> Option<(HandKind, ModelChoice)> {
     let executor_role = config
         .pipeline()
         .iter()
@@ -257,16 +273,8 @@ fn resolve_executor(config: &Config) -> Option<(HandKind, Option<String>)> {
     let model_name = config.roles().get(executor_role)?;
     let model = config.models().get(model_name)?;
     let kind = hand_kind_for_executor(model.provider(), model.cli());
-    // Forward the configured model id (RAW), but never pass an empty/whitespace
-    // `--model`: treat a blank model string as "unset" so the host CLI falls
-    // back to its own default rather than receiving `--model ""`.
-    let raw_model = model.model().trim();
-    let model = if raw_model.is_empty() {
-        None
-    } else {
-        Some(raw_model.to_owned())
-    };
-    Some((kind, model))
+    let choice = parse_model_choice(model.model().trim());
+    Some((kind, choice))
 }
 
 /// Maps a host-CLI [`HandKind`] to the registry host name. Returns `None` for

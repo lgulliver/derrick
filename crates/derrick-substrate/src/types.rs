@@ -290,6 +290,44 @@ impl FromStr for TicketState {
     }
 }
 
+/// Estimated complexity of a ticket. Drives the foreman's adaptive model
+/// selection (D67): the resolved tier maps a ticket to the best model within
+/// the configured host.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum Complexity {
+    /// Small, mechanical change — routes to the lightest tier.
+    Low,
+    /// Default complexity — routes to the standard tier.
+    Standard,
+    /// Large or intricate change — routes to the heaviest tier.
+    Heavy,
+}
+
+impl fmt::Display for Complexity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Low => "low",
+            Self::Standard => "standard",
+            Self::Heavy => "heavy",
+        })
+    }
+}
+
+impl FromStr for Complexity {
+    type Err = SubstrateError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "low" => Ok(Self::Low),
+            "standard" => Ok(Self::Standard),
+            "heavy" => Ok(Self::Heavy),
+            _ => Err(SubstrateError::invalid("complexity", "unknown complexity")),
+        }
+    }
+}
+
 /// Reason a ticket is `Blocked`. Determines whether the cleanup pass may
 /// auto-unblock it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -636,6 +674,8 @@ pub struct Ticket {
     /// Structured reason this ticket is `Blocked`. Set only while
     /// `state == Blocked`; cleared on transition out.
     pub block_reason: Option<BlockReason>,
+    /// Estimated complexity, when known. Drives adaptive model selection (D67).
+    pub complexity: Option<Complexity>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
@@ -716,6 +756,8 @@ pub struct NewTicket {
     pub body: String,
     /// Initial labels.
     pub labels: Vec<String>,
+    /// Estimated complexity, when known. Drives adaptive model selection (D67).
+    pub complexity: Option<Complexity>,
 }
 
 impl NewTicket {
@@ -750,6 +792,7 @@ impl NewTicket {
             title,
             body: body.into(),
             labels,
+            complexity: None,
         })
     }
 }
@@ -1094,6 +1137,9 @@ mod tests {
         assert_enum_serde(ForemanMode::Detached, "detached");
         assert_enum_serde(ForemanMode::Attached, "attached");
         assert_enum_serde(ForemanMode::Stopped, "stopped");
+        assert_enum_serde(Complexity::Low, "low");
+        assert_enum_serde(Complexity::Standard, "standard");
+        assert_enum_serde(Complexity::Heavy, "heavy");
     }
 
     #[test]
@@ -1168,6 +1214,9 @@ mod tests {
         assert_display_from_str(HandKind::Opencode);
         assert_display_from_str(HandKind::Aider);
         assert_display_from_str(ForemanMode::Detached);
+        assert_display_from_str(Complexity::Low);
+        assert_display_from_str(Complexity::Standard);
+        assert_display_from_str(Complexity::Heavy);
     }
 
     fn assert_display_from_str<T>(value: T)

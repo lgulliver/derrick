@@ -614,7 +614,8 @@ fn default_models_build_host_delegated_for_each_host() -> TestResult {
         ("claude-sonnet", "claude", "claude-sonnet-4-6"),
         ("claude-haiku", "claude", "claude-haiku-4-5"),
         ("codex-gpt5", "codex", "gpt-5.5"),
-        ("copilot", "copilot", "gpt-5.4"),
+        // `auto` (D67): the executor model is foreman-selected per ticket.
+        ("copilot", "copilot", "auto"),
     ];
     for (model_key, host, model_id) in expectations {
         let model_def = config

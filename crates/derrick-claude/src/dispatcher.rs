@@ -14,12 +14,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use chrono::Utc;
 use derrick_substrate::{
-    EventKind, EventScope, Hand, HandId, HandKind, Substrate, SubstrateError, Ticket, TicketId,
+    Complexity, EventKind, EventScope, Hand, HandId, HandKind, Substrate, SubstrateError, Ticket,
+    TicketId,
 };
 use derrick_substrate_native::foreman::{
     DispatchContext, DispatchError, DispatchResult, HandDispatcher,
 };
 use derrick_substrate_native::NativeSubstrate;
+use derrick_tools::{select_model, ModelChoice, Tier};
 use tokio::process::Command;
 use tracing::{error, info, instrument, warn};
 
@@ -75,12 +77,36 @@ impl Default for ClaudeHandDispatcherConfig {
 pub struct ClaudeHandDispatcher {
     substrate: Arc<NativeSubstrate>,
     config: ClaudeHandDispatcherConfig,
+    model_choice: ModelChoice,
+}
+
+/// Map a ticket's optional [`Complexity`] to a [`Tier`] for adaptive model
+/// selection (D67). `None` and `Standard` both resolve to `Standard`.
+fn tier_for(complexity: Option<Complexity>) -> Tier {
+    match complexity {
+        Some(Complexity::Low) => Tier::Light,
+        Some(Complexity::Heavy) => Tier::Heavy,
+        _ => Tier::Standard,
+    }
 }
 
 impl ClaudeHandDispatcher {
-    /// Construct a dispatcher from its substrate and config.
+    /// Construct a dispatcher from its substrate and config. The model choice
+    /// defaults to foreman-selected [`ModelChoice::Auto`]; override it with
+    /// [`Self::with_model_choice`].
     pub fn new(substrate: Arc<NativeSubstrate>, config: ClaudeHandDispatcherConfig) -> Self {
-        Self { substrate, config }
+        Self {
+            substrate,
+            config,
+            model_choice: ModelChoice::Auto { bias: None },
+        }
+    }
+
+    /// Set the executor [`ModelChoice`] used to resolve the per-ticket model
+    /// (D67).
+    pub fn with_model_choice(mut self, model_choice: ModelChoice) -> Self {
+        self.model_choice = model_choice;
+        self
     }
 
     fn target_branch(&self, ticket: &Ticket) -> String {
@@ -144,6 +170,10 @@ impl HandDispatcher for ClaudeHandDispatcher {
     async fn dispatch(&self, ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
         let ticket = ctx.ticket;
         let branch = self.target_branch(ticket);
+
+        // Resolve the per-ticket model from the executor's ModelChoice and the
+        // ticket's complexity (D67). `None` lets claude pick its own default.
+        let model = select_model("claude", &self.model_choice, tier_for(ticket.complexity));
 
         // 1. Mint a hand id and register it in the substrate.
         let hand_id = self.mint_hand_id()?;
@@ -210,6 +240,7 @@ impl HandDispatcher for ClaudeHandDispatcher {
                 ticket_id: ticket.id.clone(),
                 hand_id: hand_id.clone(),
                 queue_file: queue_file.clone(),
+                model: model.clone(),
                 poll_interval: self.config.poll_interval,
                 poll_timeout: self.config.poll_timeout,
                 roughneck_enabled: self.config.roughneck_enabled,
@@ -231,6 +262,8 @@ struct PollTask {
     ticket_id: TicketId,
     hand_id: HandId,
     queue_file: PathBuf,
+    /// Resolved per-ticket model id (D67). `None` omits `--model`.
+    model: Option<String>,
     poll_interval: Duration,
     poll_timeout: Duration,
     roughneck_enabled: bool,
@@ -257,15 +290,15 @@ impl PollTask {
             }
         };
 
-        let mut child = match Command::new("claude")
-            .arg("--print")
-            .arg("--output-format")
-            .arg("json")
-            .stdin(Stdio::from(stdin_handle))
+        let mut cmd = Command::new("claude");
+        cmd.arg("--print").arg("--output-format").arg("json");
+        if let Some(model) = &self.model {
+            cmd.arg("--model").arg(model);
+        }
+        cmd.stdin(Stdio::from(stdin_handle))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+            .stderr(Stdio::piped());
+        let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(error) => {
                 error!(?error, "failed to spawn `claude --print`");

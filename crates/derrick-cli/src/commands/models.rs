@@ -6,7 +6,7 @@
 //! three never drift.
 
 use derrick_config::Config;
-use derrick_tools::{catalogue, HostRegistry};
+use derrick_tools::{catalogue, parse_model_choice, HostRegistry, ModelChoice};
 use serde_json::json;
 
 use crate::commands::ModelsArgs;
@@ -174,13 +174,30 @@ fn check_model(
         );
     }
 
-    // Rule 1: host binary installed.
+    // Rule 1: host binary installed. This runs FIRST — even `auto` requires the
+    // host CLI present, since the foreman dispatches through it (D67). Only the
+    // catalogue model-id validation below is skipped for `auto`.
     if !host_available(provider) {
         return ModelCheck::fail(
             subject,
             format!("host `{provider}` is not installed on PATH"),
         );
     }
+
+    // `auto` (and `auto:<tier>`) is foreman-selected per ticket within the
+    // host, so there is no single id to validate against the catalogue (D67).
+    // The host is present (checked above); only the model-id checks are skipped.
+    if matches!(parse_model_choice(model_id), ModelChoice::Auto { .. }) {
+        return ModelCheck::pass(
+            subject,
+            format!("auto: foreman selects per-ticket within host `{provider}`"),
+        );
+    }
+
+    // Validate the pinned id against the catalogue using the same trimmed form
+    // the dispatch path forwards (parse_model_choice trims), so a quoted,
+    // space-padded pin does not produce a spurious WARN.
+    let model_id = model_id.trim();
 
     // Rule 4: opencode/aider expect provider/model.
     if (provider == "opencode" || provider == "aider") && !model_id.contains('/') {
@@ -413,6 +430,32 @@ state:
         let checks = models_check_core_with(&config, &|_| true);
         assert!(checks.iter().any(|c| c.level == CheckLevel::Pass));
         assert_eq!(fail_count(&checks), 0);
+    }
+
+    #[test]
+    fn auto_model_is_pass_via_parse_model_choice() {
+        // `auto` is foreman-selected per ticket: detected via parse_model_choice
+        // (not a raw starts_with) and reported as a PASS, with no FAIL/WARN.
+        for model in ["auto", "auto:light", "auto:standard", "auto:heavy"] {
+            let config = config_with_model("copilot", model);
+            let checks = models_check_core_with(&config, &|_| true);
+            assert!(
+                checks
+                    .iter()
+                    .any(|c| c.level == CheckLevel::Pass && c.message.contains("auto: foreman")),
+                "{model} should PASS as foreman-selected"
+            );
+            assert_eq!(fail_count(&checks), 0, "{model} must not FAIL");
+        }
+    }
+
+    #[test]
+    fn auto_lookalike_is_not_treated_as_auto() {
+        // `auto-foo` is a pin, not Auto: it goes through normal catalogue
+        // validation (unknown -> WARN, never the auto PASS message).
+        let config = config_with_model("copilot", "auto-foo");
+        let checks = models_check_core_with(&config, &|_| true);
+        assert!(!checks.iter().any(|c| c.message.contains("auto: foreman")));
     }
 
     #[test]

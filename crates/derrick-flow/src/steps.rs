@@ -6,9 +6,12 @@ use chrono::Utc;
 use derrick_config::{PipelineStep, Runner as StepRunner};
 use derrick_models::AuthStore;
 use derrick_substrate::{
-    BatchName, Hand, HandId, HandKind, NewTicket, TicketFilter, TicketId, TicketState,
+    BatchName, Complexity, Hand, HandId, HandKind, NewTicket, TicketFilter, TicketId, TicketState,
 };
-use derrick_tools::{CopilotToolPermission, HostRegistry, HostRequest};
+use derrick_tools::{
+    catalogue, parse_model_choice, CopilotToolPermission, HostRegistry, HostRequest, ModelChoice,
+    Tier,
+};
 use owo_colors::OwoColorize;
 
 use crate::clarify;
@@ -209,15 +212,21 @@ async fn execute_role_step(
         // Forward the model bound to this step's role so the host adapter can
         // pass `--model`. The value is RAW (provider/model or bare id) — the
         // adapter calls `catalogue::normalize` per-host (D65), so we must not
-        // normalise here.
+        // normalise here. A configured `auto` resolves to the host's Standard
+        // tier here (pipeline steps have no ticket complexity to bias on) — we
+        // never forward the literal `auto` (D67).
         let model_id = step
             .role()
             .and_then(|role| config.roles().get(role))
             .and_then(|model_name| config.models().get(model_name))
-            .map(|def| def.model().trim().to_owned())
-            // Never forward an empty/whitespace `--model`: a blank model string
-            // means "unset", so the host CLI uses its own default.
-            .filter(|model| !model.is_empty());
+            .and_then(|def| match parse_model_choice(def.model()) {
+                ModelChoice::Pinned(id) if !id.trim().is_empty() => Some(id),
+                ModelChoice::Pinned(_) => None,
+                ModelChoice::Auto { bias } => catalogue::builtin()
+                    .host(host_name)
+                    .and_then(|h| h.model_for_tier(bias.unwrap_or(Tier::Standard)))
+                    .map(str::to_owned),
+            });
         request.model = model_id;
         if host_name == "copilot" {
             request.copilot_tools = CopilotToolPermission::AllowAll;
@@ -702,6 +711,33 @@ async fn execute_foreman(
     Ok(StepExecution::success(vec![]))
 }
 
+/// Strip a trailing `<!-- complexity: low|standard|heavy -->` marker from a
+/// task heading, returning the cleaned title and the parsed [`Complexity`]
+/// (D67). The match is permissive and case-insensitive; an unrecognised value
+/// yields `None` and the marker is still stripped from the title.
+fn parse_complexity_marker(title: &str) -> (String, Option<Complexity>) {
+    let trimmed = title.trim_end();
+    let lower = trimmed.to_ascii_lowercase();
+    let Some(open) = lower.rfind("<!--") else {
+        return (trimmed.to_owned(), None);
+    };
+    if !lower[open..].ends_with("-->") {
+        return (trimmed.to_owned(), None);
+    }
+    let inner = &lower[open + 4..lower.len() - 3];
+    let Some(value) = inner.trim().strip_prefix("complexity:") else {
+        return (trimmed.to_owned(), None);
+    };
+    let complexity = match value.trim() {
+        "low" => Some(Complexity::Low),
+        "standard" => Some(Complexity::Standard),
+        "heavy" => Some(Complexity::Heavy),
+        _ => None,
+    };
+    let cleaned = trimmed[..open].trim_end().to_owned();
+    (cleaned, complexity)
+}
+
 fn parse_tasks_from_markdown(
     text: &str,
     batch: &derrick_substrate::BatchName,
@@ -725,20 +761,21 @@ fn parse_tasks_from_markdown(
                 let body = body_lines.join("\n").trim().to_owned();
                 let id_str = format!("{sanitized_prefix}-{ordinal}");
                 if let Ok(id) = TicketId::new(&id_str) {
-                    tickets.push(
-                        NewTicket::new(
-                            id,
-                            Some(batch.clone()),
-                            Some(ordinal),
-                            prev_title,
-                            body,
-                            vec!["task".to_owned()],
-                        )
-                        .map_err(|e| RunError::StepFailed {
-                            id: "bridge".to_owned(),
-                            message: format!("invalid ticket {id_str}: {e}"),
-                        })?,
-                    );
+                    let (clean_title, complexity) = parse_complexity_marker(&prev_title);
+                    let mut nt = NewTicket::new(
+                        id,
+                        Some(batch.clone()),
+                        Some(ordinal),
+                        clean_title,
+                        body,
+                        vec!["task".to_owned()],
+                    )
+                    .map_err(|e| RunError::StepFailed {
+                        id: "bridge".to_owned(),
+                        message: format!("invalid ticket {id_str}: {e}"),
+                    })?;
+                    nt.complexity = complexity;
+                    tickets.push(nt);
                 }
                 ordinal += 1;
             }
@@ -753,20 +790,21 @@ fn parse_tasks_from_markdown(
         let body = body_lines.join("\n").trim().to_owned();
         let id_str = format!("{sanitized_prefix}-{ordinal}");
         if let Ok(id) = TicketId::new(&id_str) {
-            tickets.push(
-                NewTicket::new(
-                    id,
-                    Some(batch.clone()),
-                    Some(ordinal),
-                    title,
-                    body,
-                    vec!["task".to_owned()],
-                )
-                .map_err(|e| RunError::StepFailed {
-                    id: "bridge".to_owned(),
-                    message: format!("invalid ticket: {e}"),
-                })?,
-            );
+            let (clean_title, complexity) = parse_complexity_marker(&title);
+            let mut nt = NewTicket::new(
+                id,
+                Some(batch.clone()),
+                Some(ordinal),
+                clean_title,
+                body,
+                vec!["task".to_owned()],
+            )
+            .map_err(|e| RunError::StepFailed {
+                id: "bridge".to_owned(),
+                message: format!("invalid ticket: {e}"),
+            })?;
+            nt.complexity = complexity;
+            tickets.push(nt);
         }
     }
 
@@ -774,9 +812,9 @@ fn parse_tasks_from_markdown(
 }
 
 /// Maps a model's `provider` / `cli` to the [`HandKind`] that should own its
-/// crew-mode tickets. Copilot stays GitHub-cloud (no `--model`); claude,
-/// codex, opencode, and aider are host-CLI executors; everything else falls
-/// back to a human hand.
+/// crew-mode tickets. Copilot now runs through the local `copilot` CLI (which
+/// DOES take `--model`, D67); claude, codex, opencode, and aider are likewise
+/// host-CLI executors; everything else falls back to a human hand.
 pub fn hand_kind_for_executor(provider: &str, cli: Option<&str>) -> HandKind {
     let matches = |name: &str| provider == name || cli.is_some_and(|value| value.starts_with(name));
     if matches("copilot") {
@@ -1226,6 +1264,34 @@ Update version_matches_cargo_pkg_version.
         assert_eq!(tickets.len(), 1);
         assert_eq!(tickets[0].batch, Some(batch));
         assert!(tickets[0].labels.contains(&"task".to_owned()));
+    }
+
+    #[test]
+    fn parse_tasks_reads_complexity_marker() {
+        let batch = BatchName::new("feat-batch").unwrap();
+        let text = "## Small fix <!-- complexity: low -->\nbody\n\
+                    ## Big rework <!-- COMPLEXITY: HEAVY -->\nbody\n\
+                    ## Plain task\nbody\n\
+                    ## Bogus marker <!-- complexity: enormous -->\nbody\n";
+        let tickets = super::parse_tasks_from_markdown(text, &batch, "tsk").unwrap();
+        assert_eq!(tickets.len(), 4);
+        // Marker is stripped from the title and parsed (case-insensitive).
+        assert_eq!(tickets[0].title, "Small fix");
+        assert_eq!(
+            tickets[0].complexity,
+            Some(derrick_substrate::Complexity::Low)
+        );
+        assert_eq!(tickets[1].title, "Big rework");
+        assert_eq!(
+            tickets[1].complexity,
+            Some(derrick_substrate::Complexity::Heavy)
+        );
+        // No marker -> None.
+        assert_eq!(tickets[2].title, "Plain task");
+        assert_eq!(tickets[2].complexity, None);
+        // Unknown value -> None, but the marker is still stripped.
+        assert_eq!(tickets[3].title, "Bogus marker");
+        assert_eq!(tickets[3].complexity, None);
     }
 
     #[test]
