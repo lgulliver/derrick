@@ -86,9 +86,27 @@ jobs:
         with:
           merge-multiple: true
 
+      - name: Extract changelog section for this tag
+        shell: bash
+        run: |
+          # Pull just this version's section out of CHANGELOG.md so the release
+          # body is the curated notes (generate_release_notes appends the auto
+          # PR/commit list below). Falls back to a stub if the section is absent.
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ ("^## \\[" ver "\\]") { found=1; print; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release $VERSION (no CHANGELOG section found)." > release-notes.md
+          fi
+          echo "----- release body -----"; cat release-notes.md
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           generate_release_notes: true
           files: |
             derrick-linux-x86_64
