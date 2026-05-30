@@ -1,0 +1,61 @@
+yeah I would have thought that opencode should allow us to set its model when we use opencode in the same way we would change model for copilot.
+
+---
+
+My belief is that the crew should use the best model for the job available unless otherwise specified. This should be able to be determined by the foreman. The user can configure which tool they want to use i.e. copilot, opencode, etc but its down to the foreman to establish what models are available to each and which model should be used for given tasks based on size and complexity.  a user can override it in derrick.yaml though
+
+---
+
+Once D67 finishes (its author adds complexity: None/equivalent to ticket_base_from_row and migration 0004), run:
+cargo test -p derrick-substrate-native -p derrick-hand -p derrick-copilot && cargo clippy --workspace --all-targets
+
+---
+
+I've asked copilot to review
+
+---
+
+<ci-monitor-event>lgulliver/derrick PR #20 has 1 new review comment:
+- copilot-pull-request-reviewer[bot] (commented): ## Pull request overview
+
+Implements D66, which refines D65 in two ways: (A) the role-bound model from `derrick.yaml` is now forwarded as `HostRequest.model` on pipeline `host:` steps so the adapter can pass `--model`, and (B) `codex`/`opencode`/`aider` become first-class crew executor hands via a new generic `derrick-hand` dispatcher (per-ticket git worktree, shared `HostRegistry`), backed by schema migration 0003 that widens the `hands.kind` CHECK while preserving `tickets.owner` and `events.scope_hand` references.
+
+**Changes:**
+- Forward role-resolved RAW model id into `HostRequest.model` in `execute_role_step`; treat empty/whitespace as `None`.
+- Add `HandKind::Codex/Opencode/Aider` (enum + Display/FromStr + serde), migration 0003 (FK-off rebuild + foreign_key_check + user_version=3), and v2→v3 regression test.
+- New crate `derrick-hand` providing `HostCliHandDispatcher` (resolve adapter + create worktree before `assign_to_hand`; on post-assign failure release ticket, remove worktree, return Err), wired into the CLI foreman for codex/opencode/aider; `hand_kind_for_executor` extended and re-exported.
+
+### Reviewed changes
+
+Copilot reviewed 12 out of 13 changed files in this pull request and generated no comments.
+
+<details>
+<summary>Show a summary per file</summary>
+
+| File | Description |
+| ---- | ----------- |
+| DESIGN.md | Adds the D66 narrowing note in §6.5, updates the Hand glossary, and records the D66 decision row. |
+| crates/derrick-substrate/src/types.rs | Adds Codex/Opencode/Aider HandKind variants with Display/FromStr/serde and matching tests. |
+| crates/derrick-substrate-native/migrations/0003_hand_kinds.sql | New migration rebuilding `hands` with the widened CHECK and bumping `user_version` to 3. |
+| crates/derrick-substrate-native/src/lib.rs | Bumps SCHEMA_VERSION to 3 and adds `run_migration_0003` with FK-off rebuild + foreign_key_check. |
+| crates/derrick-substrate-native/src/tests.rs | Replaces the v3-refusal test with v4-refusal, and adds 0003 admit + FK-preservation regression tests. |
+| crates/derrick-hand/Cargo.toml | Manifest for the new generic host-CLI hand dispatcher crate. |
+| crates/derrick-hand/src/lib.rs | Implements `HostCliHandDispatcher` (per-ticket worktree, model forwarding, cleanup on failure) plus unit tests. |
+| crates/derrick-flow/src/steps.rs | Sets `HostRequest.model` from role→model; simplifies hand_suffix; extends + publicizes `hand_kind_for_executor`. |
+| crates/derrick-flow/src/lib.rs | Re-exports `hand_kind_for_executor`; adds a host-step model-forwarding test. |
+| crates/derrick-cli/Cargo.toml | Adds the `derrick-hand` dependency. |
+| crates/derrick-cli/src/commands/foreman.rs | Resolves crew executor model/kind and registers the host-CLI dispatcher for codex/opencode/aider. |
+| Cargo.toml / Cargo.lock | Adds the new `derrick-hand` workspace member. |
+</details>
+
+
+
+
+
+
+
+Please address the feedback and push a fix. Then, for each inline comment you addressed (those with a comment_id), post a one-line reply on the thread via `gh api` saying what you changed (or why you didn't), and resolve the thread. Skip replies for comments you didn't act on.</ci-monitor-event>
+
+---
+
+lets just do a quick pass of updating our documentation as well
