@@ -621,6 +621,7 @@ dependencies = [
  "derrick-config",
  "derrick-copilot",
  "derrick-flow",
+ "derrick-hand",
  "derrick-models",
  "derrick-observe",
  "derrick-scrub",
@@ -706,6 +707,23 @@ dependencies = [
  "tokio",
  "tracing",
  "which",
+]
+
+[[package]]
+name = "derrick-hand"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "derrick-config",
+ "derrick-roughneck",
+ "derrick-scrub",
+ "derrick-substrate",
+ "derrick-substrate-native",
+ "derrick-tools",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

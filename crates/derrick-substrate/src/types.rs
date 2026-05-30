@@ -363,6 +363,12 @@ pub enum HandKind {
     Claude,
     /// Copilot agent dispatch hand.
     Copilot,
+    /// Codex host-CLI executor hand.
+    Codex,
+    /// Opencode host-CLI executor hand.
+    Opencode,
+    /// Aider host-CLI executor hand.
+    Aider,
     /// Human-owned hand.
     Human,
 }
@@ -372,6 +378,9 @@ impl fmt::Display for HandKind {
         formatter.write_str(match self {
             Self::Claude => "claude",
             Self::Copilot => "copilot",
+            Self::Codex => "codex",
+            Self::Opencode => "opencode",
+            Self::Aider => "aider",
             Self::Human => "human",
         })
     }
@@ -384,6 +393,9 @@ impl FromStr for HandKind {
         match value {
             "claude" => Ok(Self::Claude),
             "copilot" => Ok(Self::Copilot),
+            "codex" => Ok(Self::Codex),
+            "opencode" => Ok(Self::Opencode),
+            "aider" => Ok(Self::Aider),
             "human" => Ok(Self::Human),
             _ => Err(SubstrateError::invalid("hand_kind", "unknown hand kind")),
         }
@@ -1075,6 +1087,9 @@ mod tests {
         assert_enum_serde(LinkKind::Related, "related");
         assert_enum_serde(HandKind::Claude, "claude");
         assert_enum_serde(HandKind::Copilot, "copilot");
+        assert_enum_serde(HandKind::Codex, "codex");
+        assert_enum_serde(HandKind::Opencode, "opencode");
+        assert_enum_serde(HandKind::Aider, "aider");
         assert_enum_serde(HandKind::Human, "human");
         assert_enum_serde(ForemanMode::Detached, "detached");
         assert_enum_serde(ForemanMode::Attached, "attached");
@@ -1149,6 +1164,9 @@ mod tests {
         assert_display_from_str(TicketState::InReview);
         assert_display_from_str(LinkKind::Blocks);
         assert_display_from_str(HandKind::Copilot);
+        assert_display_from_str(HandKind::Codex);
+        assert_display_from_str(HandKind::Opencode);
+        assert_display_from_str(HandKind::Aider);
         assert_display_from_str(ForemanMode::Detached);
     }
 

@@ -16,10 +16,11 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use tokio::task;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const READER_POOL_SIZE: usize = 4;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_state_machine_integrity.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_hand_kinds.sql");
 
 /// Configuration for opening the native substrate.
 #[derive(Clone, Debug)]
@@ -1994,6 +1995,12 @@ fn migrate(connection: &mut Connection) -> Result<(), SubstrateError> {
     if version < 2 {
         run_migration_0002(connection)?;
     }
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    if version < 3 {
+        run_migration_0003(connection)?;
+    }
     Ok(())
 }
 
@@ -2023,6 +2030,48 @@ fn run_migration_0002(connection: &mut Connection) -> Result<(), SubstrateError>
         if !violations.is_empty() {
             return Err(SubstrateError::Invalid {
                 field: "migration_0002".to_owned(),
+                message: format!("foreign_key_check violations: {violations:?}"),
+            });
+        }
+        transaction.commit().map_err(sql_error)?;
+        Ok(())
+    })();
+
+    // Re-enable FKs regardless of success — leaving them off would silently
+    // disable downstream integrity checks.
+    let restore = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration_result?;
+    restore.map_err(sql_error)?;
+    Ok(())
+}
+
+fn run_migration_0003(connection: &mut Connection) -> Result<(), SubstrateError> {
+    // PRAGMA foreign_keys = OFF must run OUTSIDE any transaction. The hands
+    // table-rebuild relies on FKs being off so DROP TABLE hands succeeds
+    // while tickets.owner and events.scope_hand still reference hands(id).
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(sql_error)?;
+
+    let migration_result = (|| -> Result<(), SubstrateError> {
+        let transaction = connection.transaction().map_err(sql_error)?;
+        transaction
+            .execute_batch(MIGRATION_0003)
+            .map_err(sql_error)?;
+        let mut statement = transaction
+            .prepare("PRAGMA foreign_key_check;")
+            .map_err(sql_error)?;
+        let violations: Vec<(String, i64, String, i64)> = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)?;
+        drop(statement);
+        if !violations.is_empty() {
+            return Err(SubstrateError::Invalid {
+                field: "migration_0003".to_owned(),
                 message: format!("foreign_key_check violations: {violations:?}"),
             });
         }

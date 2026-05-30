@@ -206,6 +206,19 @@ async fn execute_role_step(
         let mut request = HostRequest::new(prompt, working_dir(state, repo_root));
         request.headless = true;
         request.output_sink = output_sink;
+        // Forward the model bound to this step's role so the host adapter can
+        // pass `--model`. The value is RAW (provider/model or bare id) — the
+        // adapter calls `catalogue::normalize` per-host (D65), so we must not
+        // normalise here.
+        let model_id = step
+            .role()
+            .and_then(|role| config.roles().get(role))
+            .and_then(|model_name| config.models().get(model_name))
+            .map(|def| def.model().trim().to_owned())
+            // Never forward an empty/whitespace `--model`: a blank model string
+            // means "unset", so the host CLI uses its own default.
+            .filter(|model| !model.is_empty());
+        request.model = model_id;
         if host_name == "copilot" {
             request.copilot_tools = CopilotToolPermission::AllowAll;
         }
@@ -583,12 +596,7 @@ async fn execute_foreman(
         ))
     })?;
     let hand_kind = hand_kind_for_executor(model.provider(), model.cli());
-    let hand_suffix = match hand_kind {
-        HandKind::Copilot => "copilot",
-        HandKind::Claude => "claude",
-        HandKind::Human => "human",
-        _ => "human",
-    };
+    let hand_suffix = hand_kind.to_string();
     let hand_id = HandId::new(format!("{}-{hand_suffix}-hand", config.site().prefix()))
         .map_err(|e| RunError::Config(format!("foreman: invalid hand id: {e}")))?;
 
@@ -765,11 +773,22 @@ fn parse_tasks_from_markdown(
     Ok(tickets)
 }
 
-fn hand_kind_for_executor(provider: &str, cli: Option<&str>) -> HandKind {
-    if provider == "copilot" || cli.is_some_and(|value| value.starts_with("copilot")) {
+/// Maps a model's `provider` / `cli` to the [`HandKind`] that should own its
+/// crew-mode tickets. Copilot stays GitHub-cloud (no `--model`); claude,
+/// codex, opencode, and aider are host-CLI executors; everything else falls
+/// back to a human hand.
+pub fn hand_kind_for_executor(provider: &str, cli: Option<&str>) -> HandKind {
+    let matches = |name: &str| provider == name || cli.is_some_and(|value| value.starts_with(name));
+    if matches("copilot") {
         HandKind::Copilot
-    } else if provider == "claude" || cli.is_some_and(|value| value.starts_with("claude")) {
+    } else if matches("claude") {
         HandKind::Claude
+    } else if matches("codex") {
+        HandKind::Codex
+    } else if matches("opencode") {
+        HandKind::Opencode
+    } else if matches("aider") {
+        HandKind::Aider
     } else {
         HandKind::Human
     }

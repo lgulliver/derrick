@@ -8,14 +8,17 @@ use std::time::{Duration, Instant};
 use derrick_claude::{ClaudeHandDispatcher, ClaudeHandDispatcherConfig};
 use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
 use derrick_copilot::{LocalCopilotHandDispatcher, LocalCopilotHandDispatcherConfig};
+use derrick_flow::hand_kind_for_executor;
+use derrick_hand::{HostCliHandDispatcher, HostCliHandDispatcherConfig};
 use derrick_stack::{GraphiteStackBackend, NativeStackBackend, NoneStackBackend, StackBackend};
-use derrick_substrate::Substrate;
+use derrick_substrate::{HandKind, Substrate};
 #[allow(deprecated)]
 use derrick_substrate_native::foreman::CopilotStubDispatcher;
 use derrick_substrate_native::foreman::{
     Foreman, ForemanTtls, GhRepoState, HandDispatcher, MultiDispatcher,
 };
 use derrick_substrate_native::NativeSubstrate;
+use derrick_tools::HostRegistry;
 
 use crate::commands::{
     ForemanArgs, ForemanCommand, ForemanStartArgs, ForemanStartMode, ForemanStopArgs,
@@ -133,9 +136,23 @@ fn build_dispatcher(
 ) -> Box<dyn HandDispatcher> {
     let copilot_enabled = config.tools().copilot().enabled();
     let claude_enabled = config.tools().claude().enabled();
-    // Default to copilot when enabled, otherwise claude; falls back to the
-    // copilot stub below when neither is on.
-    let default_kind = if copilot_enabled {
+
+    // Resolve the crew executor model the same way the pipeline's foreman
+    // step does (steps.rs): foreman step's `executor_role` (default
+    // "executor") -> roles -> models -> ModelDef. When that resolves to a
+    // host-CLI executor (codex/opencode/aider), the foreman should default
+    // to that hand kind and forward the model id (RAW) into the request.
+    let executor = resolve_executor(config);
+
+    // Default to the resolved host-CLI executor when one is configured;
+    // otherwise copilot when enabled, then claude; falls back to the copilot
+    // stub below when nothing is wired.
+    let executor_host = executor
+        .as_ref()
+        .and_then(|(kind, _)| host_name_for_kind(*kind));
+    let default_kind = if let Some(host_name) = executor_host {
+        host_name
+    } else if copilot_enabled {
         "copilot"
     } else if claude_enabled {
         "claude"
@@ -143,6 +160,31 @@ fn build_dispatcher(
         "copilot"
     };
     let mut multi = MultiDispatcher::new(default_kind);
+
+    if let Some((kind, model)) = executor {
+        if let Some(host_name) = host_name_for_kind(kind) {
+            // Shared registry of the five host CLIs. HostRegistry is !Clone,
+            // so construct once and share via Arc.
+            let hosts = Arc::new(HostRegistry::with_defaults());
+            let host_config = HostCliHandDispatcherConfig {
+                agent_identity: format!("derrick-{host_name}-hand"),
+                branch_prefix: config.tools().git().branch_prefix().to_owned(),
+                repo_root: repo_root.to_path_buf(),
+                worktree_root: repo_root.join(format!(".derrick/{host_name}-worktrees")),
+                roughneck_enabled: config.tools().roughneck().enabled(),
+                roughneck_level: config.tools().roughneck().level().to_owned(),
+                ..HostCliHandDispatcherConfig::default()
+            };
+            multi = multi.register(Box::new(HostCliHandDispatcher::new(
+                Arc::clone(substrate),
+                hosts,
+                host_name,
+                kind,
+                model,
+                host_config,
+            )));
+        }
+    }
 
     if copilot_enabled {
         // Local CLI dispatcher: spawns `copilot -p <prompt> --add-dir <worktree>`
@@ -199,6 +241,43 @@ fn build_dispatcher(
         Box::new(stub)
     } else {
         Box::new(multi)
+    }
+}
+
+/// Resolve the crew executor `(HandKind, raw model id)` from config, mirroring
+/// the pipeline foreman step's resolution. Returns `None` when the role or
+/// model is missing so the foreman falls back to copilot/claude/stub.
+fn resolve_executor(config: &Config) -> Option<(HandKind, Option<String>)> {
+    let executor_role = config
+        .pipeline()
+        .iter()
+        .find(|step| step.id() == "foreman")
+        .and_then(derrick_config::PipelineStep::executor_role)
+        .unwrap_or("executor");
+    let model_name = config.roles().get(executor_role)?;
+    let model = config.models().get(model_name)?;
+    let kind = hand_kind_for_executor(model.provider(), model.cli());
+    // Forward the configured model id (RAW), but never pass an empty/whitespace
+    // `--model`: treat a blank model string as "unset" so the host CLI falls
+    // back to its own default rather than receiving `--model ""`.
+    let raw_model = model.model().trim();
+    let model = if raw_model.is_empty() {
+        None
+    } else {
+        Some(raw_model.to_owned())
+    };
+    Some((kind, model))
+}
+
+/// Maps a host-CLI [`HandKind`] to the registry host name. Returns `None` for
+/// kinds that are not host CLIs (claude/copilot/human are handled by their own
+/// dispatchers).
+fn host_name_for_kind(kind: HandKind) -> Option<&'static str> {
+    match kind {
+        HandKind::Codex => Some("codex"),
+        HandKind::Opencode => Some("opencode"),
+        HandKind::Aider => Some("aider"),
+        _ => None,
     }
 }
 

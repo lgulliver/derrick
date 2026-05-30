@@ -704,7 +704,7 @@ async fn migration_0002_upgrades_v1_db_in_place() -> Result<(), SubstrateError> 
     let v: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(sql_error)?;
-    assert_eq!(v, 2);
+    assert_eq!(v, 3);
     Ok(())
 }
 
@@ -753,14 +753,183 @@ async fn migration_0002_idempotent_on_v2_db() -> Result<(), SubstrateError> {
 }
 
 #[tokio::test]
-async fn migration_refuses_v3_db() -> Result<(), SubstrateError> {
+async fn migration_0003_admits_host_cli_hand_kinds() -> Result<(), SubstrateError> {
+    // After 0003 the hands.kind CHECK admits codex/opencode/aider (D66).
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+
+    for (id, kind) in [
+        ("codex-1", HandKind::Codex),
+        ("opencode-1", HandKind::Opencode),
+        ("aider-1", HandKind::Aider),
+    ] {
+        substrate
+            .register_hand(Hand {
+                id: hand_id(id)?,
+                kind,
+                last_seen: None,
+            })
+            .await?;
+    }
+
+    let hands = substrate.list_hands().await?;
+    let codex = hands
+        .iter()
+        .find(|h| h.id.as_str() == "codex-1")
+        .expect("codex hand registered");
+    assert_eq!(codex.kind, HandKind::Codex);
+    assert!(hands.iter().any(|h| h.kind == HandKind::Opencode));
+    assert!(hands.iter().any(|h| h.kind == HandKind::Aider));
+    Ok(())
+}
+
+/// Build a v2 DB (user_version = 2) by running 0001 + 0002 and seeding a
+/// site row. Used to prove that 0003's `hands` table rebuild preserves
+/// referencing rows (tickets.owner, events.scope_hand) and their FK targets.
+fn write_v2_db(db_path: &Path) -> Result<(), SubstrateError> {
+    let mut connection = open_writer_connection(db_path)?;
+    connection
+        .execute_batch(MIGRATION_0001)
+        .map_err(sql_error)?;
+    // Seed a site row matching the default Config site so open() accepts it.
+    let s = site_for_v1();
+    connection
+        .execute(
+            "INSERT INTO site (name, prefix, created_at) VALUES (?1, ?2, ?3)",
+            params![s.name(), s.prefix(), now_text()],
+        )
+        .map_err(sql_error)?;
+    run_migration_0002(&mut connection)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, 2, "write_v2_db must leave the DB at user_version = 2");
+    Ok(())
+}
+
+#[tokio::test]
+async fn migration_0003_preserves_hand_references_from_v2() -> Result<(), SubstrateError> {
+    // Regression for D66's 0003 hands-table rebuild: a v2 DB with hand-owned
+    // tickets (tickets.owner -> hands.id) and hand-scoped events
+    // (events.scope_hand -> hands.id) must survive the rebuild with the
+    // referencing rows AND their FK targets intact.
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let config = native_config_fixture(&tempdir);
+    write_v2_db(&config.db_path)?;
+
+    // Seed a hand, a hand-owned in_flight ticket, and a hand-scoped event
+    // into the v2 schema (kind 'claude' is valid under the v1/v2 CHECK).
+    {
+        let connection = open_writer_connection(&config.db_path)?;
+        connection
+            .execute(
+                "INSERT INTO hands (id, kind, last_seen) VALUES (?1, ?2, ?3)",
+                params!["claude-1", "claude", now_text()],
+            )
+            .map_err(sql_error)?;
+        connection
+            .execute(
+                "INSERT INTO tickets (id, batch, ordinal, title, body, state, owner,
+                                      merge_sha, block_reason, block_reason_detail,
+                                      created_at, updated_at)
+                 VALUES (?1, NULL, NULL, 'title', 'body', 'in_flight', ?2,
+                         NULL, NULL, NULL, ?3, ?3)",
+                params!["drk-700", "claude-1", now_text()],
+            )
+            .map_err(sql_error)?;
+        let event_id = Uuid::new_v4();
+        connection
+            .execute(
+                "INSERT INTO events (id, at, kind, ticket, body, scope_kind, scope_hand)
+                 VALUES (?1, ?2, 'note', NULL, 'hand-scoped note', 'hand', ?3)",
+                params![event_id.as_bytes().as_slice(), now_text(), "claude-1"],
+            )
+            .map_err(sql_error)?;
+    }
+
+    // open() runs migrate() -> 0003 rebuilds the hands table.
+    let substrate = NativeSubstrate::open(config.clone(), site_for_v1()).await?;
+
+    // The owning hand survived the rebuild.
+    let hands = substrate.list_hands().await?;
+    let hand = hands
+        .iter()
+        .find(|h| h.id.as_str() == "claude-1")
+        .expect("owning hand survived 0003 rebuild");
+    assert_eq!(hand.kind, HandKind::Claude);
+
+    // The hand-owned ticket survived and still points at the hand.
+    let ticket = substrate
+        .get_ticket(&ticket_id("drk-700")?)
+        .await?
+        .expect("hand-owned ticket survived");
+    assert_eq!(ticket.state, TicketState::InFlight);
+    assert_eq!(ticket.owner.as_ref().map(HandId::as_str), Some("claude-1"));
+
+    // Direct schema assertions: the referencing rows + FK targets are intact,
+    // and `PRAGMA foreign_key_check` reports no violations after the rebuild.
+    let connection = open_writer_connection(&config.db_path)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, 3);
+
+    let owner: Option<String> = connection
+        .query_row(
+            "SELECT owner FROM tickets WHERE id = ?1",
+            params!["drk-700"],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    assert_eq!(owner.as_deref(), Some("claude-1"));
+
+    let scope_hand: Option<String> = connection
+        .query_row(
+            "SELECT scope_hand FROM events WHERE scope_kind = 'hand'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    assert_eq!(scope_hand.as_deref(), Some("claude-1"));
+
+    let hand_exists: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM hands WHERE id = ?1",
+            params!["claude-1"],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    assert_eq!(
+        hand_exists, 1,
+        "FK target hand row must survive the rebuild"
+    );
+
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check;")
+        .map_err(sql_error)?;
+    let violations: Vec<(String, i64, String, i64)> = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    assert!(
+        violations.is_empty(),
+        "no FK violations after 0003 rebuild, got: {violations:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn migration_refuses_newer_than_supported_db() -> Result<(), SubstrateError> {
     let tempdir = tempfile::tempdir().map_err(io_error)?;
     let config = native_config_fixture(&tempdir);
     let s = NativeSubstrate::open(config.clone(), site_fixture()).await?;
     drop(s);
     let connection = open_writer_connection(&config.db_path)?;
     connection
-        .pragma_update(None, "user_version", 3u32)
+        .pragma_update(None, "user_version", 4u32)
         .map_err(sql_error)?;
     drop(connection);
     let result = NativeSubstrate::open(config, site_fixture()).await;
