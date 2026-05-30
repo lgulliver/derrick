@@ -14,6 +14,7 @@ pub use derrick_assay::types::{
 pub use manifest::compute_prompt_key;
 pub use progress::{NoopReporter, ProgressReporter, RunProgress, StepProgress};
 pub use runner::Runner;
+pub use steps::hand_kind_for_executor;
 
 /// Re-export of the shared run/step types crate. Existing call sites that
 /// reach for `derrick_flow::types::*` keep working.
@@ -150,6 +151,37 @@ Description of task three.
                     }
                 })?;
             }
+            Ok(HostResponse {
+                stdout: "ok\n".to_owned(),
+                stderr: String::new(),
+                exit_code: 0,
+                elapsed: Duration::from_millis(1),
+                tokens_in: 0,
+                tokens_out: 0,
+            })
+        }
+    }
+
+    /// Host adapter that records the `HostRequest.model` it was handed so a
+    /// test can assert the pipeline forwarded the role's configured model
+    /// (D66, Part A). Does not normalise — that is the adapter's job (D65).
+    struct ModelCapturingHost {
+        name: &'static str,
+        captured_model: std::sync::Arc<std::sync::Mutex<Option<Option<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HostAdapter for ModelCapturingHost {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
+            *self.captured_model.lock().expect("lock") = Some(request.model.clone());
             Ok(HostResponse {
                 stdout: "ok\n".to_owned(),
                 stderr: String::new(),
@@ -354,6 +386,76 @@ fi
     use std::collections::BTreeSet;
     use std::path::Path;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn host_step_forwards_role_model_to_request() -> TestResult {
+        // D66 Part A: a `host:` step bound to a role must populate
+        // `HostRequest.model` with the RAW configured model id so the
+        // adapter can normalise + pass `--model`.
+        let dir = tempdir()?;
+        let yaml = format!(
+            "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  opus:\n    provider: claude\n    model: claude-opus-4-8\nroles:\n  proposer: opus\n  reviewer: opus{YAML_MID}  - id: probe\n    role: proposer\n    host: claude\n    command: \"hello {{{{prompt}}}}\"\n{YAML_TAIL}",
+        );
+        std::fs::write(dir.path().join("derrick.yaml"), &yaml)?;
+        std::fs::create_dir_all(dir.path().join(".specify/memory"))?;
+        std::fs::create_dir_all(dir.path().join(".derrick"))?;
+        std::fs::write(
+            dir.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )?;
+        let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
+        let substrate = NativeSubstrate::open(
+            NativeConfig {
+                db_path: dir.path().join(".derrick/derrick.db"),
+                worktree_root: dir.path().join(".derrick/worktrees"),
+            },
+            config.site().clone(),
+        )
+        .await?;
+
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let mut hosts = HostRegistry::empty();
+        hosts.register(
+            "claude",
+            Box::new(ModelCapturingHost {
+                name: "claude",
+                captured_model: captured.clone(),
+            }),
+        );
+
+        let run_dir = dir.path().join(".derrick/runs/run-1");
+        std::fs::create_dir_all(&run_dir)?;
+        let manifest_path = run_dir.join("manifest.json");
+        let mut state = ExecutionState::new("do the thing".to_owned(), "run-1".to_owned(), run_dir);
+
+        let step = config
+            .pipeline()
+            .iter()
+            .find(|s| s.id() == "probe")
+            .expect("probe step")
+            .clone();
+
+        crate::steps::execute_step(
+            &config,
+            &substrate,
+            Arc::new(hosts),
+            dir.path(),
+            &step,
+            &mut state,
+            "run-1",
+            &manifest_path,
+            None,
+        )
+        .await?;
+
+        let model = captured.lock().expect("lock").clone();
+        assert_eq!(
+            model,
+            Some(Some("claude-opus-4-8".to_owned())),
+            "host step must forward the role's configured model id, raw"
+        );
+        Ok(())
+    }
 
     fn add_feature_pipeline_with_dispatch() -> String {
         format!(
