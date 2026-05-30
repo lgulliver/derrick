@@ -38,6 +38,21 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Set workspace version from tag
+        shell: bash
+        run: |
+          # The binary reports env!("CARGO_PKG_VERSION") and `derrick upgrade`
+          # compares it against the latest release tag, so the built artifact
+          # MUST carry the tag's version. Cargo can't read the tag itself, so
+          # we stamp the single [workspace.package] version line (all crates
+          # inherit it via `version.workspace = true`) before building.
+          VERSION="${GITHUB_REF_NAME#v}"
+          tmp="$(mktemp)"
+          sed -E 's/^version = "[^"]*"/version = "'"$VERSION"'"/' Cargo.toml > "$tmp"
+          mv "$tmp" Cargo.toml
+          echo "Stamped workspace version: $VERSION"
+          grep -A1 '^\[workspace.package\]' Cargo.toml
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} -p derrick-cli
 
@@ -71,9 +86,27 @@ jobs:
         with:
           merge-multiple: true
 
+      - name: Extract changelog section for this tag
+        shell: bash
+        run: |
+          # Pull just this version's section out of CHANGELOG.md so the release
+          # body is the curated notes (generate_release_notes appends the auto
+          # PR/commit list below). Falls back to a stub if the section is absent.
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ ("^## \\[" ver "\\]") { found=1; print; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "Release $VERSION (no CHANGELOG section found)." > release-notes.md
+          fi
+          echo "----- release body -----"; cat release-notes.md
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           generate_release_notes: true
           files: |
             derrick-linux-x86_64
