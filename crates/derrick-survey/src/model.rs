@@ -16,6 +16,8 @@ pub enum Lang {
     JavaScript,
     /// TypeScript / TSX (`.ts`, `.tsx`).
     TypeScript,
+    /// C# (`.cs`).
+    CSharp,
 }
 
 impl Lang {
@@ -27,6 +29,7 @@ impl Lang {
             Some("go") => Some(Self::Go),
             Some("js" | "jsx" | "mjs" | "cjs") => Some(Self::JavaScript),
             Some("ts" | "tsx") => Some(Self::TypeScript),
+            Some("cs") => Some(Self::CSharp),
             _ => None,
         }
     }
@@ -39,6 +42,7 @@ impl Lang {
             Self::Go => "go",
             Self::JavaScript => "javascript",
             Self::TypeScript => "typescript",
+            Self::CSharp => "csharp",
         }
     }
 }
@@ -189,4 +193,73 @@ pub struct BuildReport {
 pub struct BuildOptions {
     /// When true, reparse every file regardless of content hash.
     pub full: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn from_path_detects_every_supported_extension() {
+        let cases = [
+            ("lib.rs", Some(Lang::Rust)),
+            ("mod.py", Some(Lang::Python)),
+            ("types.pyi", Some(Lang::Python)),
+            ("main.go", Some(Lang::Go)),
+            ("app.js", Some(Lang::JavaScript)),
+            ("ui.jsx", Some(Lang::JavaScript)),
+            ("esm.mjs", Some(Lang::JavaScript)),
+            ("cjs.cjs", Some(Lang::JavaScript)),
+            ("app.ts", Some(Lang::TypeScript)),
+            ("view.tsx", Some(Lang::TypeScript)),
+            ("Service.cs", Some(Lang::CSharp)),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                Lang::from_path(Path::new(name)),
+                expected,
+                "unexpected language for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_path_returns_none_for_unsupported_or_missing_extension() {
+        assert_eq!(Lang::from_path(Path::new("README.md")), None);
+        assert_eq!(Lang::from_path(Path::new("Makefile")), None);
+        assert_eq!(Lang::from_path(Path::new("notes.txt")), None);
+    }
+
+    #[test]
+    fn lang_wire_names_are_stable() {
+        assert_eq!(Lang::Rust.as_str(), "rust");
+        assert_eq!(Lang::Python.as_str(), "python");
+        assert_eq!(Lang::Go.as_str(), "go");
+        assert_eq!(Lang::JavaScript.as_str(), "javascript");
+        assert_eq!(Lang::TypeScript.as_str(), "typescript");
+        assert_eq!(Lang::CSharp.as_str(), "csharp");
+    }
+
+    #[test]
+    fn symbol_kind_wire_round_trips() {
+        for kind in [
+            SymbolKind::Function,
+            SymbolKind::Type,
+            SymbolKind::Interface,
+            SymbolKind::Enum,
+            SymbolKind::Constant,
+            SymbolKind::Module,
+        ] {
+            assert_eq!(SymbolKind::from_wire(kind.as_str()), kind);
+        }
+        // Unknown wire values fall back to Function (forward-compatibility).
+        assert_eq!(SymbolKind::from_wire("something_new"), SymbolKind::Function);
+    }
+
+    #[test]
+    fn ref_kind_wire_names_are_stable() {
+        assert_eq!(RefKind::Call.as_str(), "call");
+        assert_eq!(RefKind::Reference.as_str(), "reference");
+    }
 }

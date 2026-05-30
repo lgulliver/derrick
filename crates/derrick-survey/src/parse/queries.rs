@@ -76,3 +76,24 @@ pub(super) const JS_TS_REFS: &str = r#"
 (call_expression function: (identifier) @call)
 (call_expression function: (member_expression property: (property_identifier) @call))
 "#;
+
+pub(super) const CSHARP_SYMBOLS: &str = r#"
+(class_declaration name: (identifier) @name) @type
+(struct_declaration name: (identifier) @name) @type
+(record_declaration name: (identifier) @name) @type
+(interface_declaration name: (identifier) @name) @interface
+(enum_declaration name: (identifier) @name) @enum
+(delegate_declaration name: (identifier) @name) @type
+(method_declaration name: (identifier) @name) @function
+(constructor_declaration name: (identifier) @name) @function
+(local_function_statement name: (identifier) @name) @function
+(property_declaration name: (identifier) @name) @function
+(namespace_declaration name: (_) @name) @module
+(file_scoped_namespace_declaration name: (_) @name) @module
+"#;
+
+pub(super) const CSHARP_REFS: &str = r#"
+(invocation_expression function: (identifier) @call)
+(invocation_expression function: (member_access_expression name: (identifier) @call))
+(object_creation_expression type: (identifier) @call)
+"#;

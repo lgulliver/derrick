@@ -59,3 +59,63 @@ pub(crate) async fn watch_loop(survey: Survey, dirty: Arc<AtomicBool>) -> Result
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{SurveyConfig, SurveyError};
+    use std::time::{Duration, Instant};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_rebuilds_index_on_file_change() -> Result<(), SurveyError> {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::fs::write(repo.join("lib.rs"), "pub fn helper() {}\n").unwrap();
+        std::fs::create_dir_all(repo.join(".derrick")).unwrap();
+
+        let survey = Survey::open(SurveyConfig {
+            db_path: repo.join(".derrick/index.db"),
+            repo_root: repo.to_path_buf(),
+            reader_pool: SurveyConfig::DEFAULT_READER_POOL,
+        })
+        .await?;
+        survey.build(BuildOptions::default()).await?;
+
+        let dirty = Arc::new(AtomicBool::new(false));
+        let watcher = tokio::spawn(watch_loop(survey.clone(), Arc::clone(&dirty)));
+
+        // Give the watcher a moment to arm its event stream.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Poll until the debounced rebuild surfaces the new symbol. The event
+        // stream can take a variable time to arm (FSEvents on macOS in
+        // particular), so re-touch the file each iteration to keep generating
+        // events until one is caught, and allow a generous deadline.
+        let added = repo.join("added.rs");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut found = false;
+        while Instant::now() < deadline {
+            std::fs::write(&added, "pub fn brand_new_symbol() {}\n").unwrap();
+            // Wait longer than the debounce window so the burst goes quiet and
+            // the rebuild actually fires before the next touch re-arms it.
+            tokio::time::sleep(DEBOUNCE + Duration::from_millis(500)).await;
+            let hits = survey.search("brand_new_symbol", 5).await?;
+            if hits.iter().any(|h| h.name == "brand_new_symbol") {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "watcher did not re-index the new file within the deadline"
+        );
+        // A successful rebuild clears the dirty flag.
+        assert!(
+            !dirty.load(Ordering::Relaxed),
+            "dirty flag should be cleared after rebuild"
+        );
+
+        watcher.abort();
+        Ok(())
+    }
+}

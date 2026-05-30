@@ -25,8 +25,9 @@ struct CompiledQueries {
     refs: Query,
 }
 
-/// All five languages' queries, compiled once on first parse. The built-in
-/// query sources are constants, so a compile failure is a programmer error.
+/// All supported languages' queries, compiled once on first parse. The
+/// built-in query sources are constants, so a compile failure is a programmer
+/// error.
 static QUERIES: LazyLock<HashMap<Lang, CompiledQueries>> = LazyLock::new(|| {
     [
         Lang::Rust,
@@ -34,6 +35,7 @@ static QUERIES: LazyLock<HashMap<Lang, CompiledQueries>> = LazyLock::new(|| {
         Lang::Go,
         Lang::JavaScript,
         Lang::TypeScript,
+        Lang::CSharp,
     ]
     .into_iter()
     .map(|lang| {
@@ -88,6 +90,7 @@ impl Lang {
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         }
     }
 
@@ -98,6 +101,7 @@ impl Lang {
             Lang::Go => queries::GO_SYMBOLS,
             Lang::JavaScript => queries::JAVASCRIPT_SYMBOLS,
             Lang::TypeScript => queries::TYPESCRIPT_SYMBOLS,
+            Lang::CSharp => queries::CSHARP_SYMBOLS,
         }
     }
 
@@ -107,6 +111,7 @@ impl Lang {
             Lang::Python => queries::PYTHON_REFS,
             Lang::Go => queries::GO_REFS,
             Lang::JavaScript | Lang::TypeScript => queries::JS_TS_REFS,
+            Lang::CSharp => queries::CSHARP_REFS,
         }
     }
 }
@@ -294,6 +299,33 @@ mod tests {
         assert!(names.contains(&"C"));
         assert!(names.contains(&"fn"));
         assert!(parsed.refs.iter().any(|r| r.dst_name == "fn"));
+    }
+
+    #[test]
+    fn csharp_extracts_types_methods_and_calls() {
+        let src = "namespace App;\ninterface IGreeter { string Greet(); }\nclass Greeter : IGreeter {\n    public string Greet() { return Build(); }\n    string Build() { return \"hi\"; }\n}\nenum Color { Red, Green }\n";
+        let parsed = parse(Lang::CSharp, src).unwrap();
+        let names: Vec<&str> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"App"));
+        assert!(names.contains(&"IGreeter"));
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"Greet"));
+        assert!(names.contains(&"Build"));
+        assert!(names.contains(&"Color"));
+        assert!(parsed.refs.iter().any(|r| r.dst_name == "Build"));
+
+        // The call to `Build` lives in the class's `Greet` method (line 4),
+        // not the interface's `Greet` declaration (line 2), so attribute it to
+        // the enclosing symbol by line span rather than by name.
+        let attributed = attribute_refs(&parsed.symbols, &parsed.refs);
+        let greet_idx = parsed
+            .symbols
+            .iter()
+            .position(|s| s.name == "Greet" && s.start_line == 4)
+            .unwrap();
+        assert!(attributed
+            .iter()
+            .any(|(idx, r)| *idx == greet_idx && r.dst_name == "Build"));
     }
 
     #[test]

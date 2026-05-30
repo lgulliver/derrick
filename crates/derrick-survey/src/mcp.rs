@@ -199,6 +199,7 @@ mod tests {
     use crate::{SurveyConfig, SurveyError};
     use rmcp::model::CallToolRequestParam;
     use rmcp::service::ServiceExt;
+    use serde_json::json;
 
     async fn temp_survey() -> (tempfile::TempDir, Survey) {
         let tmp = tempfile::tempdir().unwrap();
@@ -220,18 +221,48 @@ mod tests {
         (tmp, survey)
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mcp_lists_and_calls_tools() -> Result<(), SurveyError> {
-        let (_tmp, survey) = temp_survey().await;
+    /// Spawn `server` over an in-memory duplex transport and return a connected
+    /// client plus the server task handle.
+    async fn connect(
+        server: SurveyServer,
+    ) -> (
+        rmcp::service::RunningService<rmcp::RoleClient, ()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (server_io, client_io) = tokio::io::duplex(8192);
-
-        let server = SurveyServer::new(survey, Arc::new(AtomicBool::new(false)));
-        let server_handle = tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let running = server.serve(server_io).await.unwrap();
             let _ = running.waiting().await;
         });
-
         let client = rmcp::serve_client((), client_io).await.unwrap();
+        (client, handle)
+    }
+
+    /// Call `tool` with `args` and return the concatenated text content.
+    async fn call_text(
+        client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> String {
+        let result = client
+            .call_tool(CallToolRequestParam {
+                name: tool.to_owned().into(),
+                arguments: args.as_object().cloned(),
+            })
+            .await
+            .unwrap();
+        result
+            .content
+            .iter()
+            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_lists_tools_and_reports_server_info() -> Result<(), SurveyError> {
+        let (_tmp, survey) = temp_survey().await;
+        let server = SurveyServer::new(survey, Arc::new(AtomicBool::new(false)));
+        let (client, handle) = connect(server).await;
 
         let tools = client.list_all_tools().await.unwrap();
         let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
@@ -240,27 +271,87 @@ mod tests {
         assert!(names.contains(&"derrick_survey_impact".to_owned()));
         assert!(names.contains(&"derrick_survey_status".to_owned()));
 
-        let result = client
-            .call_tool(CallToolRequestParam {
-                name: "derrick_survey_search".into(),
-                arguments: serde_json::json!({ "query": "helper", "limit": 5 })
-                    .as_object()
-                    .cloned(),
-            })
-            .await
-            .unwrap();
-        let body: String = result
-            .content
-            .iter()
-            .filter_map(|c| c.as_text().map(|t| t.text.clone()))
-            .collect();
-        assert!(
-            body.contains("helper"),
-            "search result should mention helper: {body}"
-        );
+        // `get_info` is delivered to the client during initialize.
+        let info = client.peer_info();
+        assert!(info
+            .and_then(|i| i.instructions.as_deref())
+            .is_some_and(|i| i.contains("derrick_survey_search")));
 
         client.cancel().await.unwrap();
-        server_handle.abort();
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_each_tool_returns_results() -> Result<(), SurveyError> {
+        let (_tmp, survey) = temp_survey().await;
+        let server = SurveyServer::new(survey, Arc::new(AtomicBool::new(false)));
+        let (client, handle) = connect(server).await;
+
+        let search = call_text(
+            &client,
+            "derrick_survey_search",
+            json!({ "query": "helper" }),
+        )
+        .await;
+        assert!(search.contains("helper"), "search: {search}");
+
+        // `caller` references `helper`, so context should surface both.
+        let context = call_text(
+            &client,
+            "derrick_survey_context",
+            json!({ "query": "caller" }),
+        )
+        .await;
+        assert!(context.contains("caller"), "context: {context}");
+        assert!(context.contains("helper"), "context: {context}");
+
+        let impact = call_text(
+            &client,
+            "derrick_survey_impact",
+            json!({ "symbol": "helper" }),
+        )
+        .await;
+        assert!(
+            impact.contains("caller"),
+            "impact should list the caller: {impact}"
+        );
+
+        let status = call_text(&client, "derrick_survey_status", json!({})).await;
+        assert!(status.contains("\"files\""), "status: {status}");
+        assert!(status.contains("\"symbols\""), "status: {status}");
+
+        client.cancel().await.unwrap();
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_emits_staleness_banner_when_dirty_and_pending() -> Result<(), SurveyError> {
+        let (tmp, survey) = temp_survey().await;
+        // Create an as-yet-unindexed file so `status().pending` is non-empty,
+        // then flag the index dirty to arm the banner path.
+        std::fs::write(tmp.path().join("extra.rs"), "pub fn added() {}\n").unwrap();
+        let dirty = Arc::new(AtomicBool::new(true));
+        let server = SurveyServer::new(survey, dirty);
+        let (client, handle) = connect(server).await;
+
+        let body = call_text(
+            &client,
+            "derrick_survey_search",
+            json!({ "query": "helper" }),
+        )
+        .await;
+        assert!(body.contains("STALE:"), "expected staleness banner: {body}");
+        assert!(
+            body.contains("extra.rs"),
+            "banner should name the pending file: {body}"
+        );
+        // The actual result is still appended after the banner.
+        assert!(body.contains("helper"), "result still present: {body}");
+
+        client.cancel().await.unwrap();
+        handle.abort();
         Ok(())
     }
 }
