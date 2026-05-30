@@ -38,6 +38,21 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Set workspace version from tag
+        shell: bash
+        run: |
+          # The binary reports env!("CARGO_PKG_VERSION") and `derrick upgrade`
+          # compares it against the latest release tag, so the built artifact
+          # MUST carry the tag's version. Cargo can't read the tag itself, so
+          # we stamp the single [workspace.package] version line (all crates
+          # inherit it via `version.workspace = true`) before building.
+          VERSION="${GITHUB_REF_NAME#v}"
+          tmp="$(mktemp)"
+          sed -E 's/^version = "[^"]*"/version = "'"$VERSION"'"/' Cargo.toml > "$tmp"
+          mv "$tmp" Cargo.toml
+          echo "Stamped workspace version: $VERSION"
+          grep -A1 '^\[workspace.package\]' Cargo.toml
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} -p derrick-cli
 
