@@ -1,0 +1,134 @@
+yeah I would have thought that opencode should allow us to set its model when we use opencode in the same way we would change model for copilot.
+
+---
+
+My belief is that the crew should use the best model for the job available unless otherwise specified. This should be able to be determined by the foreman. The user can configure which tool they want to use i.e. copilot, opencode, etc but its down to the foreman to establish what models are available to each and which model should be used for given tasks based on size and complexity.  a user can override it in derrick.yaml though
+
+---
+
+Once D67 finishes (its author adds complexity: None/equivalent to ticket_base_from_row and migration 0004), run:
+cargo test -p derrick-substrate-native -p derrick-hand -p derrick-copilot && cargo clippy --workspace --all-targets
+
+---
+
+I've asked copilot to review
+
+---
+
+<ci-monitor-event>lgulliver/derrick PR #20 has 1 new review comment:
+- copilot-pull-request-reviewer[bot] (commented): ## Pull request overview
+
+Implements D66, which refines D65 in two ways: (A) the role-bound model from `derrick.yaml` is now forwarded as `HostRequest.model` on pipeline `host:` steps so the adapter can pass `--model`, and (B) `codex`/`opencode`/`aider` become first-class crew executor hands via a new generic `derrick-hand` dispatcher (per-ticket git worktree, shared `HostRegistry`), backed by schema migration 0003 that widens the `hands.kind` CHECK while preserving `tickets.owner` and `events.scope_hand` references.
+
+**Changes:**
+- Forward role-resolved RAW model id into `HostRequest.model` in `execute_role_step`; treat empty/whitespace as `None`.
+- Add `HandKind::Codex/Opencode/Aider` (enum + Display/FromStr + serde), migration 0003 (FK-off rebuild + foreign_key_check + user_version=3), and v2→v3 regression test.
+- New crate `derrick-hand` providing `HostCliHandDispatcher` (resolve adapter + create worktree before `assign_to_hand`; on post-assign failure release ticket, remove worktree, return Err), wired into the CLI foreman for codex/opencode/aider; `hand_kind_for_executor` extended and re-exported.
+
+### Reviewed changes
+
+Copilot reviewed 12 out of 13 changed files in this pull request and generated no comments.
+
+<details>
+<summary>Show a summary per file</summary>
+
+| File | Description |
+| ---- | ----------- |
+| DESIGN.md | Adds the D66 narrowing note in §6.5, updates the Hand glossary, and records the D66 decision row. |
+| crates/derrick-substrate/src/types.rs | Adds Codex/Opencode/Aider HandKind variants with Display/FromStr/serde and matching tests. |
+| crates/derrick-substrate-native/migrations/0003_hand_kinds.sql | New migration rebuilding `hands` with the widened CHECK and bumping `user_version` to 3. |
+| crates/derrick-substrate-native/src/lib.rs | Bumps SCHEMA_VERSION to 3 and adds `run_migration_0003` with FK-off rebuild + foreign_key_check. |
+| crates/derrick-substrate-native/src/tests.rs | Replaces the v3-refusal test with v4-refusal, and adds 0003 admit + FK-preservation regression tests. |
+| crates/derrick-hand/Cargo.toml | Manifest for the new generic host-CLI hand dispatcher crate. |
+| crates/derrick-hand/src/lib.rs | Implements `HostCliHandDispatcher` (per-ticket worktree, model forwarding, cleanup on failure) plus unit tests. |
+| crates/derrick-flow/src/steps.rs | Sets `HostRequest.model` from role→model; simplifies hand_suffix; extends + publicizes `hand_kind_for_executor`. |
+| crates/derrick-flow/src/lib.rs | Re-exports `hand_kind_for_executor`; adds a host-step model-forwarding test. |
+| crates/derrick-cli/Cargo.toml | Adds the `derrick-hand` dependency. |
+| crates/derrick-cli/src/commands/foreman.rs | Resolves crew executor model/kind and registers the host-CLI dispatcher for codex/opencode/aider. |
+| Cargo.toml / Cargo.lock | Adds the new `derrick-hand` workspace member. |
+</details>
+
+
+
+
+
+
+
+Please address the feedback and push a fix. Then, for each inline comment you addressed (those with a comment_id), post a one-line reply on the thread via `gh api` saying what you changed (or why you didn't), and resolve the thread. Skip replies for comments you didn't act on.</ci-monitor-event>
+
+---
+
+lets just do a quick pass of updating our documentation as well
+
+---
+
+<ci-monitor-event>lgulliver/derrick PR #21 has 5 new review comments:
+- Copilot on crates/derrick-tools/src/catalogue.rs:126 [comment_id=3329325430]: Pinned selections are returned without the catalogue normalization that the host adapters apply before `--model`. The new Claude and local Copilot dispatchers pass this `select_model` result directly to their CLIs, so a valid pinned value with a provider prefix (for example `anthropic/claude-sonnet-4-6` or `openai/gpt-5.4`) will now be forwarded in a shape those bare-id hosts are supposed to strip. Normalize trimmed pins here so all dispatch paths preserve the D65 per-host model-id shaping.
+- Copilot on crates/derrick-copilot/src/local_dispatcher.rs:300 [comment_id=3329325445]: After the ticket worktree row is registered, several fallible operations below (`create_dir_all`, `write`, `assign_to_hand`, and the dispatch note) still return early without removing the worktree or forgetting the row. Those failures leave the ticket Ready but keep a tracked worktree until the TTL cleanup, and a later redispatch can reuse stale queue/worktree state. Wrap the post-registration path in the same cleanup-on-error pattern used by the generic host dispatcher, or move registration until immediately before assignment with cleanup on any subsequent error.
+- Copilot on DESIGN.md:2138 [comment_id=3329325455]: The PR is described as the D67 adaptive model-selection change only, but this adds and records a separate D68 worktree-lifecycle decision with corresponding implementation changes elsewhere. That makes the reviewed scope materially broader than the title/description and the stated stacking note. Please either split the D68 lifecycle work into its own PR or update the PR metadata to include and justify this additional decision.
+- Copilot on DESIGN.md:2137 [comment_id=3329325462]: This says `derrick models check` treats any `auto*` value as PASS, but the implementation intentionally accepts only the exact sentinels parsed by `parse_model_choice` (`auto`, `auto:light`, `auto:standard`, `auto:heavy`); lookalikes such as `auto-foo` go through normal pinned-model validation. Please narrow this wording so the design record does not contradict the checker behavior.
+- copilot-pull-request-reviewer[bot] (commented): ## Pull request overview
+
+This PR adds D67 adaptive per-ticket model selection so the foreman can resolve `auto` executor models to host-specific light/standard/heavy tiers using ticket complexity, while preserving explicit model pins.
+
+**Changes:**
+- Adds ticket complexity parsing, persistence, and migration support.
+- Adds model tier catalogue APIs and uses them across pipeline and crew dispatch paths.
+- Updates docs/default config for `auto`; also includes additional D68 worktree lifecycle changes.
+
+### Reviewed changes
+
+Copilot reviewed 27 out of 28 changed files in this pull request and generated 4 comments.
+
+<details>
+<summary>Show a summary per file</summary>
+
+| File | Description |
+| ---- | ----------- |
+| `templates/derrick.yaml.in` | Defaults Copilot executor model to `auto`. |
+| `README.md` | Documents host-based model routing and adaptive tiering. |
+| `DESIGN.md` | Records D67 and adds D68 design notes. |
+| `crates/derrick-tools/src/lib.rs` | Re-exports model-selection types/functions. |
+| `crates/derrick-tools/src/catalogue.rs` | Adds tiers, `ModelChoice`, parsing, selection, and tests. |
+| `crates/derrick-substrate/src/types.rs` | Adds `Complexity` and ticket fields. |
+| `crates/derrick-substrate/src/lib.rs` | Re-exports `Complexity`. |
+| `crates/derrick-substrate-native/src/tests.rs` | Adds migration and ticket-worktree tests. |
+| `crates/derrick-substrate-native/src/lib.rs` | Adds schema v4, complexity persistence, and ticket worktree tracking. |
+| `crates/derrick-substrate-native/src/foreman/tests.rs` | Tests cleanup of ticket-keyed worktrees. |
+| `crates/derrick-substrate-native/src/foreman.rs` | Adds shared ticket worktree pruning helper. |
+| `crates/derrick-substrate-native/migrations/0004_ticket_complexity.sql` | Adds optional ticket `complexity` column. |
+| `crates/derrick-stack/src/lib.rs` | Updates test ticket fixture. |
+| `crates/derrick-models/tests/models.rs` | Updates default model expectations for `auto`. |
+| `crates/derrick-hand/src/lib.rs` | Resolves per-ticket models and tracks/prunes host CLI worktrees. |
+| `crates/derrick-flow/src/steps.rs` | Resolves pipeline `auto` models and parses complexity markers. |
+| `crates/derrick-copilot/src/local_dispatcher.rs` | Adds Copilot per-ticket model selection and worktree tracking/pruning. |
+| `crates/derrick-copilot/Cargo.toml` | Adds `derrick-tools` dependency. |
+| `crates/derrick-config/src/lib.rs` | Defaults Copilot model to `auto`. |
+| `crates/derrick-cli/tests/cli.rs` | Updates doctor test comments for `auto`. |
+| `crates/derrick-cli/src/commands/models.rs` | Makes models check pass exact `auto` sentinels after host availability. |
+| `crates/derrick-cli/src/commands/foreman.rs` | Wires executor `ModelChoice` into dispatchers. |
+| `crates/derrick-claude/src/dispatcher.rs` | Adds Claude per-ticket model selection. |
+| `crates/derrick-claude/Cargo.toml` | Adds `derrick-tools` dependency. |
+| `Cargo.lock` | Updates dependency graph. |
+| `AGENTS.md` | Updates role/model documentation. |
+| `.claude/commands/speckit/tasks.md` | Requires complexity markers in generated task headings. |
+| `.claude/commands/speckit.tasks.md` | Mirrors task complexity marker instructions. |
+</details>
+
+
+
+
+
+
+
+Please address the feedback and push a fix. Then, for each inline comment you addressed (those with a comment_id), post a one-line reply on the thread via `gh api` saying what you changed (or why you didn't), and resolve the thread. Skip replies for comments you didn't act on.</ci-monitor-event>
+
+---
+
+would you say we're in a state where we can do a pre-release version of derrick now?
+
+---
+
+21 is merged. there's no release at all at the moment so we should create a CHANGELOG.md that's a full read of what's in 0.1.0-alpha.1
+
+can we do anything that would modify the workspace version upon tag?
