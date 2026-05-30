@@ -3,8 +3,8 @@
 mod clarify;
 mod code_review;
 mod manifest;
+mod progress;
 mod runner;
-mod spinner;
 mod steps;
 
 pub use code_review::{run_code_review, CodeReviewOutcome};
@@ -12,6 +12,7 @@ pub use derrick_assay::types::{
     PipelineInput, RunError, RunOutcome, RunStatus, StepRecord, StepStatus,
 };
 pub use manifest::compute_prompt_key;
+pub use progress::{NoopReporter, ProgressReporter, RunProgress, StepProgress};
 pub use runner::Runner;
 
 /// Re-export of the shared run/step types crate. Existing call sites that
@@ -603,6 +604,78 @@ fi
             .path()
             .join(".derrick/runs/run-1/manifest.json")
             .exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_pipeline_drives_the_progress_reporter() -> TestResult {
+        use crate::{ProgressReporter, RunProgress, StepProgress};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct CountingReporter {
+            started: AtomicUsize,
+            steps_started: AtomicUsize,
+            steps_finished: AtomicUsize,
+            final_status: StdMutex<Option<RunStatus>>,
+        }
+        impl ProgressReporter for CountingReporter {
+            fn pipeline_started(&self, _pid: &str, _run: &str, _total: usize) {
+                self.started.fetch_add(1, Ordering::Relaxed);
+            }
+            fn step_started(&self, _id: &str, _i: usize, _t: usize, _interactive: bool) {
+                self.steps_started.fetch_add(1, Ordering::Relaxed);
+            }
+            fn step_finished(&self, _p: StepProgress<'_>) {
+                self.steps_finished.fetch_add(1, Ordering::Relaxed);
+            }
+            fn pipeline_finished(&self, p: RunProgress<'_>) {
+                *self.final_status.lock().unwrap() = Some(p.status);
+            }
+        }
+
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (_dir, runner) = runner(&yaml(
+            add_feature_pipeline(),
+            &reviewer.path().join("reviewer"),
+        ))
+        .await?;
+        let reporter = std::sync::Arc::new(CountingReporter::default());
+        let runner = runner.with_progress(reporter.clone());
+        let outcome = runner
+            .run_pipeline(
+                ADD_FEATURE_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("run-progress".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Success);
+        assert_eq!(
+            reporter.started.load(Ordering::Relaxed),
+            1,
+            "pipeline_started should fire exactly once"
+        );
+        // Every attempted step reports a finish (started fires for non-skipped).
+        let finished = reporter.steps_finished.load(Ordering::Relaxed);
+        assert_eq!(
+            finished,
+            outcome.steps.len(),
+            "every step should report a finish"
+        );
+        assert!(
+            reporter.steps_started.load(Ordering::Relaxed) >= 1,
+            "at least one step should report a start"
+        );
+        assert_eq!(
+            *reporter.final_status.lock().unwrap(),
+            Some(RunStatus::Success),
+            "pipeline_finished should carry the final status"
+        );
         Ok(())
     }
 

@@ -2,10 +2,14 @@ use crate::commands::{RunArgs, RunCommand};
 use crate::exit_code::CliExitCode;
 use crate::{current_repo_root, native_paths, read_config};
 
+use std::sync::Arc;
+
 use derrick_config::SubstrateBackendKind;
-use derrick_flow::{PipelineInput, Runner};
+use derrick_flow::{PipelineInput, ProgressReporter, Runner};
 use derrick_substrate_native::NativeSubstrate;
 use derrick_tools::HostRegistry;
+
+use crate::progress::CliReporter;
 
 pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliError> {
     let (_repo_root, _config, _substrate, runner) = build_runner().await?;
@@ -18,7 +22,6 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
                     .resume(add_feature.run_id.as_deref(), Some(&from_step))
                     .await
                     .map_err(|error| crate::message(error.to_string()))?;
-                println!("resumed run {}: {:?}", outcome.run_id, outcome.status);
                 return Ok(status_code(outcome.status));
             }
 
@@ -29,7 +32,6 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
                     .resume(add_feature.run_id.as_deref(), None)
                     .await
                     .map_err(|error| crate::message(error.to_string()))?;
-                println!("resumed run {}: {:?}", outcome.run_id, outcome.status);
                 return Ok(status_code(outcome.status));
             }
 
@@ -40,7 +42,6 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
                     .run_pipeline_as_restart("add-feature", input, prior_run_id)
                     .await
                     .map_err(|error| crate::message(error.to_string()))?;
-                println!("run {}: {:?}", outcome.run_id, outcome.status);
                 return Ok(status_code(outcome.status));
             }
 
@@ -49,7 +50,6 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
                 .run_pipeline("add-feature", input)
                 .await
                 .map_err(|error| crate::message(error.to_string()))?;
-            println!("run {}: {:?}", outcome.run_id, outcome.status);
             Ok(status_code(outcome.status))
         }
         RunCommand::Resume(args) => {
@@ -57,7 +57,6 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
                 .resume(args.run_id.as_deref(), None)
                 .await
                 .map_err(|error| crate::message(error.to_string()))?;
-            println!("resumed run {}: {:?}", outcome.run_id, outcome.status);
             Ok(status_code(outcome.status))
         }
     }
@@ -81,12 +80,14 @@ async fn build_runner() -> Result<
     }
     let substrate =
         NativeSubstrate::open(native_paths(&repo_root, &config), config.site().clone()).await?;
+    let reporter: Arc<dyn ProgressReporter> = Arc::new(CliReporter::new());
     let runner = Runner::new(
         config.clone(),
         std::sync::Arc::new(substrate.clone()),
         HostRegistry::with_defaults(),
         repo_root.clone(),
-    );
+    )
+    .with_progress(reporter);
     Ok((repo_root, config, substrate, runner))
 }
 

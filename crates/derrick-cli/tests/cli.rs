@@ -777,7 +777,9 @@ fn run_add_feature_smoke_writes_real_artifacts() -> TestResult {
         .assert()
         .success()
         .get_output()
-        .stdout
+        // Run progress and the final summary are status output, so they go to
+        // stderr (the run-id appears in the reporter's "✓ run smoke …" line).
+        .stderr
         .clone();
 
     assert_contains(&output, "smoke")?;

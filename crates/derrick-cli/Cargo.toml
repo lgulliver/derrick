@@ -29,6 +29,7 @@ derrick-tools = { path = "../derrick-tools" }
 derrick-observe = { path = "../derrick-observe" }
 derrick-tui = { path = "../derrick-tui" }
 owo-colors = { workspace = true }
+indicatif = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true }
 tempfile = { workspace = true }

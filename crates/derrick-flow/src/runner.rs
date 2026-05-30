@@ -12,6 +12,7 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 use crate::manifest::{prior_feature_dir, FlagsManifest, ManifestStep, RunManifest};
+use crate::progress::{NoopReporter, ProgressReporter, RunProgress, StepProgress};
 use crate::steps;
 use derrick_assay::io::{
     config_hash, create_dir_all, default_run_id, read_dir_names, read_feature_dir,
@@ -35,10 +36,14 @@ pub struct Runner {
     substrate: Arc<dyn Substrate>,
     hosts: Arc<HostRegistry>,
     repo_root: PathBuf,
+    reporter: Arc<dyn ProgressReporter>,
 }
 
 impl Runner {
     /// Builds a runner from already-loaded configuration and process adapters.
+    ///
+    /// Progress reporting defaults to [`NoopReporter`]; call
+    /// [`Runner::with_progress`] to attach a live front-end.
     pub fn new(
         config: Config,
         substrate: Arc<dyn Substrate>,
@@ -50,7 +55,17 @@ impl Runner {
             substrate,
             hosts: Arc::new(hosts),
             repo_root,
+            reporter: Arc::new(NoopReporter),
         }
+    }
+
+    /// Attaches a progress reporter that receives live step-lifecycle callbacks.
+    /// The CLI uses this to render a spinner and per-step outcomes; tests and
+    /// non-interactive callers leave the default [`NoopReporter`] in place.
+    #[must_use]
+    pub fn with_progress(mut self, reporter: Arc<dyn ProgressReporter>) -> Self {
+        self.reporter = reporter;
+        self
     }
 
     /// Execute the named pipeline.
@@ -188,16 +203,14 @@ impl Runner {
 
         let start_index = manifest.steps.len();
         let mut outcome_status = RunStatus::Success;
-        eprintln!(
-            "{} {} ({})",
-            "pipeline:".bold(),
-            pipeline_id.cyan(),
-            format!("run {run_id}").bright_black()
-        );
+        let run_timer = std::time::Instant::now();
         steps::ensure_constitution(&self.config, self.working_dir(&state), self.hosts.clone())
             .await?;
 
         let tail = &self.config.pipeline()[start_index..];
+        let total_steps = tail.len();
+        self.reporter
+            .pipeline_started(pipeline_id, &run_id, total_steps);
         let mut idx = 0usize;
         'outer: while idx < tail.len() {
             let step = &tail[idx];
@@ -205,12 +218,13 @@ impl Runner {
                 None => {
                     if self.should_skip(step, &input) {
                         let record = self.skipped_record(step);
-                        eprintln!(
-                            "  {} {} {}",
-                            step.id().cyan(),
-                            "\u{23ed}".bright_cyan(),
-                            "skipped".bright_black()
-                        );
+                        self.reporter.step_finished(StepProgress {
+                            step_id: step.id(),
+                            status: record.status,
+                            tokens_in: record.tokens_in,
+                            tokens_out: record.tokens_out,
+                            elapsed: std::time::Duration::ZERO,
+                        });
                         manifest.tokens_in = manifest
                             .tokens_in
                             .saturating_add(u64::from(record.tokens_in));
@@ -235,130 +249,77 @@ impl Runner {
                         continue;
                     }
 
-                    let record = {
-                        if is_interactive_step(step) {
-                            eprintln!("  {}...", step.id().cyan());
-                            steps::execute_step(
-                                &self.config,
-                                self.substrate.as_ref(),
-                                self.hosts.clone(),
-                                &self.repo_root,
-                                step,
-                                &mut state,
-                                &run_id,
-                                &self.manifest_path(&run_id),
-                            )
-                            .await?
-                        } else {
-                            let step_id = step.id().to_owned();
-                            let frames = crate::spinner::scanner_frames();
-                            let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-                            let r2 = running.clone();
-                            let spinner = tokio::task::spawn(async move {
-                                use std::io::Write as _;
-                                use std::sync::atomic::Ordering;
-                                use std::time::Duration;
-                                let mut i = 0usize;
-                                while r2.load(Ordering::Relaxed) {
-                                    eprint!("\r  {} {}...", step_id.cyan(), frames[i]);
-                                    let _ = std::io::stderr().flush();
-                                    tokio::time::sleep(Duration::from_millis(80)).await;
-                                    i = (i + 1) % frames.len();
-                                }
-                            });
+                    let interactive = is_interactive_step(step);
+                    self.reporter
+                        .step_started(step.id(), idx + 1, total_steps, interactive);
+                    let step_timer = std::time::Instant::now();
+                    let record = steps::execute_step(
+                        &self.config,
+                        self.substrate.as_ref(),
+                        self.hosts.clone(),
+                        &self.repo_root,
+                        step,
+                        &mut state,
+                        &run_id,
+                        &self.manifest_path(&run_id),
+                    )
+                    .await?;
+                    self.reporter.step_finished(StepProgress {
+                        step_id: step.id(),
+                        status: record.status,
+                        tokens_in: record.tokens_in,
+                        tokens_out: record.tokens_out,
+                        elapsed: step_timer.elapsed(),
+                    });
 
-                            let result = steps::execute_step(
-                                &self.config,
-                                self.substrate.as_ref(),
-                                self.hosts.clone(),
-                                &self.repo_root,
-                                step,
-                                &mut state,
-                                &run_id,
-                                &self.manifest_path(&run_id),
-                            )
-                            .await;
-                            running.store(false, std::sync::atomic::Ordering::Relaxed);
-                            let _ = spinner.await;
-                            eprint!("\r                                            \r");
-                            result?
-                        }
-                    };
-                    match record.status {
-                        StepStatus::Success => eprintln!(
-                            "  {} {} {}",
-                            step.id().cyan(),
-                            "\u{2713}".green(),
-                            "done".green()
-                        ),
-                        StepStatus::Skipped => eprintln!(
-                            "  {} {} {}",
-                            step.id().cyan(),
-                            "\u{23ed}".bright_cyan(),
-                            "skipped".bright_black()
-                        ),
-                        StepStatus::Halted => {
-                            eprintln!(
-                                "  {} {} {}",
-                                step.id().cyan(),
-                                "\u{26a0}".yellow(),
-                                "HALTED".yellow()
-                            );
-                            if step.id() == "assay" {
-                                if let Some(feature_dir) = &state.feature_dir {
-                                    let wd = self.working_dir(&state);
-                                    let verdict_path =
-                                        wd.join(feature_dir).join("assay").join("verdict.md");
-                                    if let Ok(content) = std::fs::read_to_string(&verdict_path) {
-                                        let verdict = content
-                                            .lines()
-                                            .find_map(|l| l.strip_prefix("verdict: "))
-                                            .unwrap_or("unknown");
-                                        let lines: Vec<&str> = content
-                                            .lines()
-                                            .skip_while(|l| !l.starts_with("## "))
-                                            .filter(|l| !l.is_empty())
-                                            .collect();
+                    // Halted assay: surface the verdict detail beneath the outcome.
+                    if record.status == StepStatus::Halted && step.id() == "assay" {
+                        if let Some(feature_dir) = &state.feature_dir {
+                            let wd = self.working_dir(&state);
+                            let verdict_path =
+                                wd.join(feature_dir).join("assay").join("verdict.md");
+                            if let Ok(content) = std::fs::read_to_string(&verdict_path) {
+                                let verdict = content
+                                    .lines()
+                                    .find_map(|l| l.strip_prefix("verdict: "))
+                                    .unwrap_or("unknown");
+                                let lines: Vec<&str> = content
+                                    .lines()
+                                    .skip_while(|l| !l.starts_with("## "))
+                                    .filter(|l| !l.is_empty())
+                                    .collect();
+                                eprintln!(
+                                    "  {} {} {}",
+                                    "\u{2502}".bright_cyan(),
+                                    "Verdict:".cyan(),
+                                    verdict.yellow()
+                                );
+                                let preview: Vec<&str> = lines
+                                    .iter()
+                                    .take_while(|l| !l.starts_with("## Verdict"))
+                                    .flat_map(|l| l.strip_prefix("**"))
+                                    .filter(|l| l.len() > 5)
+                                    .take(3)
+                                    .collect();
+                                for item in &preview {
+                                    let cleaned = item.trim_end_matches("**").trim();
+                                    if !cleaned.is_empty() {
                                         eprintln!(
                                             "  {} {} {}",
                                             "\u{2502}".bright_cyan(),
-                                            "Verdict:".cyan(),
-                                            verdict.yellow()
-                                        );
-                                        let preview: Vec<&str> = lines
-                                            .iter()
-                                            .take_while(|l| !l.starts_with("## Verdict"))
-                                            .flat_map(|l| l.strip_prefix("**"))
-                                            .filter(|l| l.len() > 5)
-                                            .take(3)
-                                            .collect();
-                                        for item in &preview {
-                                            let cleaned = item.trim_end_matches("**").trim();
-                                            if !cleaned.is_empty() {
-                                                eprintln!(
-                                                    "  {} {} {}",
-                                                    "\u{2502}".bright_cyan(),
-                                                    "\u{2022}".yellow(),
-                                                    cleaned.yellow()
-                                                );
-                                            }
-                                        }
-                                        eprintln!(
-                                            "  {} {} {}",
-                                            "\u{2514}".bright_cyan(),
-                                            "Review:".cyan(),
-                                            verdict_path.display().to_string().cyan()
+                                            "\u{2022}".yellow(),
+                                            cleaned.yellow()
                                         );
                                     }
                                 }
+                                eprintln!(
+                                    "  {} {} {}",
+                                    "\u{2514}".bright_cyan(),
+                                    "Review:".cyan(),
+                                    verdict_path.display().to_string().cyan()
+                                );
                             }
                         }
-                        StepStatus::Failed => eprintln!(
-                            "  {} {} {}",
-                            step.id().cyan(),
-                            "\u{2717}".red(),
-                            "FAILED".red()
-                        ),
                     }
                     manifest.feature_dir = state.feature_dir.clone();
                     manifest.tokens_in = manifest
@@ -766,12 +727,13 @@ impl Runner {
                     for step in &group_steps {
                         if self.should_skip(step, &input) {
                             let record = self.skipped_record(step);
-                            eprintln!(
-                                "    {} {} {}",
-                                step.id().cyan(),
-                                "\u{23ed}".bright_cyan(),
-                                "skipped".bright_black()
-                            );
+                            self.reporter.step_finished(StepProgress {
+                                step_id: step.id(),
+                                status: record.status,
+                                tokens_in: record.tokens_in,
+                                tokens_out: record.tokens_out,
+                                elapsed: std::time::Duration::ZERO,
+                            });
                             let _ = self
                                 .substrate
                                 .record_typed_event(
@@ -787,7 +749,8 @@ impl Runner {
                             skipped.push(record);
                             continue;
                         }
-                        eprintln!("    {}...", step.id().cyan());
+                        // Index/total are not meaningful within a parallel group.
+                        self.reporter.step_started(step.id(), 0, 0, false);
                         let sem = semaphore.clone();
                         let runner = self.clone();
                         let step = step.clone();
@@ -798,6 +761,7 @@ impl Runner {
                                 RunError::Config("semaphore closed unexpectedly".to_owned())
                             })?;
                             let mut st = state_clone;
+                            let step_timer = std::time::Instant::now();
                             let record = steps::execute_step(
                                 &runner.config,
                                 runner.substrate.as_ref(),
@@ -809,36 +773,13 @@ impl Runner {
                                 &runner.manifest_path(&run_id),
                             )
                             .await?;
-                            match record.status {
-                                StepStatus::Success => eprintln!(
-                                    "    {} {} {}",
-                                    step.id().cyan(),
-                                    "\u{2713}".green(),
-                                    "done".green()
-                                ),
-                                StepStatus::Skipped => eprintln!(
-                                    "    {} {} {}",
-                                    step.id().cyan(),
-                                    "\u{23ed}".bright_cyan(),
-                                    "skipped".bright_black()
-                                ),
-                                StepStatus::Halted => {
-                                    eprintln!(
-                                        "    {} {} {}",
-                                        step.id().cyan(),
-                                        "\u{26a0}".yellow(),
-                                        "HALTED".yellow()
-                                    )
-                                }
-                                StepStatus::Failed => {
-                                    eprintln!(
-                                        "    {} {} {}",
-                                        step.id().cyan(),
-                                        "\u{2717}".red(),
-                                        "FAILED".red()
-                                    )
-                                }
-                            }
+                            runner.reporter.step_finished(StepProgress {
+                                step_id: step.id(),
+                                status: record.status,
+                                tokens_in: record.tokens_in,
+                                tokens_out: record.tokens_out,
+                                elapsed: step_timer.elapsed(),
+                            });
                             Ok(record)
                         }));
                     }
@@ -921,6 +862,13 @@ impl Runner {
 
         let tokens_in_total = manifest.tokens_in;
         let tokens_out_total = manifest.tokens_out;
+        self.reporter.pipeline_finished(RunProgress {
+            run_id: &run_id,
+            status: outcome_status,
+            tokens_in: tokens_in_total,
+            tokens_out: tokens_out_total,
+            elapsed: run_timer.elapsed(),
+        });
         Ok(RunOutcome {
             run_id,
             status: outcome_status,

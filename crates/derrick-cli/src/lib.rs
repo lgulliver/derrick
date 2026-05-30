@@ -14,6 +14,7 @@ use thiserror::Error;
 mod commands;
 mod exit_code;
 mod output;
+mod progress;
 mod telemetry;
 mod upgrade;
 
