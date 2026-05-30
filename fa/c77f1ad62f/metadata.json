@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "fac77f1ad62f",
+  "strategy": "manual-commit",
+  "branch": "feat/host-cli-only-models-d64",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "crates/derrick-copilot/src/client.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fa/c77f1ad62f/0/metadata.json",
+      "transcript": "/fa/c77f1ad62f/0/full.jsonl",
+      "content_hash": "/fa/c77f1ad62f/0/content_hash.txt",
+      "prompt": "/fa/c77f1ad62f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 133,
+    "cache_creation_tokens": 2203,
+    "cache_read_tokens": 122183,
+    "output_tokens": 668,
+    "api_call_count": 2
+  }
+}

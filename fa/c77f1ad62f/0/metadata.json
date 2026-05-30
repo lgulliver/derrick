@@ -1,0 +1,48 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "fac77f1ad62f",
+  "session_id": "2a46335a-ef91-4323-8bd1-f60d69103ca1",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-30T18:45:53.471817Z",
+  "branch": "feat/host-cli-only-models-d64",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "crates/derrick-copilot/src/client.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "8da37bc8440c",
+  "checkpoint_transcript_start": 47,
+  "transcript_lines_at_start": 47,
+  "token_usage": {
+    "input_tokens": 133,
+    "cache_creation_tokens": 2203,
+    "cache_read_tokens": 122183,
+    "output_tokens": 668,
+    "api_call_count": 2
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-30T18:45:53.465199Z",
+    "agent_lines": 6,
+    "agent_removed": 4,
+    "human_added": 39,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 45,
+    "total_lines_changed": 88,
+    "agent_percentage": 11.363636363636363,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
