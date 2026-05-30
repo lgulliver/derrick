@@ -18,6 +18,10 @@ pub enum Lang {
     TypeScript,
     /// C# (`.cs`).
     CSharp,
+    /// Java (`.java`).
+    Java,
+    /// Kotlin (`.kt`, `.kts`).
+    Kotlin,
 }
 
 impl Lang {
@@ -30,6 +34,8 @@ impl Lang {
             Some("js" | "jsx" | "mjs" | "cjs") => Some(Self::JavaScript),
             Some("ts" | "tsx") => Some(Self::TypeScript),
             Some("cs") => Some(Self::CSharp),
+            Some("java") => Some(Self::Java),
+            Some("kt" | "kts") => Some(Self::Kotlin),
             _ => None,
         }
     }
@@ -43,6 +49,8 @@ impl Lang {
             Self::JavaScript => "javascript",
             Self::TypeScript => "typescript",
             Self::CSharp => "csharp",
+            Self::Java => "java",
+            Self::Kotlin => "kotlin",
         }
     }
 }
@@ -214,6 +222,9 @@ mod tests {
             ("app.ts", Some(Lang::TypeScript)),
             ("view.tsx", Some(Lang::TypeScript)),
             ("Service.cs", Some(Lang::CSharp)),
+            ("Service.java", Some(Lang::Java)),
+            ("Main.kt", Some(Lang::Kotlin)),
+            ("build.gradle.kts", Some(Lang::Kotlin)),
         ];
         for (name, expected) in cases {
             assert_eq!(
@@ -239,6 +250,8 @@ mod tests {
         assert_eq!(Lang::JavaScript.as_str(), "javascript");
         assert_eq!(Lang::TypeScript.as_str(), "typescript");
         assert_eq!(Lang::CSharp.as_str(), "csharp");
+        assert_eq!(Lang::Java.as_str(), "java");
+        assert_eq!(Lang::Kotlin.as_str(), "kotlin");
     }
 
     #[test]

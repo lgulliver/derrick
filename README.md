@@ -328,7 +328,7 @@ What's landed and tested:
 - ✅ Pipeline step order fix — `tasks` before `analyze`
 - ✅ `derrick observe` — live ratatui dashboard
 - ✅ Tiered memory with tag index and lesson retrieval
-- ✅ `derrick survey` — native code-graph index (SQLite + FTS5) over Rust/TS/JS/Python/Go/C#; MCP server (`survey serve --mcp`) so agents query symbols/callers/impact instead of fanning out across reads; debounced watcher keeps it fresh
+- ✅ `derrick survey` — native code-graph index (SQLite + FTS5) over Rust/TS/JS/Python/Go/C#/Java/Kotlin; MCP server (`survey serve --mcp`) so agents query symbols/callers/impact instead of fanning out across reads; debounced watcher keeps it fresh
 - ✅ `derrick init` — brownfield-safe, VS Code + JetBrains opt-in, Codex instructions
 - ✅ `derrick doctor` — live squash-merge policy check via GitHub API
 - ✅ PR stacking: `stack show / restack / submit`

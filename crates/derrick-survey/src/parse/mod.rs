@@ -36,6 +36,8 @@ static QUERIES: LazyLock<HashMap<Lang, CompiledQueries>> = LazyLock::new(|| {
         Lang::JavaScript,
         Lang::TypeScript,
         Lang::CSharp,
+        Lang::Java,
+        Lang::Kotlin,
     ]
     .into_iter()
     .map(|lang| {
@@ -91,6 +93,8 @@ impl Lang {
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Lang::Java => tree_sitter_java::LANGUAGE.into(),
+            Lang::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
         }
     }
 
@@ -102,6 +106,8 @@ impl Lang {
             Lang::JavaScript => queries::JAVASCRIPT_SYMBOLS,
             Lang::TypeScript => queries::TYPESCRIPT_SYMBOLS,
             Lang::CSharp => queries::CSHARP_SYMBOLS,
+            Lang::Java => queries::JAVA_SYMBOLS,
+            Lang::Kotlin => queries::KOTLIN_SYMBOLS,
         }
     }
 
@@ -112,6 +118,8 @@ impl Lang {
             Lang::Go => queries::GO_REFS,
             Lang::JavaScript | Lang::TypeScript => queries::JS_TS_REFS,
             Lang::CSharp => queries::CSHARP_REFS,
+            Lang::Java => queries::JAVA_REFS,
+            Lang::Kotlin => queries::KOTLIN_REFS,
         }
     }
 }
@@ -326,6 +334,56 @@ mod tests {
         assert!(attributed
             .iter()
             .any(|(idx, r)| *idx == greet_idx && r.dst_name == "Build"));
+    }
+
+    #[test]
+    fn java_extracts_types_methods_and_calls() {
+        let src = "package com.acme.billing;\ninterface Invoice { double total(); }\nclass InvoiceService implements Invoice {\n    public double total() { return compute(); }\n    private double compute() { return new TaxCalculator().apply(100.0); }\n}\nenum Color { RED, GREEN }\n";
+        let parsed = parse(Lang::Java, src).unwrap();
+        let names: Vec<&str> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"com.acme.billing"));
+        assert!(names.contains(&"Invoice"));
+        assert!(names.contains(&"InvoiceService"));
+        assert!(names.contains(&"total"));
+        assert!(names.contains(&"compute"));
+        assert!(names.contains(&"Color"));
+        assert!(parsed.refs.iter().any(|r| r.dst_name == "compute"));
+        assert!(parsed.refs.iter().any(|r| r.dst_name == "TaxCalculator"));
+
+        let attributed = attribute_refs(&parsed.symbols, &parsed.refs);
+        let total_idx = parsed
+            .symbols
+            .iter()
+            .position(|s| s.name == "total" && s.start_line == 4)
+            .unwrap();
+        assert!(attributed
+            .iter()
+            .any(|(idx, r)| *idx == total_idx && r.dst_name == "compute"));
+    }
+
+    #[test]
+    fn kotlin_extracts_types_functions_and_calls() {
+        let src = "package com.acme.app\ninterface Greeter { fun greet(): String }\nclass RealGreeter : Greeter {\n    override fun greet(): String { return build() }\n    private fun build(): String { return helper() }\n}\nfun helper(): String { return \"hi\" }\n";
+        let parsed = parse(Lang::Kotlin, src).unwrap();
+        let names: Vec<&str> = parsed.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"com.acme.app"));
+        assert!(names.contains(&"Greeter"));
+        assert!(names.contains(&"RealGreeter"));
+        assert!(names.contains(&"greet"));
+        assert!(names.contains(&"build"));
+        assert!(names.contains(&"helper"));
+        assert!(parsed.refs.iter().any(|r| r.dst_name == "build"));
+        assert!(parsed.refs.iter().any(|r| r.dst_name == "helper"));
+
+        let attributed = attribute_refs(&parsed.symbols, &parsed.refs);
+        let build_idx = parsed
+            .symbols
+            .iter()
+            .position(|s| s.name == "build")
+            .unwrap();
+        assert!(attributed
+            .iter()
+            .any(|(idx, r)| *idx == build_idx && r.dst_name == "helper"));
     }
 
     #[test]

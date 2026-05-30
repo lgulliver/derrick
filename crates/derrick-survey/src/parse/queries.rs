@@ -97,3 +97,35 @@ pub(super) const CSHARP_REFS: &str = r#"
 (invocation_expression function: (member_access_expression name: (identifier) @call))
 (object_creation_expression type: (identifier) @call)
 "#;
+
+pub(super) const JAVA_SYMBOLS: &str = r#"
+(class_declaration name: (identifier) @name) @type
+(record_declaration name: (identifier) @name) @type
+(interface_declaration name: (identifier) @name) @interface
+(annotation_type_declaration name: (identifier) @name) @interface
+(enum_declaration name: (identifier) @name) @enum
+(method_declaration name: (identifier) @name) @function
+(constructor_declaration name: (identifier) @name) @function
+(enum_constant name: (identifier) @name) @constant
+(package_declaration (scoped_identifier) @name) @module
+(package_declaration (identifier) @name) @module
+"#;
+
+pub(super) const JAVA_REFS: &str = r#"
+(method_invocation name: (identifier) @call)
+(object_creation_expression type: (type_identifier) @call)
+"#;
+
+pub(super) const KOTLIN_SYMBOLS: &str = r#"
+(class_declaration name: (identifier) @name) @type
+(object_declaration name: (identifier) @name) @type
+(function_declaration name: (identifier) @name) @function
+(property_declaration (variable_declaration (identifier) @name)) @constant
+(enum_entry (identifier) @name) @constant
+(package_header (qualified_identifier) @name) @module
+"#;
+
+pub(super) const KOTLIN_REFS: &str = r#"
+(call_expression (identifier) @call)
+(call_expression (navigation_expression (identifier) @call))
+"#;

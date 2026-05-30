@@ -180,6 +180,8 @@ Runs the MCP server over stdio. This is what `derrick init` registers in `.mcp.j
 | Python | `.py` |
 | Go | `.go` |
 | C# | `.cs` |
+| Java | `.java` |
+| Kotlin | `.kt`, `.kts` |
 
 Symbol extraction covers: functions/methods, types/structs/classes, interfaces, enums, constants, and modules. Reference extraction covers: function calls and identifier references.
 
