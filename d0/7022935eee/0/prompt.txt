@@ -1,0 +1,55 @@
+just to confirm around this then, if I were to say, use opencode as our executors would it default to the models I have selected there?
+
+---
+
+<ci-monitor-event>lgulliver/derrick PR #19 has 3 new review comments:
+- Copilot on DESIGN.md:1038 [comment_id=3329163766]: The note "The `cli` field is similarly deprecated and ignored" is inaccurate. `ModelDef::cli()` is still present and still actively used by the `shell` provider to spawn its CLI (see `crates/derrick-models/src/providers/shell.rs` and the deprecation comment on `ModelDef::cli()` itself, which only marks it deprecated for host providers). Consider rewording, e.g. "The `cli` field is deprecated for host providers (`claude`/`codex`/`copilot`/`opencode`/`aider`) and ignored there, but remains in use by the `shell` escape-hatch provider."
+- Copilot on crates/derrick-cli/src/commands/init.rs:614 [comment_id=3329163776]: `Config::defaults()` now sets `summariser: claude-haiku` (line 149), but the init wizard's `recommend_roles` function (in this same file, around lines 564/575/582 — outside this diff) still hardcodes `summariser: claude_sonnet` for all three modes. As a result, any user who runs `derrick init` through the wizard will get a `derrick.yaml` whose roles override the new default and point summariser at `claude-sonnet`, even though `claude-haiku` is now offered as a model choice here. Consider updating `recommend_roles` to pick the haiku model for the summariser role so the wizard output matches the new defaults.
+- copilot-pull-request-reviewer[bot] (commented): ## Pull request overview
+
+Routes all model inference through the five host CLIs (`claude`, `codex`, `copilot`, `opencode`, `aider`), removing direct-API providers and the BYOK auth path. Implements decision D65 (which supersedes D12 and completes D15), introduces a curated per-host model catalogue with per-host `--model` normalisation, adds an `aider` host adapter, and ships a new `derrick models check` command reused by `doctor` and as soft warnings at `init`/`run`.
+
+**Changes:**
+- Collapse `derrick-models` providers into a single host-delegated provider that calls `derrick-tools` host adapters; delete direct-API providers; drop `reqwest`; shrink `AuthStore` to env-passthrough.
+- New `derrick-tools/catalogue.rs` (defaults, known IDs, BareId/ProviderModel normalisation), new `aider` host adapter, `HostRequest::Debug` redacts prompt/env, all five adapters now forward normalised `--model`.
+- Refresh default model IDs (`claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`, `gpt-5.5`, `gpt-5.4`), alias legacy provider names at finalize, parse-and-ignore removed direct-API fields, add `Host::Opencode`/`Host::Aider`, and add `derrick models check` (FAIL on missing host/non-host provider; WARN on off-catalogue/missing slash/shell).
+
+### Reviewed changes
+
+Copilot reviewed 33 out of 34 changed files in this pull request and generated 2 comments.
+
+<details>
+<summary>Show a summary per file</summary>
+
+| File | Description |
+| ---- | ----------- |
+| `templates/derrick.yaml.in` | Template uses host providers and refreshed model IDs; adds `claude-haiku`; summariser → `claude-haiku`. |
+| `DESIGN.md` | Rewrites §6.5 around five hosts/no-BYOK and records D65 (amends D12/D15/D30/D34/D41). |
+| `crates/derrick-tools/src/lib.rs` | Adds `catalogue` module, exports `AiderHost`, redacts `HostRequest::Debug`, registers aider in default registry. |
+| `crates/derrick-tools/src/catalogue.rs` | New curated per-host catalogue and `normalize`/`is_known` helpers with tests. |
+| `crates/derrick-tools/src/hosts/{claude,codex,copilot,opencode}.rs` | Wire `--model` through `catalogue::normalize`. |
+| `crates/derrick-tools/src/hosts/{aider,mod}.rs` | New `AiderHost` headless adapter and module wiring. |
+| `crates/derrick-tools/tests/hosts.rs` | Adds aider/opencode coverage; replaces "no --model" tests with normalised-forwarding tests across all five hosts. |
+| `crates/derrick-models/Cargo.toml` | Adds `derrick-tools` dep, drops `reqwest`. |
+| `crates/derrick-models/src/lib.rs` | `AuthStore` becomes env-passthrough (`env_map`), removes `MissingCredential`, registers five host-delegated providers, updates cost hints for gpt-5/haiku-4. |
+| `crates/derrick-models/src/providers/{mod,host_delegated}.rs` | New host-delegated provider with HostError→ModelError mapping and IO-kind retry classification. |
+| `crates/derrick-models/src/providers/{anthropic,openai_cli,opencode,subprocess}.rs` | Direct-API and CLI-subprocess providers deleted. |
+| `crates/derrick-models/tests/models.rs` | Tests rewritten for host-delegated path, env-map passthrough, legacy alias resolution. |
+| `crates/derrick-config/src/lib.rs` + `Cargo.toml` | Default models refreshed; `Host` gains Opencode/Aider; legacy provider aliasing + parse-and-ignore for direct-API fields; adds `tracing`. |
+| `crates/derrick-cli/src/commands/models.rs` (new) + `mod.rs` + `lib.rs` | Implements `derrick models check`, shared `models_check_core`, soft-warning emitter. |
+| `crates/derrick-cli/src/commands/{doctor,init,run}.rs` | Doctor reuses model check core and drops API-key checks; init/run emit soft warnings; init adds `claude-haiku` choice. |
+| `crates/derrick-cli/tests/cli.rs` | Doctor tests updated for new exit-count semantics and no API-key requirement; PATH mocks include `copilot`. |
+| `crates/derrick-cli/Cargo.toml` | Adds `tracing` dep. |
+| `crates/derrick-assay/src/names.rs` | Maps new `Host::Opencode`/`Host::Aider`. |
+| `crates/derrick-flow/src/steps.rs` | Executor `HandKind` inference uses host provider names (`copilot`, `claude`). |
+| `crates/derrick-copilot/src/client.rs` | Doc comment cleanup (no behaviour change). |
+| `Cargo.lock` | Reflects added `tracing` deps and dropped `reqwest` transitive features for `derrick-models`. |
+</details>
+
+
+
+
+
+
+
+Please address the feedback and push a fix. Then, for each inline comment you addressed (those with a comment_id), post a one-line reply on the thread via `gh api` saying what you changed (or why you didn't), and resolve the thread. Skip replies for comments you didn't act on.</ci-monitor-event>

@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "d07022935eee",
+  "strategy": "manual-commit",
+  "branch": "feat/host-cli-only-models-d64",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "DESIGN.md",
+    "crates/derrick-cli/src/commands/init.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/d0/7022935eee/0/metadata.json",
+      "transcript": "/d0/7022935eee/0/full.jsonl",
+      "content_hash": "/d0/7022935eee/0/content_hash.txt",
+      "prompt": "/d0/7022935eee/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 4669,
+    "cache_creation_tokens": 22801,
+    "cache_read_tokens": 3489256,
+    "output_tokens": 14059,
+    "api_call_count": 14
+  }
+}
