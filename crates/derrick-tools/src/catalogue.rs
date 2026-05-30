@@ -1,4 +1,4 @@
-//! Curated, current per-host model catalogue and id normalisation (D64).
+//! Curated, current per-host model catalogue and id normalisation (D65).
 //!
 //! Single source of truth for the five host CLIs derrick routes inference
 //! through (`claude`, `codex`, `copilot`, `opencode`, `aider`): which model
@@ -9,7 +9,7 @@
 //! the CLI's `derrick models check` (iterating [`HostCatalogue::hosts`]) can
 //! reach it without a cycle. Unknown model ids are never rejected here — the
 //! caller WARNs and passes the id through verbatim (the hybrid-validation rule
-//! recorded in D64).
+//! recorded in D65).
 
 /// How a host expects a model id to be shaped on the command line.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

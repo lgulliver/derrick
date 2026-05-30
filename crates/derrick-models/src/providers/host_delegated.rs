@@ -1,4 +1,4 @@
-//! Host-delegated provider (D64).
+//! Host-delegated provider (D65).
 //!
 //! A single `Model` implementation that routes a completion through one of the
 //! five host CLIs (`claude`, `codex`, `copilot`, `opencode`, `aider`) via the

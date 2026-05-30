@@ -251,7 +251,7 @@ fn provider_registry_resolves_known_provider() -> TestResult {
 #[test]
 fn provider_registry_unknown_provider_returns_typed_error() -> TestResult {
     // `azure-openai` is not a host and is not aliased to one — it is no longer
-    // a registered provider post-D64, so building it is a typed error.
+    // a registered provider post-D65, so building it is a typed error.
     let (_dir, config) = write_minimal_config(
         "  legacy:\n    provider: azure-openai\n    model: gpt-5\n",
         "legacy",
@@ -758,7 +758,7 @@ fn aider_builds_host_delegated() -> TestResult {
 
 #[test]
 fn legacy_openai_cli_alias_resolves_to_codex_host() -> TestResult {
-    // A pinned config naming the pre-D64 `openai-cli` provider is remapped to
+    // A pinned config naming the pre-D65 `openai-cli` provider is remapped to
     // the `codex` host at config finalize (one-release compatibility shim).
     let (_dir, config) = write_minimal_config(
         "  gpt5:\n    provider: openai-cli\n    model: gpt-5.5\n",

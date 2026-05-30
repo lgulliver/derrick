@@ -103,7 +103,7 @@ pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliErr
         brownfield_init(&repo_root, &resolved).await
     };
 
-    // D15/D64: after the config exists, run the soft (WARN-only) model/host
+    // D15/D65: after the config exists, run the soft (WARN-only) model/host
     // check so any catalogue or installation issues surface at init time.
     if let Ok(config) = derrick_config::Config::load_layered(&repo_root) {
         crate::commands::models::emit_soft_warnings(&config);

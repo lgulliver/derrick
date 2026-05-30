@@ -89,7 +89,7 @@ async fn add_config_driven_checks(repo_root: &Path, config: &Config, checks: &mu
         checks.push(binary_check(&binary, true));
     }
 
-    // D64: validate every role's model/host binding against the curated
+    // D65: validate every role's model/host binding against the curated
     // catalogue using the same core that backs `derrick models check`.
     for model_check in crate::commands::models::models_check_core(config) {
         checks.push(Check::from_model_check(model_check));
@@ -248,7 +248,7 @@ fn derive_requirements(config: &Config) -> Requirements {
 }
 
 fn add_model_requirement(model: &ModelDef, requirements: &mut Requirements) {
-    // Post-D64, inference is host-delegated: the provider name equals the host
+    // Post-D65, inference is host-delegated: the provider name equals the host
     // CLI binary name (after the legacy-alias remap applied at config finalize).
     // The only non-host provider is `shell`, whose binary comes from its `cli`.
     match model.provider() {

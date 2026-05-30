@@ -1,5 +1,5 @@
 //! `derrick models check` — validate configured models and role bindings
-//! against the curated host catalogue (D64).
+//! against the curated host catalogue (D65).
 //!
 //! The shared [`models_check_core`] is reused by `derrick doctor` and by the
 //! soft (WARN-only) checks emitted at `derrick init` and `derrick run`, so the
@@ -14,7 +14,7 @@ use crate::commands::ModelsCommand;
 use crate::exit_code::CliExitCode;
 use crate::output::OutputFormat;
 
-/// The five host CLIs every inference model must route through (D64).
+/// The five host CLIs every inference model must route through (D65).
 const HOSTS: [&str; 5] = ["claude", "codex", "copilot", "opencode", "aider"];
 
 /// Severity of a single model-check finding.
@@ -72,7 +72,7 @@ impl ModelCheck {
 /// Validates every configured model AND every role binding against the host
 /// catalogue.
 ///
-/// Two passes (D64):
+/// Two passes (D65):
 ///
 /// 1. **Every configured model** (`config.models()`) is validated on its own,
 ///    whether or not a role binds it:

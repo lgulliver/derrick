@@ -330,7 +330,7 @@ impl ModelRegistry {
 
 /// A model provider entry from the `models` section.
 ///
-/// Post-D64 the inference path is host-delegated, so the direct-API fields
+/// Post-D65 the inference path is host-delegated, so the direct-API fields
 /// (`endpoint`/`region`/`deployment`/`base_url`) are gone and `cli` is
 /// deprecated — it is still parsed (and used by the `shell` escape hatch) but
 /// ignored for host providers.
@@ -360,7 +360,7 @@ impl ModelDef {
 
     /// Returns the optional CLI command.
     ///
-    /// Deprecated post-D64: only the `shell` provider still reads this. Host
+    /// Deprecated post-D65: only the `shell` provider still reads this. Host
     /// providers ignore it.
     pub fn cli(&self) -> Option<&str> {
         self.cli.as_deref()
@@ -1591,8 +1591,8 @@ struct ModelDefLayer {
     provider: Option<String>,
     model: Option<String>,
     cli: Option<String>,
-    // Removed in D64 (direct-API fields). Still accepted on the wire so that
-    // pre-D64 `derrick.yaml` files keep loading; dropped at finalize with a
+    // Removed in D65 (direct-API fields). Still accepted on the wire so that
+    // pre-D65 `derrick.yaml` files keep loading; dropped at finalize with a
     // one-line warning. No CONFIG_VERSION bump.
     #[serde(default)]
     endpoint: Option<String>,
@@ -1610,10 +1610,10 @@ struct ModelDefLayer {
     cost_hint: Option<String>,
 }
 
-/// Maps a legacy provider name to its D64 host-delegated equivalent.
+/// Maps a legacy provider name to its D65 host-delegated equivalent.
 ///
 /// One-release compatibility shim so pinned user `derrick.yaml` files that
-/// still name the pre-D64 providers continue to load. Returns the input
+/// still name the pre-D65 providers continue to load. Returns the input
 /// unchanged when it is not a known legacy alias.
 fn canonical_provider(provider: &str) -> &str {
     match provider {
@@ -1631,7 +1631,7 @@ impl ModelDefLayer {
         if provider != raw_provider {
             tracing::warn!(
                 target: "derrick_config",
-                "provider `{raw_provider}` is a pre-D64 alias; treating it as `{provider}`. \
+                "provider `{raw_provider}` is a pre-D65 alias; treating it as `{provider}`. \
                  Update your config to the host name."
             );
         }
@@ -1642,7 +1642,7 @@ impl ModelDefLayer {
         {
             tracing::warn!(
                 target: "derrick_config",
-                "models.*.{{endpoint,region,deployment,base_url}} are removed since D64 \
+                "models.*.{{endpoint,region,deployment,base_url}} are removed since D65 \
                  (host-CLI-only routing); ignoring them. Remove these fields from your config."
             );
         }
@@ -3050,7 +3050,7 @@ state:
         assert_eq!(model.model(), "gpt-5");
         assert_eq!(model.cli(), Some("az ai"));
         // endpoint/region/deployment/base_url are still accepted on the wire
-        // (the YAML above sets them) but are dropped at finalize per D64, so
+        // (the YAML above sets them) but are dropped at finalize per D65, so
         // they are no longer queryable on ModelDef.
         assert_eq!(model.max_tokens(), Some(4096));
         assert_eq!(model.temperature(), Some(0.2));

@@ -597,7 +597,7 @@ fn doctor_fails_when_yaml_invalid() -> TestResult {
 
 #[test]
 fn doctor_does_not_require_api_keys_post_d64() -> TestResult {
-    // Post-D64 (host-CLI-only routing) doctor never checks for API keys: a
+    // Post-D65 (host-CLI-only routing) doctor never checks for API keys: a
     // legacy `anthropic` provider is remapped to the `claude` host, whose
     // binary presence is the only requirement. With `claude` on PATH and no
     // ANTHROPIC_API_KEY set, doctor passes and never mentions the env var.
@@ -664,7 +664,7 @@ state:
     let text = String::from_utf8_lossy(&output);
     assert!(
         !text.contains("ANTHROPIC_API_KEY"),
-        "doctor must not mention API keys post-D64: {text}"
+        "doctor must not mention API keys post-D65: {text}"
     );
     Ok(())
 }
@@ -754,7 +754,7 @@ fn doctor_exit_code_equals_fail_count() -> TestResult {
 
     // With only `git` on PATH the host CLIs are all absent, so doctor fails the
     // two pipeline-host binary checks (claude, codex) plus the five role-binding
-    // host checks (D64 models-check core), for seven failures total. The exit
+    // host checks (D65 models-check core), for seven failures total. The exit
     // code equals that count.
     let output = derrick()?
         .current_dir(dir.path())

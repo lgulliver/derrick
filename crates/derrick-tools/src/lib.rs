@@ -1,6 +1,6 @@
 //! Host CLI adapters for claude, codex, copilot, opencode, and aider.
 //!
-//! Derrick uses these adapters for pipeline `host:` steps and, since D64, as
+//! Derrick uses these adapters for pipeline `host:` steps and, since D65, as
 //! the inference path for `derrick-models` host-delegated providers. Per
 //! DESIGN.md §6.5, it passes a working directory, a prompt, the
 //! Copilot-specific tool-permission knob, and an optional model override; host

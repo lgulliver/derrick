@@ -206,9 +206,9 @@ pub fn builtin_cost_hint(model_name: &str) -> Option<CostHint> {
     }
 }
 
-/// Environment passthrough store for host-delegated providers (D64).
+/// Environment passthrough store for host-delegated providers (D65).
 ///
-/// Post-D64 derrick holds no API keys. This store exposes the process
+/// Post-D65 derrick holds no API keys. This store exposes the process
 /// environment so host adapters can forward vars such as `GH_TOKEN` and proxy
 /// settings to the child CLI, which manages its own auth. The `overrides` map
 /// supports test injection.
@@ -242,7 +242,7 @@ impl AuthStore {
     /// Returns the process environment as a plain map for host passthrough.
     ///
     /// Host-delegated providers forward these to the child process so host
-    /// CLIs can pick up vars such as `GH_TOKEN` and proxy settings (D64).
+    /// CLIs can pick up vars such as `GH_TOKEN` and proxy settings (D65).
     pub fn env_map(&self) -> HashMap<String, String> {
         self.env
             .iter()
@@ -347,7 +347,7 @@ pub struct ProviderRegistry {
 impl ProviderRegistry {
     /// Returns a registry pre-populated with the default providers.
     ///
-    /// Per D64, inference is host-delegated: each of the five host CLIs is
+    /// Per D65, inference is host-delegated: each of the five host CLIs is
     /// registered as a provider whose name equals the host name. The `shell`
     /// provider survives as a bespoke-envelope escape hatch. There is no
     /// direct-API path.
