@@ -1,8 +1,12 @@
-//! Host CLI adapters for claude, codex, and copilot.
+//! Host CLI adapters for claude, codex, copilot, opencode, and aider.
 //!
-//! Derrick uses these adapters for pipeline `host:` steps. Per DESIGN.md §6.5,
-//! it passes only a working directory, a prompt, and the Copilot-specific
-//! tool-permission knob; host CLIs load their own context and model defaults.
+//! Derrick uses these adapters for pipeline `host:` steps and, since D65, as
+//! the inference path for `derrick-models` host-delegated providers. Per
+//! DESIGN.md §6.5, it passes a working directory, a prompt, the
+//! Copilot-specific tool-permission knob, and an optional model override; host
+//! CLIs load their own context and manage their own auth. All five adapters
+//! forward `--model` when [`HostRequest::model`] is set, normalising the id per
+//! host via [`catalogue`] just before it is passed on the command line.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,9 +18,10 @@ use thiserror::Error;
 
 mod process;
 
+pub mod catalogue;
 pub mod hosts;
 
-pub use hosts::{ClaudeHost, CodexHost, CopilotHost, OpencodeHost};
+pub use hosts::{AiderHost, ClaudeHost, CodexHost, CopilotHost, OpencodeHost};
 
 /// One host CLI that derrick can invoke.
 #[async_trait]
@@ -71,7 +76,14 @@ impl std::fmt::Debug for OutputSink {
 }
 
 /// Input for a host CLI invocation.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-implemented (not derived) because [`env`](Self::env) carries
+/// the forwarded process environment, which can contain secrets (API tokens,
+/// `GH_TOKEN`, proxy credentials). The manual impl prints only the count of env
+/// vars — never keys or values — and redacts the prompt, which may embed
+/// sensitive task content. This keeps `tracing` of a `HostRequest` safe even at
+/// TRACE level.
+#[derive(Clone)]
 pub struct HostRequest {
     /// Prompt to pass as one argv item.
     pub prompt: String,
@@ -83,10 +95,11 @@ pub struct HostRequest {
     pub env: HashMap<String, String>,
     /// Copilot-specific tool permission override.
     pub copilot_tools: CopilotToolPermission,
-    /// Optional model override in `provider/model` format (e.g. `anthropic/claude-sonnet-4-5`).
+    /// Optional model override (e.g. `claude-opus-4-8` or `anthropic/claude-sonnet-4-6`).
     ///
-    /// Passed as `--model <value>` to hosts that support it (currently opencode).
-    /// Ignored by hosts that do not expose a `--model` flag (claude, codex, copilot).
+    /// Passed as `--model <value>` to all five host adapters, after per-host
+    /// normalisation via [`catalogue::normalize`] (claude/codex/copilot strip a
+    /// leading `provider/`; opencode/aider keep `provider/model` verbatim).
     /// `None` means the host uses its own default or configured model.
     pub model: Option<String>,
     /// Run the host in headless mode — suppress interactive permission prompts.
@@ -120,6 +133,23 @@ impl HostRequest {
             headless: false,
             output_sink: None,
         }
+    }
+}
+
+impl std::fmt::Debug for HostRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostRequest")
+            // Redacted: may embed sensitive task content.
+            .field("prompt", &"<redacted>")
+            .field("cwd", &self.cwd)
+            .field("timeout", &self.timeout)
+            // Redacted: never print env keys or values (secrets).
+            .field("env", &format_args!("<{} vars redacted>", self.env.len()))
+            .field("copilot_tools", &self.copilot_tools)
+            .field("model", &self.model)
+            .field("headless", &self.headless)
+            .field("output_sink", &self.output_sink)
+            .finish()
     }
 }
 
@@ -196,13 +226,15 @@ pub struct HostRegistry {
 }
 
 impl HostRegistry {
-    /// Returns a registry pre-populated with claude, codex, copilot, and opencode.
+    /// Returns a registry pre-populated with the five host CLIs: claude,
+    /// codex, copilot, opencode, and aider.
     pub fn with_defaults() -> Self {
         let mut registry = Self::empty();
         registry.register("claude", Box::new(ClaudeHost::new()));
         registry.register("codex", Box::new(CodexHost::new()));
         registry.register("copilot", Box::new(CopilotHost::new()));
         registry.register("opencode", Box::new(OpencodeHost::new()));
+        registry.register("aider", Box::new(AiderHost::new()));
         registry
     }
 

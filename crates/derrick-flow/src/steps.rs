@@ -766,9 +766,9 @@ fn parse_tasks_from_markdown(
 }
 
 fn hand_kind_for_executor(provider: &str, cli: Option<&str>) -> HandKind {
-    if provider == "copilot-cli" || cli.is_some_and(|value| value.starts_with("copilot")) {
+    if provider == "copilot" || cli.is_some_and(|value| value.starts_with("copilot")) {
         HandKind::Copilot
-    } else if provider == "anthropic" || cli.is_some_and(|value| value.starts_with("claude")) {
+    } else if provider == "claude" || cli.is_some_and(|value| value.starts_with("claude")) {
         HandKind::Claude
     } else {
         HandKind::Human
@@ -1227,7 +1227,7 @@ Update version_matches_cargo_pkg_version.
 
     #[test]
     fn hand_kind_uses_provider_for_copilot() {
-        let kind = super::hand_kind_for_executor("copilot-cli", None);
+        let kind = super::hand_kind_for_executor("copilot", None);
         assert_eq!(kind, derrick_substrate::HandKind::Copilot);
     }
 
@@ -1239,7 +1239,7 @@ Update version_matches_cargo_pkg_version.
 
     #[test]
     fn hand_kind_uses_provider_for_claude() {
-        let kind = super::hand_kind_for_executor("anthropic", None);
+        let kind = super::hand_kind_for_executor("claude", None);
         assert_eq!(kind, derrick_substrate::HandKind::Claude);
     }
 }

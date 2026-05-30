@@ -73,6 +73,8 @@ async fn build_runner() -> Result<
 > {
     let repo_root = current_repo_root()?;
     let config = read_config(&repo_root)?;
+    // D15/D65: surface model/host issues early without blocking the run.
+    crate::commands::models::emit_soft_warnings(&config);
     if config.tools().substrate().backend() != SubstrateBackendKind::Native {
         return Err(crate::message(
             "derrick run add-feature requires tools.substrate.backend: native",

@@ -2,10 +2,12 @@
 //!
 //! `CopilotDispatchClient` is the trait the dispatcher uses to talk to
 //! GitHub. The production implementation shells to the `gh` CLI; tests use
-//! an in-memory fake. We deliberately go through `gh issue create` +
-//! `gh issue assign @copilot` (instead of the `create_pull_request_with_copilot`
-//! MCP endpoint) because the latter 401'd repeatedly during T013 development;
-//! the issue path is the stable surface.
+//! an in-memory fake. We trigger the Copilot coding agent the documented
+//! way — `gh issue create` followed by `gh issue edit --add-assignee @copilot`
+//! — which is the stable surface for a `gh`-based client. (The
+//! `create_pull_request_with_copilot` MCP endpoint wraps the same
+//! issue-assign flow but is a different transport derrick doesn't use at
+//! runtime; it also 401'd during T013 development.)
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

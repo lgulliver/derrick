@@ -51,6 +51,7 @@ async fn dispatch(cli: Cli) -> Result<exit_code::CliExitCode, CliError> {
         Command::Init(args) => commands::init::execute(args).await,
         Command::Status(args) => commands::status::execute(args).await,
         Command::Doctor(args) => commands::doctor::execute(args).await,
+        Command::Models(args) => commands::models::execute(args).await,
         Command::Run(args) => commands::run::execute(args).await,
         Command::Completions(args) => {
             commands::completions::execute(args, &mut Cli::command());

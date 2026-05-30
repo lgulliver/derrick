@@ -149,12 +149,15 @@ fn auth_store_reads_env_vars() -> TestResult {
 }
 
 #[test]
-fn auth_store_missing_credential_returns_typed_error() {
-    let mut auth = AuthStore::from_env();
-    let key = unique_env_key("MISSING");
-    auth.require("anthropic", &key);
+fn auth_store_env_map_exposes_process_env() -> TestResult {
+    let key = unique_env_key("ENVMAP");
+    std::env::set_var(&key, "passthrough-value");
+    let auth = AuthStore::from_env();
 
-    assert_eq!(auth.missing_required(), vec![("anthropic".to_owned(), key)]);
+    let map = auth.env_map();
+
+    assert_eq!(map.get(&key).map(String::as_str), Some("passthrough-value"));
+    Ok(())
 }
 
 #[test]
@@ -203,11 +206,7 @@ fn model_error_retryability_matches_error_kind() {
         retryable: true,
     }
     .is_retryable());
-    assert!(!ModelError::MissingCredential {
-        provider: "anthropic".to_owned(),
-        env_var: "ANTHROPIC_API_KEY".to_owned(),
-    }
-    .is_retryable());
+    assert!(!ModelError::UnknownProvider("nope".to_owned()).is_retryable());
     assert!(!ModelError::InvalidConfig {
         model: "bad".to_owned(),
         message: "invalid".to_owned(),
@@ -251,17 +250,19 @@ fn provider_registry_resolves_known_provider() -> TestResult {
 
 #[test]
 fn provider_registry_unknown_provider_returns_typed_error() -> TestResult {
-    let config = Config::defaults();
-    let model_def = config
-        .models()
-        .get("copilot")
-        .ok_or("copilot model should exist")?;
+    // `azure-openai` is not a host and is not aliased to one — it is no longer
+    // a registered provider post-D65, so building it is a typed error.
+    let (_dir, config) = write_minimal_config(
+        "  legacy:\n    provider: azure-openai\n    model: gpt-5\n",
+        "legacy",
+    )?;
+    let model_def = config.models().get("legacy").ok_or("legacy model")?;
     let error = ProviderRegistry::with_defaults()
         .build(model_def, &AuthStore::default())
         .err()
         .ok_or("unknown provider should error")?;
 
-    assert!(matches!(error, ModelError::UnknownProvider(provider) if provider == "copilot-cli"));
+    assert!(matches!(error, ModelError::UnknownProvider(provider) if provider == "azure-openai"));
     Ok(())
 }
 
@@ -603,42 +604,83 @@ async fn shell_provider_invalid_finish_reason_returns_provider_error() -> TestRe
 }
 
 #[test]
-fn anthropic_build_requires_api_key() -> TestResult {
+fn default_models_build_host_delegated_for_each_host() -> TestResult {
+    // Every default-config model now resolves to a host-delegated provider
+    // whose name equals the host CLI; none requires an API key.
     let config = Config::defaults();
-    let model_def = config
-        .models()
-        .get("claude-sonnet")
-        .ok_or("anthropic model should exist")?;
-    let error = ProviderRegistry::with_defaults()
-        .build(model_def, &AuthStore::default())
-        .err()
-        .ok_or("anthropic should require credentials when none are configured")?;
-
-    assert!(
-        matches!(error, ModelError::MissingCredential { ref provider, ref env_var }
-            if provider == "anthropic" && env_var == "ANTHROPIC_API_KEY"),
-        "expected MissingCredential, got {error:?}"
-    );
+    let registry = ProviderRegistry::with_defaults();
+    let expectations = [
+        ("claude-opus", "claude", "claude-opus-4-8"),
+        ("claude-sonnet", "claude", "claude-sonnet-4-6"),
+        ("claude-haiku", "claude", "claude-haiku-4-5"),
+        ("codex-gpt5", "codex", "gpt-5.5"),
+        ("copilot", "copilot", "gpt-5.4"),
+    ];
+    for (model_key, host, model_id) in expectations {
+        let model_def = config
+            .models()
+            .get(model_key)
+            .ok_or("default model should exist")?;
+        let model = registry.build(model_def, &AuthStore::default())?;
+        assert_eq!(model.provider(), host, "{model_key} provider");
+        assert_eq!(model.name(), model_id, "{model_key} model id");
+        assert!(
+            model.host_delegated_auth(),
+            "{model_key} should be host-delegated"
+        );
+    }
     Ok(())
 }
 
-#[test]
-fn anthropic_builds_with_api_key_override() -> TestResult {
-    let config = Config::defaults();
-    let model_def = config
-        .models()
-        .get("claude-sonnet")
-        .ok_or("anthropic model should exist")?;
-    let mut overrides = HashMap::new();
-    overrides.insert(
-        ("anthropic".to_owned(), "ANTHROPIC_API_KEY".to_owned()),
-        Secret::new("sk-test"),
-    );
-    let auth = AuthStore::for_testing(overrides);
-    let model = ProviderRegistry::with_defaults().build(model_def, &auth)?;
-    assert_eq!(model.provider(), "anthropic");
-    assert!(!model.host_delegated_auth());
-    assert!(model.cost_hint().is_some());
+#[tokio::test]
+async fn host_delegated_complete_returns_host_text_and_tokens() -> TestResult {
+    // Build a claude host-delegated model whose adapter points at a fake CLI
+    // that emits the claude JSON envelope, and assert complete() returns the
+    // host text plus the reported token counts.
+    let dir = tempdir()?;
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir)?;
+    let fake = bin_dir.join("claude");
+    fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '%s' '{\"result\":\"host says hi\",\"usage\":{\"input_tokens\":11,\"output_tokens\":4}}'\n",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&fake)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&fake, perms)?;
+    }
+    let old_path = std::env::var_os("PATH");
+    let joined = std::env::join_paths(
+        std::iter::once(bin_dir.clone())
+            .chain(std::env::split_paths(&old_path.clone().unwrap_or_default())),
+    )?;
+    std::env::set_var("PATH", &joined);
+
+    let (_cfg_dir, config) = write_minimal_config(
+        "  c:\n    provider: claude\n    model: claude-opus-4-8\n",
+        "c",
+    )?;
+    let model_def = config.models().get("c").ok_or("c model")?;
+    let model = ProviderRegistry::with_defaults().build(model_def, &AuthStore::default())?;
+
+    let response = model
+        .complete(request("hello", Duration::from_secs(10)))
+        .await;
+
+    if let Some(path) = old_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+
+    let response = response?;
+    assert_eq!(response.text, "host says hi");
+    assert_eq!(response.tokens_in, 11);
+    assert_eq!(response.tokens_out, 4);
+    assert_eq!(response.finish_reason, FinishReason::Stop);
     Ok(())
 }
 
@@ -689,9 +731,11 @@ state:
 }
 
 #[test]
-fn opencode_builds_with_default_cli() -> TestResult {
-    let (_dir, config) =
-        write_minimal_config("  oc:\n    provider: opencode\n    model: sonnet\n", "oc")?;
+fn opencode_builds_host_delegated() -> TestResult {
+    let (_dir, config) = write_minimal_config(
+        "  oc:\n    provider: opencode\n    model: anthropic/claude-sonnet-4-6\n",
+        "oc",
+    )?;
     let model_def = config.models().get("oc").ok_or("oc model")?;
     let model = ProviderRegistry::with_defaults().build(model_def, &AuthStore::default())?;
     assert_eq!(model.provider(), "opencode");
@@ -700,33 +744,30 @@ fn opencode_builds_with_default_cli() -> TestResult {
 }
 
 #[test]
-fn openai_cli_prefers_cli_when_no_key() -> TestResult {
+fn aider_builds_host_delegated() -> TestResult {
     let (_dir, config) = write_minimal_config(
-        "  gpt5:\n    provider: openai-cli\n    model: gpt-5\n",
-        "gpt5",
+        "  ai:\n    provider: aider\n    model: openai/gpt-5.5\n",
+        "ai",
     )?;
-    let model_def = config.models().get("gpt5").ok_or("gpt5 model")?;
+    let model_def = config.models().get("ai").ok_or("ai model")?;
     let model = ProviderRegistry::with_defaults().build(model_def, &AuthStore::default())?;
-    assert_eq!(model.provider(), "openai-cli");
+    assert_eq!(model.provider(), "aider");
     assert!(model.host_delegated_auth());
     Ok(())
 }
 
 #[test]
-fn openai_cli_prefers_api_when_key_present() -> TestResult {
+fn legacy_openai_cli_alias_resolves_to_codex_host() -> TestResult {
+    // A pinned config naming the pre-D65 `openai-cli` provider is remapped to
+    // the `codex` host at config finalize (one-release compatibility shim).
     let (_dir, config) = write_minimal_config(
-        "  gpt5:\n    provider: openai-cli\n    model: gpt-4o\n",
+        "  gpt5:\n    provider: openai-cli\n    model: gpt-5.5\n",
         "gpt5",
     )?;
     let model_def = config.models().get("gpt5").ok_or("gpt5 model")?;
-    let mut overrides = HashMap::new();
-    overrides.insert(
-        ("openai-cli".to_owned(), "OPENAI_API_KEY".to_owned()),
-        Secret::new("sk-test"),
-    );
-    let auth = AuthStore::for_testing(overrides);
-    let model = ProviderRegistry::with_defaults().build(model_def, &auth)?;
-    assert!(!model.host_delegated_auth());
+    let model = ProviderRegistry::with_defaults().build(model_def, &AuthStore::default())?;
+    assert_eq!(model.provider(), "codex");
+    assert!(model.host_delegated_auth());
     Ok(())
 }
 

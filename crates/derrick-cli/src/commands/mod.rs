@@ -10,6 +10,7 @@ pub(crate) mod foreman;
 pub(crate) mod gain;
 pub(crate) mod init;
 pub(crate) mod init_wizard;
+pub(crate) mod models;
 pub(crate) mod observe;
 pub(crate) mod prompt_input;
 pub(crate) mod run;
@@ -36,6 +37,8 @@ pub(crate) enum Command {
     Init(InitArgs),
     Status(StatusArgs),
     Doctor(DoctorArgs),
+    /// Inspect and validate model/role/host configuration.
+    Models(ModelsArgs),
     Run(RunArgs),
     Completions(CompletionsArgs),
     Ticket(TicketArgs),
@@ -226,6 +229,24 @@ pub(crate) struct StatusArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct DoctorArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ModelsArgs {
+    #[command(subcommand)]
+    pub(crate) command: ModelsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ModelsCommand {
+    /// Validate configured models and role bindings against the host catalogue.
+    Check(ModelsCheckArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ModelsCheckArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub(crate) format: OutputFormat,
 }

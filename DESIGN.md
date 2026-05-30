@@ -172,16 +172,18 @@ site:
   prefix: mp           # ticket prefix (mp-1, mp-2 …)
 
 # Model registry — define providers once, name them in roles
+# provider names match host CLIs: claude | codex | copilot | opencode | aider
 models:
-  claude-opus:    { provider: anthropic, model: "claude-opus-4-7" }
-  claude-sonnet:  { provider: anthropic, model: "claude-sonnet-4-6" }
-  codex-gpt5:     { provider: openai-cli, cli: "codex exec", model: "gpt-5" }
-  copilot:        { provider: copilot-cli, cli: "copilot",  model: "gpt-5-codex" }
-  # examples of BYOM (none enabled by default):
-  # gemini-pro:   { provider: google,  model: "gemini-2.5-pro" }
-  # local-llama:  { provider: ollama,  base_url: "http://localhost:11434", model: "llama3.3:70b" }
-  # bedrock-claude: { provider: bedrock, region: "eu-west-2", model: "anthropic.claude-opus-4-7-v1" }
-  # azure-gpt5:   { provider: azure-openai, endpoint: "...", deployment: "gpt-5" }
+  claude-opus:    { provider: claude,   model: "claude-opus-4-8" }
+  claude-sonnet:  { provider: claude,   model: "claude-sonnet-4-6" }
+  claude-haiku:   { provider: claude,   model: "claude-haiku-4-5" }
+  codex-gpt5:     { provider: codex,    model: "gpt-5.5" }
+  copilot:        { provider: copilot,  model: "gpt-5.4" }
+  # opencode and aider use provider/model strings:
+  # opencode-claude: { provider: opencode, model: "anthropic/claude-opus-4-8" }
+  # aider-gpt5:    { provider: aider,    model: "openai/gpt-5.5" }
+  # shell escape hatch — any CLI that speaks the structured prompt envelope:
+  # my-tool:      { provider: shell, command: "my-tool --prompt-envelope" }
 
 # Role bindings — pipeline steps name a role; the role names a model.
 # Changing one model changes the whole class of step that uses it.
@@ -884,57 +886,104 @@ verifies derrick is installed, and then defers to the skill for the
 actual workflow narrative — same pattern the Anthropic-shipped skills
 use (a one-page command, a fat skill).
 
-### 6.5 BYOM (Bring Your Own Model) — hosts, providers, roles
+### 6.5 Hosts, models, roles (D65)
 
 Derrick separates three concerns most tools conflate:
 
-- **Provider** — *who serves the inference*. Anthropic API,
-  OpenAI API, Google Gemini, Bedrock, Azure OpenAI, Ollama,
-  llama.cpp, or a CLI shell (`codex exec`, `copilot`,
-  `claude --print`). Adapters live in
-  `internal/models/providers/<name>.go`.
-- **Host** — *who the user is conversing with*. `claude` (the
-  Claude Code CLI), `codex` (the Codex CLI), `copilot`, raw
-  HTTP, or none. The host loads its own context: AGENTS.md,
-  sub-agents, skills, plugins. Hosts are configured per pipeline
-  step (`host: claude`) or implied by the provider.
-- **Role** — *what the step needs done*. `proposer`,
-  `drafter`, `reviewer`, `executor`, `summariser`. Pipeline
-  steps name roles, never models directly.
+- **Host** — *who executes the work*. One of exactly five host CLIs:
+  `claude` (Claude Code), `codex`, `copilot` (GitHub Copilot CLI),
+  `opencode`, `aider`. The host loads its own context (AGENTS.md,
+  sub-agents, skills, plugins) and manages its own auth. Derrick
+  holds no API keys. Hosts are configured per pipeline step
+  (`host: claude`) or implied by the provider name.
+- **Provider** — in `derrick-models`, a provider is a named
+  **host-delegated wrapper** that maps a `ModelDef` to one of the
+  five hosts, builds a `HostRequest`, and calls the `derrick-tools`
+  host adapter. Provider names match host names (`claude`, `codex`,
+  `copilot`, `opencode`, `aider`). The `shell` provider survives as
+  a bespoke-envelope escape hatch for arbitrary command-line tools
+  that speak the structured prompt envelope protocol.
+- **Role** — *what the step needs done*. `proposer`, `drafter`,
+  `reviewer`, `executor`, `summariser`. Pipeline steps name roles,
+  never models directly.
 
-The binding is `step → role → model → provider`, with `host`
-selected per step. Changing your reviewer model from Codex to
-Gemini is one line in `models:`; no pipeline edits.
+The binding is `step → role → model → provider (= host)`.
+Changing the reviewer from codex to a copilot-backed model is one
+line in `models:`; no pipeline edits.
 
-#### Supported providers (v1)
+#### Five hosts
 
-Providers are reached through `derrick-models`'s `Model`
-trait. They take a structured `CompletionRequest` and return
-a `CompletionResponse`. This is distinct from **hosts**
-(claude / codex / copilot CLIs invoked when a pipeline step
-sets `host:` — those go through `derrick-tools` per D30).
-The same binary may serve both roles via different paths.
+All model inference runs through exactly one of these:
 
-| Provider | Type | Notes |
+| Host | Auth | Default model | Notes |
+|---|---|---|---|
+| `claude` | Claude Code's own auth | `claude-opus-4-8` | Anthropic models. Strips a leading `anthropic/` prefix from model ids before passing `--model`. |
+| `codex` | Codex CLI's own auth | `gpt-5.5` | OpenAI models. Strips a leading `openai/` prefix from model ids. |
+| `copilot` | GitHub Copilot CLI's own auth | `gpt-5.4` | Multi-model. Strips any `provider/` prefix; keeps dotted ids (e.g. `claude-sonnet-4.6`) — no dot↔dash translation. |
+| `opencode` | opencode's own auth | — | Multi-model; expects `provider/model` strings. Passes id verbatim. |
+| `aider` | aider's own auth | — | Multi-model; expects `provider/model` strings. Passes id verbatim. |
+
+Provider names `anthropic`, `openai-cli`, `copilot-cli` are
+migration aliases only — they are mapped at config load time and
+a deprecation warning is emitted. Use the host names above in new
+configs.
+
+The `shell` provider is not a host. It accepts any command that
+reads a structured prompt envelope on stdin and writes a
+sentinel-delimited response on stdout. Use it for bespoke tooling
+not covered by the five hosts.
+
+#### Role taxonomy
+
+| Role | Typical host | What it does |
 |---|---|---|
-| `anthropic` | API | First-class. Prompt caching used by §9.B.4. |
-| `openai` | API | Used for non-Claude reasoning roles. |
-| `openai-cli` | CLI-backed provider | Wraps `codex exec` in the Model trait, for users who want codex as a *backend completion source* (e.g. for an assay reviewer role). Distinct from `host: codex` pipeline steps, which use the host adapter in `derrick-tools` directly. |
-| `google` | API | Gemini. |
-| `bedrock` | API | AWS Bedrock. Region + model-id. |
-| `azure-openai` | API | Endpoint + deployment. |
-| `copilot-cli` | CLI-backed provider | Wraps the `copilot` CLI in the Model trait for *completion-style* use. The `derrick-tools` Copilot host adapter handles `host: copilot` pipeline-step invocations separately (D30). |
-| `copilot-sdk` | Lib | GitHub Copilot SDK in-process. v1.1 research target. |
-| `ollama` | Local | `base_url` + model tag. Sensible for `summariser` role to keep tokens off the network entirely. |
-| `llamacpp` | Local | Same idea. |
-| `shell` | Generic | Any command that takes a structured prompt envelope on stdin and emits a sentinel-delimited response on stdout. Escape hatch. |
+| `proposer` | `claude` | Generates the initial plan / spec |
+| `drafter` | `claude` | Writes or revises artifacts |
+| `reviewer` | `codex` | Cross-examines plans in assay; different family from proposer by default (D5) |
+| `executor` | `copilot` / `aider` / `opencode` | Implements tickets as a hand |
+| `summariser` | `claude` (haiku tier) | Compresses step output for memory / telemetry |
+
+These are defaults. Any role can bind to any host; the only
+constraint `derrick doctor` enforces is that `proposer` and
+`reviewer` do not share the same provider (§7).
+
+#### Model catalogue and normalisation (D65)
+
+A curated per-host catalogue lives in
+`derrick-tools/src/catalogue.rs`. It drives:
+
+- **Defaults** used by `Config::defaults()` and `derrick init`.
+- **`derrick models check`** — the implemented validation command
+  (D15). Checks: (1) host binary installed → FAIL if missing;
+  (2) model id in catalogue → WARN-only if not; (3) provider maps
+  to one of the five hosts → FAIL if not; (4) opencode/aider model
+  string contains `/` → WARN if not. Exit code equals the count of
+  FAILs. WARN conditions never block the pipeline.
+- **Per-host normalisation** applied inside each host adapter
+  before the `--model` argument is pushed (see Five hosts table).
+
+Current catalogue (May 2026):
+
+| Host | Known ids |
+|---|---|
+| `claude` | `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
+| `codex` | `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2-codex` |
+| `copilot` | `gpt-5.4`, `gpt-5.3-codex`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `gpt-5.4-mini` |
+| `opencode` | A small curated set of `provider/model` strings; unknown ids WARN |
+| `aider` | A small curated set of `provider/model` strings; unknown ids WARN |
+
+Unknown model ids produce a warning and still pass through to the
+host CLI. Derrick never hard-fails solely because a model id is
+not in the catalogue — the host's own error is the source of truth.
+
+Soft warnings are also emitted at `derrick init` and `derrick run`
+so issues surface early without blocking experiments.
 
 #### Respecting the host's own rules
 
-When derrick invokes a step on a **host** CLI (claude / codex /
-copilot / opencode), it deliberately does **not** inject a system
-prompt, override the host's context, or bypass the host's rule
-loading. The contract:
+When derrick invokes a step on a host CLI it deliberately does
+**not** inject a system prompt, override the host's context, or
+bypass the host's rule loading. The contract:
 
 - Derrick passes the working directory (the user's repo) and the
   step command. That's it.
@@ -943,29 +992,28 @@ loading. The contract:
   `.claude/skills/`, plugins, hooks, `.codex/`, `~/.codex/`,
   `.github/copilot-instructions.md`, `.opencode/agents/`, etc.
   Derrick does not touch any of this.
-- Sub-agent spawn within a step (e.g. `Agent({subagent_type:
-  "Explore"})`) is the host's decision; derrick doesn't see it
-  and doesn't intercede.
+- Sub-agent spawn within a step is the host's decision; derrick
+  doesn't see it and doesn't intercede.
 - Skills triggered in-session (caveman, find-skills, the user's
-  custom skills) run inside the host. Derrick's *own* caveman
+  custom skills) run inside the host. Derrick's own caveman
   implementation is for inter-step compression, not in-session.
-- Derrick records *what command it sent* and *what artifact came
-  back*. It does not influence the host's internal context,
-  prompt expansion, or subagent behaviour. It *does* read the
-  host's transcript file after the step for token telemetry only
+- Derrick records what command it sent and what artifact came
+  back. It does not influence the host's internal context,
+  prompt expansion, or sub-agent behaviour. It reads the host's
+  transcript file after the step for token telemetry only
   (§9.B.7) — read-only, post-hoc, never used to alter the host's
   next call.
 
-This means: a brownfield repo with a carefully tuned AGENTS.md
-and twenty agents gets exactly the same Claude Code behaviour
-inside a derrick step as it would in a normal session. Derrick
-is the conductor, not the orchestra.
+A brownfield repo with a carefully tuned AGENTS.md and twenty
+agents gets exactly the same Claude Code behaviour inside a
+derrick step as it would in a normal session. Derrick is the
+conductor, not the orchestra.
 
-When a step uses an API provider directly (no host CLI),
-derrick *does* assemble the prompt — but only from declared
-inputs (the artifact files in `inputs:` and the constitution),
-never from arbitrary repo state. This is the only path where
-derrick acts as the prompter; we keep it narrow.
+Codex host hooks are deferred (D34). aider's headless flags
+(`--yes-always --no-auto-commits --no-stream --no-pretty
+--no-show-release-notes`) are always on for pipeline runs;
+opencode and aider hook instrumentation is a documented gap with
+the same posture as D34.
 
 #### Cost and latency knobs per model
 
@@ -973,53 +1021,38 @@ derrick acts as the prompter; we keep it narrow.
 
 ```yaml
 models:
-  bedrock-claude:
-    provider: bedrock
-    region: eu-west-2
-    model: anthropic.claude-opus-4-7-v1
+  claude-opus:
+    provider: claude
+    model: "claude-opus-4-8"
     max_tokens: 4096
     temperature: 0.2
-    cache: true              # prompt caching where supported
     timeout: 120s
     rate_limit: { rpm: 20, tpm: 80000 }
     cost_hint:  { in_per_mtok: 15, out_per_mtok: 75 }   # for `derrick gain`
 ```
 
+Fields `endpoint`, `region`, `deployment`, and `base_url` are
+parsed-and-ignored (with a one-line deprecation warning) so
+existing `derrick.yaml` files continue to load after D65. The
+`cli` field is deprecated for the host providers
+(`claude`/`codex`/`copilot`/`opencode`/`aider`) and ignored
+there, but remains in use by the `shell` escape-hatch provider,
+which still spawns the configured command. No `CONFIG_VERSION`
+bump.
+
 Cost hints are optional but power the §9.B.7 telemetry — without
 them, `derrick gain` reports token counts only, not dollars.
 
-#### Validation: `derrick models check`
+#### Auth (D65 — no BYOK)
 
-Not every role / host / provider combination is sensible
-(`host: claude` + `provider: ollama` is nonsense — Claude Code
-calls Anthropic, not Ollama). v1 ships:
+Every host CLI manages its own auth. Derrick holds no API keys.
+`AuthStore` is env-passthrough only: env vars (e.g. `GH_TOKEN`,
+proxy vars) in `HostRequest.env` are forwarded to the child
+process. There is no `~/.derrick/credentials.yaml`, no
+`derrick auth` subcommand, and no `MissingCredential` error.
 
-- `derrick models check` — explicit subcommand; verifies every
-  binding in `derrick.yaml` resolves to a real provider, that
-  required env vars / credentials exist, and that the host/
-  provider pairing is supported. Exit code is the count of
-  failing checks.
-- Warnings (not errors) emitted at `derrick init` and `derrick
-  run` if validation finds anything off, so issues surface early
-  without blocking experiments.
-
-#### Auth
-
-Credentials are sensitive and live outside the repo:
-
-- **Env vars first** (CI-friendly): `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `AWS_*` for Bedrock, etc.
-  Derrick documents the env var per provider.
-- **Optional** `~/.derrick/credentials.yaml` for desktop
-  convenience: one file, one set of keys, never repo-local. Mode
-  0600. `derrick auth set <provider>` and `derrick auth list` for
-  ergonomics.
-- **Never** committed to a repo. `.gitignore` for `derrick.yaml`
-  is *not* defaulted (we want it in version control), so secrets
-  go through env vars or `~/.derrick/credentials.yaml` only.
-- **Host-delegated providers** (claude, codex, copilot) inherit
-  auth from the host CLI's own mechanism — derrick doesn't see
-  those keys.
+If a host CLI is not authenticated, it will fail on its own terms
+and that failure surfaces as a step error in the pipeline log.
 
 ---
 
@@ -2025,10 +2058,10 @@ links back to the section where it lives.
 | D9 | **Cross-feature lessons**: shipped in v1 with a mechanical quality gate — each lesson must reference a specific ticket id or constitution section anchor, else discarded. | §9.A.4 |
 | D10 | **Multi-feature parallelism**: git worktrees per run (`.derrick/worktrees/<run-id>/`), not file locks. Substrate DB stays in the main checkout and is shared. | §9.C.5 |
 | D11 | **Native substrate scope discipline**: additions require explicit sign-off and a DESIGN.md note; an OSS-facing policy in `CONTRIBUTING.md` keeps the rule visible to external contributors. | §8.1 |
-| D12 | **Provider auth**: env vars first; optional `~/.derrick/credentials.yaml` (mode 0600) for desktop convenience; never repo-local; host-delegated providers inherit auth from the host CLI. | §6.5 |
+| D12 | **Provider auth**: env vars first; optional `~/.derrick/credentials.yaml` (mode 0600) for desktop convenience; never repo-local; host-delegated providers inherit auth from the host CLI. *Superseded by D65*, which removes direct-API providers entirely. Auth is now env-passthrough only; `credentials.yaml` and `derrick auth` are removed. | §6.5 |
 | D13 | **Copilot backend in v1**: standalone `copilot` CLI (`@github/copilot`). `gh copilot` is the older extension, not what we use. Backend trait allows an SDK-based path later. `@github/copilot-sdk` recorded as a v1.1 research target. | §8.4 |
 | D14 | **Sub-agent / skill telemetry**: derrick parses Claude Code's session transcript files (`~/.claude/projects/<repo>/*.jsonl`) post-step for accurate token counts; falls back to estimates for codex / copilot / raw API. | §9.B.7 |
-| D15 | **Role/host validation**: `derrick models check` subcommand for explicit verification; warnings (not errors) emitted at `derrick init` and `derrick run` so issues surface early. | §6.5 |
+| D15 | **Role/host validation**: `derrick models check` subcommand for explicit verification; warnings (not errors) emitted at `derrick init` and `derrick run` so issues surface early. *Implemented by D65*: the check runs against the curated host catalogue in `derrick-tools/src/catalogue.rs`; unknown model ids produce WARN, not FAIL — the hybrid validation rule is now the authoritative posture. | §6.5 / D65 |
 | D16 | **v1 install surface (beyond CLI + plugin)**: shell completions (clap_complete: bash/zsh/fish), VS Code + JetBrains editor configs in templates (opt-in), `.codex/instructions.md` wrapper config written during init so codex sees the constitution, `derrick uninstall` to cleanly reverse init. | §11 |
 | D17 | **PR stacking ships in v1** as a first-class concern. Default backend `native` (plain git + `gh pr create`). Graphite and git-spice adapters auto-detected at init. Foreman restacks dependents on merge using `--force-with-lease`. | §8.5 |
 | D18 | **TUI dashboard ships in v1** as `derrick observe`. ratatui + crossterm, six tabs, read-only, live-updates via filesystem watcher + 1s tick. Mutation features are explicitly out of scope for v1. | §5.7 |
@@ -2044,9 +2077,9 @@ links back to the section where it lives.
 | D31 | **State machine integrity for tickets and batches: append-only, observable, verifiable.** Lessons banked from gastown's Refinery optimistic-close incident at scale. Three rules: (a) **`Done` requires observable evidence** — the foreman never transitions a ticket to `Done` based on a hand's self-report or PR-open event; it observes the merge SHA on the target branch (`git log origin/<base>`) or equivalent end-state for the workflow. A new `InReview` ticket state covers "hand finished, PR open, awaiting merge". (b) **State changes are append-only at the event log** — every state transition writes an immutable `events` row. Reverting a state moves *forward* to a different state (e.g. `Done → Reopened`), never erases history. (c) **The foreman trusts git, not just substrate state** — when polling ready tickets and reconciling batch closure, it cross-references against the actual repository (git log, gh PR status) rather than blindly trusting its own row values. Adds `InReview` to `TicketState`, a `merge_sha: Option<String>` field on the ticket, and a verifier loop step. | §8.1 / §8.2 / future T012 foreman |
 | D32 | **Worktree and ticket cleanup is continuous and self-healing.** Lessons banked from gastown's gt-pvx WISP-branch leak. Periodic cleanup runs (a) on every `derrick run` startup before doing anything else and (b) optionally as a launchd/systemd plist for long-lived setups. It walks worktree rows whose runs have crashed (no `finalize_worktree` event after a configurable TTL, default 24h), and either prunes them or marks them `Abandoned`. Same pattern for tickets stuck in `InReview` past a TTL: the foreman re-checks the PR and either transitions to `Done` (if observably merged), `Blocked` (if the PR was closed unmerged), or surfaces an escalation event. **There is no "trust eventually consistent state" path** — every long-lived state has an explicit reconciliation pass that can fail loud. | §8.2 / §9.C.5 / future T012 |
 | D33 | **The foreman never has authoritative state independent of the substrate and git.** Where gastown's Mayor reads `gt convoy status` and trusts it, derrick's foreman treats its own poll as a hint and the substrate + git as the truth. Concretely: on every loop iteration the foreman (a) reads `bd ready`-equivalent tickets from the substrate, (b) for any in `InReview`, queries `git log` and `gh pr view` for the PR's actual state, (c) reconciles before dispatching new work. The dispatch is idempotent against state drift — if a ticket the substrate says is `Ready` is actually merged on main, the foreman corrects to `Done` and continues. | future T012 |
-| D30 | **`derrick-tools` owns host CLI subprocess invocations; `derrick-models` owns the `Model` trait and providers.** Hosts (claude / codex / copilot) are invoked when a pipeline step sets `host:`. They receive an opaque prompt-as-argv (typically a slash command), they load their own context per the host rules, and derrick captures stdout. Providers are invoked when derrick needs a model completion via a structured `CompletionRequest` (assay reviewers, future direct-API calls). The same underlying binary (e.g. `codex`) may be reached via either path: as a host running a derrick-supplied prompt verbatim (`derrick-tools`), or as a backend for a model role that needs a structured completion (`derrick-models`'s `openai-cli` provider, etc.). The split is **invocation-shape-driven**, not binary-driven. | §3.1 / §6.5 / new T009 |
+| D30 | **`derrick-tools` owns host CLI subprocess invocations; `derrick-models` owns the `Model` trait and providers.** Hosts (claude / codex / copilot) are invoked when a pipeline step sets `host:`. They receive an opaque prompt-as-argv (typically a slash command), they load their own context per the host rules, and derrick captures stdout. Providers are invoked when derrick needs a model completion via a structured `CompletionRequest` (assay reviewers, future direct-API calls). The split is **invocation-shape-driven**, not binary-driven. *Amended by D65*: for the inference path, the two paths now converge — `derrick-models` providers are host-delegated wrappers that call through to `derrick-tools` host adapters. The only remaining distinct path is `shell` (bespoke-envelope escape hatch, not a host). The invocation-shape distinction stated in D30 remains accurate for `shell` and all non-inference subprocess calls. | §3.1 / §6.5 / D65 |
 | D35 | **§8.6 alignment with D32: a closed-unmerged PR transitions its ticket to `Blocked`, not `Rejected`.** Earlier §8.6 prose used `Rejected` for both closed-unmerged and explicit user rejection. D32 distinguishes them: closed-unmerged is recoverable (a human may re-open with a new branch or explicitly reject), so the verifier moves to `Blocked` and waits for a human decision. `Rejected` is reserved for explicit user rejection via the §8.2 mutation API. The §8.6 diagram and verifier prose are updated to match; the T012 trait method `verify_ticket_unmerged` transitions to `Blocked`. | §8.6 / T012 |
-| D34 | **D29 refinement — Codex host hooks are best-effort/deferred.** Codex's CLI today does not expose a stable `PreToolUse`/`PostToolUse`-equivalent hook surface that derrick can rely on. T011 writes `.codex/instructions.md` (constitution + derrick.yaml reference) but does **not** install Codex tool-boundary hooks. When Codex grows a stable hook mechanism a follow-up ticket extends `derrick-adopt`. Claude Code hooks (D29 path b) remain mandatory; Copilot inline path (D29 path c) is unchanged. Users in `mode: copilot`/`crew` with codex hosts see a documented warning at init that Codex tool I/O is not scrubbed in v1. | §9.B.2 / §9.B.3 / T011 |
+| D34 | **D29 refinement — Codex host hooks are best-effort/deferred.** Codex's CLI today does not expose a stable `PreToolUse`/`PostToolUse`-equivalent hook surface that derrick can rely on. T011 writes `.codex/instructions.md` (constitution + derrick.yaml reference) but does **not** install Codex tool-boundary hooks. When Codex grows a stable hook mechanism a follow-up ticket extends `derrick-adopt`. Claude Code hooks (D29 path b) remain mandatory; Copilot inline path (D29 path c) is unchanged. Users in `mode: copilot`/`crew` with codex hosts see a documented warning at init that Codex tool I/O is not scrubbed in v1. *Note from D65*: opencode and aider hook instrumentation inherits the same "documented gap, same posture as D34" stance — neither CLI offers a stable tool-boundary hook surface at this time. | §9.B.2 / §9.B.3 / T011 / D65 |
 | D29 | **Scrub and caveman fire at every model boundary, not just derrick's pipeline seams.** Three boundary classes: (a) derrick-internal — inline in `derrick-flow` and `derrick-substrate-native`; (b) host tool calls — `derrick init` writes `PreToolUse`+`PostToolUse` hooks in `.claude/settings.json` for Claude Code; Codex's equivalent is **deferred** (see D34); (c) Copilot dispatch — inline in `derrick-copilot` until Copilot's hook surface lands. Both directions matter: input (before embedding tool output into the next prompt) saves the most because of prompt caching; output (when an agent quotes tool output back) catches the second-order leakage. | §9.B.2 / §9.B.3 |
 | D28 | **Supersedes D1 and D24 — GitHub-only distribution.** The `derrick.dev` domain was unavailable, so all derrick artefacts (install script, marketplace JSON, release binaries) live under `github.com/lgulliver/derrick`. The Claude Code marketplace JSON is fetched from `https://raw.githubusercontent.com/lgulliver/derrick/main/marketplace.json`. There is no longer a separate marketplace host to health-check, so D24's fallback logic collapses to a single GitHub-releases path; transient GitHub unavailability surfaces as a normal network error to the user with the documented recovery (`gh release download` or manual binary install). | §11 |
 | D36 | **Headless subprocess Write permissions: pre-create feature dirs.** `claude --print` prompts for Write tool permission when creating files in directories that don't yet exist, even with a `permissions.allow` block in `.claude/settings.json` (the block format did not suppress the prompt in practice). Resolved: `derrick init` and the pipeline runner pre-create `.specify/features/` before invoking any host step, so the directory exists and the Write prompt is not triggered. Long-term: `derrick-flow` creates the feature dir as the first act of the `specify` step, before the host invocation. | §5.3 / T013 |
@@ -2054,7 +2087,7 @@ links back to the section where it lives.
 | D38 | **Each pipeline run gets an isolated git worktree (§9.C.5).** `run_pipeline_from` calls `git worktree add -b derrick/<run-id> .derrick/worktrees/<run-id> HEAD` before the first step and `git worktree remove --force` on completion. The substrate's `reserve_worktree` / `close_worktree` methods are added to the `Substrate` trait so the `Runner` can track the lifecycle via `Arc<dyn Substrate>`. All host-request CWDs and bash `current_dir` use the worktree path; `relative_to_root` and manifest paths continue to use `repo_root`. Degradation: if `git worktree add` fails (no binary, dirty index), setup logs a warning and the run continues in `repo_root` — no crash. | §9.C.5 |
 | D40 | **Token counts and cost estimates are tracked per pipeline step and per run.** `CompletionResponse.tokens_in/out` are threaded through `StepExecution` → `StepRecord` → `ManifestStep` and accumulated into `RunManifest.tokens_in/out`. `RunOutcome.cost_estimate_usd(model_name)` uses a built-in pricing table (`builtin_cost_hint`) seeded with current list prices for Claude Opus/Sonnet/Haiku, GPT-4o/mini, and Gemini 2.5. Host-subprocess steps (claude CLI, copilot CLI) report zero at this layer; their token counts appear separately in `derrick gain` via Claude Code JSONL. `derrick gain --run <id>` shows a per-step breakdown from the manifest; session-level `gain` shows estimated dollar cost alongside token totals. | §9.B / `derrick-models` |
 | D39 | **Adversarial code review fires before every PR, not after.** `derrick ticket code-review <id> --branch <branch> --round N` diffs `origin/<base>...<branch>` (three-dot), passes the diff + ticket requirements to a configured reviewer role, and exits 0 (pass) or 3 (issues found). Hands must call this and get a pass before calling `derrick ticket review`. Auto-remediation is hand-driven: the hand reads `.derrick/reviews/<id>/round-N.md`, fixes, and retries up to `tools.code_review.rounds` times. Beyond that, the hand surfaces the report to the human. Exit code 3 (not 1) lets hands distinguish "fix needed" from infrastructure errors. Disabled by default (`tools.code_review.enabled: false`). | §8.6 / AGENTS.md hand protocol |
-| D41 | **OpenCode is a first-class host.** `derrick-tools` gains an `OpencodeHost` adapter that invokes `opencode run "<prompt>" --dir <cwd> [--dangerously-skip-permissions]`. `derrick-scrub` gains an `opencode` rule set that strips the startup banner, tool-use progress lines, spinner frames, thinking markers, and cost footers. Specialist sub-agents are published under `.opencode/agents/` with opencode frontmatter (`mode: agent`). The `HostRegistry` default set now includes `opencode` alongside `claude`, `codex`, and `copilot`. | §6.5 / `derrick-tools` / `derrick-scrub` |
+| D41 | **OpenCode is a first-class host.** `derrick-tools` gains an `OpencodeHost` adapter that invokes `opencode run "<prompt>" --dir <cwd> [--dangerously-skip-permissions]`. `derrick-scrub` gains an `opencode` rule set that strips the startup banner, tool-use progress lines, spinner frames, thinking markers, and cost footers. Specialist sub-agents are published under `.opencode/agents/` with opencode frontmatter (`mode: agent`). The `HostRegistry` default set now includes `opencode` alongside `claude`, `codex`, and `copilot`. *Extended by D65*: `aider` is also added as a first-class host (fifth host), giving the full five-host set. | §6.5 / `derrick-tools` / `derrick-scrub` / D65 |
 | D42 | **Full courtroom pattern: adversarial cross-model deliberation with auto-revise loop.** Assay implements the structured Claude-prosecutes / Codex-cross-examines / Claude-rebuts / Codex-deliberates cycle from the courtroom pattern. Default rounds: 10. Constitution violations are parsed and enforced as non-negotiable gates (override requires human approval). When the revise loop exhausts configured rounds, derrick prompts the user to continue or halt. Progress is streamed in real-time (round N/M, verdict, phase name) instead of a spinner. The loop switches from a `for` to a `while` to allow dynamic round extension at user request. | §7 / `derrick-flow/src/assay.rs` |
 | D43 | **Roughneck: LLM output compression via prompt injection.** A new crate `derrick-roughneck` appends a compression instruction to every model request, asking the model to emit a compressed form of its output before handoff. Three levels: `lite` (~30%), `full` (~65%, default), `ultra` (~75%). Config: `tools.roughneck.{enabled,level,compress_memory}`. Per-step manifest field `roughneck_tokens_saved` records estimated savings. TUI Tokens tab surfaces roughneck savings alongside scrub. | §3.1 / §9.B.2a / §10.1 |
 | D44 | **`derrick-scrub` records bytes_raw and bytes_saved per step in the manifest.** The scrub crate already existed; this decision adds structured telemetry so `derrick gain` and the TUI can show per-step context reduction, not just a binary "scrub on/off". Config: `tools.output_compression.enabled`. | §9.B.2 / §10.1 |
@@ -2078,6 +2111,7 @@ links back to the section where it lives.
 | D62 | **Init wizard redesigned on `inquire` (arrow-key prompts).** Closes the init-wizard item deferred by D60. The wizard previously used hand-rolled numbered-list selects (type a number) and a long chain of separate yes/no prompts read via raw stdin — visually weak and tedious. Resolution: adopt `inquire` (new workspace dep) for all wizard prompts — arrow-key `Select`/`MultiSelect`, `Text` with inline validators (the ticket-prefix re-ask loop becomes a validator), and `Confirm`. The trailing yes/no toggles (conventional commits, append AGENTS.md, hooks, VS Code, JetBrains, force) collapse into a single `MultiSelect` with sensible defaults pre-checked, cutting ~6 prompts to one screen. `Esc`/`Ctrl-C` on any prompt cancels cleanly (→ `WizardSelection::Cancelled`); `prompt_constitution` falls back to default seeds. Safe because `should_run_wizard` already gates on a real TTY (`stdin`+`stdout`), so non-interactive/`--yes`/`--no-wizard`/piped/test paths never reach `inquire` and are unchanged; the `WizardInput`/`WizardOutput` contract and pure helpers/tests are preserved. Contained to `derrick-cli` (`init_wizard.rs`); no cross-crate or schema impact. Shared CLI theme module remains the one open UX item. | `derrick-cli` / D60 / root `Cargo.toml` |
 | D63 | **Shared CLI theme module (`ui`).** Closes the last UX item from D60/D62. Styling was scattered: three duplicated `is_styled()` definitions (`init.rs`, `init_wizard.rs`, `switch.rs`) and ~30 hand-rolled `\x1b[…m` escape literals across commands, with no single authority. Resolution: a new `crate::ui` module is the one place that decides whether output is styled (stdout TTY + `NO_COLOR` unset) and exposes colour/weight primitives (`bold`/`dim`/`cyan`/`green`/`red`/`yellow`, built on `owo_colors`), coloured glyphs (`tick`/`cross`/`warn_glyph`/`arrow`), and semantic line builders (`ready`/`written`/`skipped`/`done`/`hint`/`warn`/`rule`/`section`). The three `is_styled()` copies collapse to `ui::styled()`; `init_wizard`'s `bold`/`dim`/`section_rule` delegate to `ui`; the clean semantic lines in `init.rs`/`switch.rs` migrate to `ui` helpers. `owo_colors` emits the same escape codes as the prior literals and helpers degrade to plain text when unstyled, so output is byte-equivalent — verified by the existing init integration tests (which assert on plain text) plus new `ui` unit tests. Mixed lines with inline code spans keep their `ui::styled()`-gated branches (preserving backtick markers in plain mode) rather than forcing a lossy collapse. Contained to `derrick-cli`. | `derrick-cli` / D60 / D62 |
 | D64 | **Feature prompt accepted from file or stdin.** The feature brief previously had to be a shell-positional/`--prompt` string, making a large multi-line `/speckit.specify`-style brief (newlines, quotes, `$`) painful to pass. Resolution: add `--prompt-file <path>` to both `derrick add` and `derrick run add-feature`, and read stdin when the prompt is the `-` sentinel, `--prompt-file -` is given, or input is piped with no other source. A new `derrick-cli` `prompt_input` resolver folds the three sources into the single `Option<String>` that feeds `state.prompt`; the "is stdin a terminal" check and reader are injected so the rules are unit-tested without a TTY. More than one explicit source is a usage error; a missing file or empty-after-trim prompt is rejected; one trailing newline is trimmed and interior newlines preserved; terminal-with-nothing returns `None`, preserving the interactive no-prompt fallback. Resolution happens once before the prompt-key auto-resume scan so the key matches. Contained to `derrick-cli`; no `derrick-flow`/schema/token-accounting change. | §5.3 / `derrick-cli` |
+| D65 | **Host-CLI-only model routing — no BYOK.** Derrick routes ALL model inference through exactly five host CLIs: `claude` (Claude Code), `codex`, `copilot` (GitHub Copilot CLI), `opencode`, `aider`. Derrick holds no API keys. Each host CLI manages its own auth; derrick's `AuthStore` shrinks to env-passthrough only (forwarding vars such as `GH_TOKEN` and proxy vars to child processes). Supersedes D12. The `derrick-models` `Model`-trait providers collapse into a single **host-delegated provider** that maps a `ModelDef` to a host, builds a `HostRequest`, calls the `derrick-tools` host adapter, and wraps the `HostResponse` into a one-shot completion stream. `derrick-models` gains a dependency on `derrick-tools` (no cycle — tools is a leaf). The direct-API `anthropic` provider and the API-key mode of `openai-cli` are deleted; `shell` survives as a bespoke-envelope escape hatch. Host–model mapping: anthropic models route via `claude`; OpenAI models via `codex`; `copilot`, `opencode`, and `aider` are multi-model front-ends that authenticate themselves. opencode and aider are first-class pipeline hosts (D41 extended): the `Host` enum gains `Opencode` and `Aider`. Per-host model normalisation: `claude` strips a leading `anthropic/`; `codex` strips `openai/`; `copilot` strips any `provider/` prefix but keeps its own dotted ids (e.g. `claude-sonnet-4.6`) without dot↔dash translation; `opencode` and `aider` pass `provider/model` verbatim. A curated, current per-host catalogue (owned by `derrick-tools/src/catalogue.rs`) drives defaults and `derrick models check`; unknown model ids WARN and still pass through to the CLI — hard-fail on model id is explicitly prohibited. Current catalogue (May 2026): claude → `claude-opus-4-8` / `claude-sonnet-4-6` / `claude-haiku-4-5`; codex → `gpt-5.5` / `gpt-5.4` / `gpt-5.4-mini` / `gpt-5.2-codex`; copilot → `gpt-5.4` / `gpt-5.3-codex` / `claude-sonnet-4.6` / `claude-haiku-4.5` / `gpt-5.4-mini`; opencode and aider use `provider/model` strings (a few curated, else WARN). `derrick models check` is now implemented with the warn-not-fail rule (completes D15). `MissingCredential` and `AuthStore::require()` are removed. `reqwest` drops out of `derrick-models`. D30's host-vs-provider split stands for invocation shape: the `shell` provider and all non-inference subprocess calls are unchanged; inference-path providers are host-delegated wrappers. | §6.5 / D12 / D15 / D30 / D34 / D41 |
 
 ### Remaining open questions
 

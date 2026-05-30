@@ -97,11 +97,19 @@ pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliErr
         None => return Ok(CliExitCode::Success),
     };
 
-    if resolved.greenfield {
+    let outcome = if resolved.greenfield {
         greenfield_init(&repo_root, &resolved).await
     } else {
         brownfield_init(&repo_root, &resolved).await
+    };
+
+    // D15/D65: after the config exists, run the soft (WARN-only) model/host
+    // check so any catalogue or installation issues surface at init time.
+    if let Ok(config) = derrick_config::Config::load_layered(&repo_root) {
+        crate::commands::models::emit_soft_warnings(&config);
     }
+
+    outcome
 }
 
 fn resolve_options(
@@ -550,6 +558,17 @@ pub(crate) fn recommended_role_bindings(
         available_models,
         &["copilot", "codex-gpt5", "claude-sonnet", "claude-opus"],
     );
+    // Summariser favours the cheap, fast model, matching Config::defaults().
+    let claude_haiku = pick_model(
+        available_models,
+        &[
+            "claude-haiku",
+            "claude-sonnet",
+            "claude-opus",
+            "codex-gpt5",
+            "copilot",
+        ],
+    );
 
     match mode {
         crate::commands::InitMode::Solo => RoleBindings {
@@ -557,21 +576,21 @@ pub(crate) fn recommended_role_bindings(
             drafter: claude_sonnet.clone(),
             reviewer: codex.clone(),
             executor: copilot.clone(),
-            summariser: claude_sonnet,
+            summariser: claude_haiku,
         },
         crate::commands::InitMode::Copilot => RoleBindings {
             proposer: claude_sonnet.clone(),
             drafter: claude_sonnet.clone(),
             reviewer: codex.clone(),
             executor: copilot.clone(),
-            summariser: claude_sonnet,
+            summariser: claude_haiku,
         },
         crate::commands::InitMode::Crew => RoleBindings {
             proposer: claude_opus,
             drafter: claude_sonnet.clone(),
             reviewer: codex.clone(),
             executor: copilot,
-            summariser: claude_sonnet,
+            summariser: claude_haiku,
         },
     }
 }
@@ -603,6 +622,7 @@ pub(crate) fn available_model_choices() -> Vec<(&'static str, &'static str)> {
             "claude-sonnet",
             "balanced default for drafting and summaries",
         ),
+        ("claude-haiku", "fast and cheap for summaries"),
         ("codex-gpt5", "good for code review and implementation"),
         ("copilot", "good for Copilot CLI workflows"),
     ]
