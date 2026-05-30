@@ -61,6 +61,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 notify = "8"
 owo-colors = "4"
 indicatif = "0.18"
+inquire = "0.9"
 # Survey index (derrick-survey, D54/D55)
 rayon = "1"
 blake3 = "1"

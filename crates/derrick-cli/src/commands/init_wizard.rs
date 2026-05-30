@@ -1,8 +1,10 @@
-use std::collections::BTreeMap;
-use std::io::{self, IsTerminal, Write};
+use std::collections::{BTreeMap, HashSet};
+use std::io::IsTerminal;
 use std::path::Path;
 
 use derrick_adopt::ConstitutionMode;
+use inquire::validator::Validation;
+use inquire::{Confirm, MultiSelect, Select, Text};
 
 use crate::commands::init::{
     available_model_ids, recommended_role_bindings, validate_prefix, RoleBindings,
@@ -25,14 +27,6 @@ fn bold(s: &str) -> String {
 fn dim(s: &str) -> String {
     if is_styled() {
         format!("\x1b[2m{s}\x1b[0m")
-    } else {
-        s.to_owned()
-    }
-}
-
-fn cyan(s: &str) -> String {
-    if is_styled() {
-        format!("\x1b[36m{s}\x1b[0m")
     } else {
         s.to_owned()
     }
@@ -132,26 +126,17 @@ fn print_splash() {
 
 pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliError> {
     print_splash();
-    println!("  {:<9}  {}", "repo", input.repo_root.display());
-    println!(
-        "  {:<9}  {}",
-        "config",
-        if input.has_existing_config {
-            "found".to_owned()
-        } else {
-            dim("not found")
-        }
-    );
-    println!(
-        "  {:<9}  {}",
-        "status",
-        if input.likely_existing_project {
-            "existing project"
-        } else {
-            "new project"
-        }
-    );
-    println!();
+    print_info(&input);
+
+    // Any prompt the user escapes (Esc / Ctrl-C) cancels the whole wizard.
+    macro_rules! ask {
+        ($e:expr) => {
+            match $e? {
+                Some(value) => value,
+                None => return Ok(WizardSelection::Cancelled),
+            }
+        };
+    }
 
     let greenfield = if input.force_greenfield {
         println!(
@@ -162,35 +147,18 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         println!();
         true
     } else {
-        let init_type = prompt_select(
+        ask!(ask_select(
             "What are you setting up?",
             &["Adopt existing repo", "Start fresh"],
-            if input.default_greenfield { 1 } else { 0 },
-        )?;
-        init_type == 1
+            usize::from(input.default_greenfield),
+        )) == 1
     };
 
-    let site_name = prompt_text("Project name", &input.default_site_name)?;
+    let site_name = ask!(ask_text("Project name", &input.default_site_name, false));
+    let prefix = ask!(ask_text("Ticket prefix", &input.default_prefix, true));
+    let branch_prefix = ask!(ask_text("Branch naming prefix", "feat/", false));
 
-    let prefix = loop {
-        let value = prompt_text("Ticket prefix", &input.default_prefix)?;
-        match validate_prefix(&value) {
-            Ok(()) => break value,
-            Err(error) => {
-                eprintln!("  {error}");
-                eprintln!("  Please use lowercase ASCII, 1 to 6 characters.");
-            }
-        }
-    };
-
-    println!();
-    println!("{}", section_rule("commit & branching conventions"));
-
-    let conventional_commits = prompt_yes_no("Use conventional commits?", true)?;
-
-    let branch_prefix = prompt_text("Branch naming prefix", "feat/")?;
-
-    let mode = match prompt_select(
+    let mode = match ask!(ask_select(
         "Operating mode",
         &[
             "solo      local-first, minimal orchestration",
@@ -198,19 +166,15 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
             "crew      richer multi-role orchestration",
         ],
         mode_to_index(input.default_mode),
-    )? {
+    )) {
         0 => crate::commands::InitMode::Solo,
         1 => crate::commands::InitMode::Copilot,
         _ => crate::commands::InitMode::Crew,
     };
 
-    println!();
-    println!("{}", section_rule("AI tools"));
-    println!("  Derrick can use different AI tools for different stages.");
-
     let available_model_ids = available_model_ids();
     let role_defaults = recommended_role_bindings(mode, &available_model_ids);
-    let ai_mode = prompt_select(
+    let (ai_style, roles) = match ask!(ask_select(
         "How would you like to configure AI tools?",
         &[
             "Recommended defaults",
@@ -218,66 +182,57 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
             "Choose per stage",
         ],
         0,
-    )?;
-
-    let (ai_style, roles) = match ai_mode {
+    )) {
         0 => (AiConfigurationStyle::Recommended, role_defaults),
         1 => {
-            let selected = prompt_model(
+            let selected = ask!(ask_model(
                 "Select one tool/model for all stages",
                 &input.available_models,
                 role_defaults.executor.as_str(),
-            )?;
+            ));
             (
                 AiConfigurationStyle::OneTool,
                 RoleBindings::one_model(selected),
             )
         }
-        _ => {
-            let proposer = prompt_model(
-                "Planning / proposal",
-                &input.available_models,
-                role_defaults.proposer.as_str(),
-            )?;
-            let drafter = prompt_model(
-                "Drafting specs/tasks",
-                &input.available_models,
-                role_defaults.drafter.as_str(),
-            )?;
-            let reviewer = prompt_model(
-                "Review / critique",
-                &input.available_models,
-                role_defaults.reviewer.as_str(),
-            )?;
-            let executor = prompt_model(
-                "Execution / implementation",
-                &input.available_models,
-                role_defaults.executor.as_str(),
-            )?;
-            let summariser = prompt_model(
-                "Summary / handoff",
-                &input.available_models,
-                role_defaults.summariser.as_str(),
-            )?;
-            (
-                AiConfigurationStyle::PerStage,
-                RoleBindings {
-                    proposer,
-                    drafter,
-                    reviewer,
-                    executor,
-                    summariser,
-                },
-            )
-        }
+        _ => (
+            AiConfigurationStyle::PerStage,
+            RoleBindings {
+                proposer: ask!(ask_model(
+                    "Planning / proposal",
+                    &input.available_models,
+                    role_defaults.proposer.as_str(),
+                )),
+                drafter: ask!(ask_model(
+                    "Drafting specs/tasks",
+                    &input.available_models,
+                    role_defaults.drafter.as_str(),
+                )),
+                reviewer: ask!(ask_model(
+                    "Review / critique",
+                    &input.available_models,
+                    role_defaults.reviewer.as_str(),
+                )),
+                executor: ask!(ask_model(
+                    "Execution / implementation",
+                    &input.available_models,
+                    role_defaults.executor.as_str(),
+                )),
+                summariser: ask!(ask_model(
+                    "Summary / handoff",
+                    &input.available_models,
+                    role_defaults.summariser.as_str(),
+                )),
+            },
+        ),
     };
 
     validate_role_models(&roles, &available_model_ids)?;
 
-    let (constitution, append_agents_md, no_hooks) = if greenfield {
-        (ConstitutionMode::Reference, false, input.no_hooks_forced)
+    let constitution = if greenfield {
+        ConstitutionMode::Reference
     } else {
-        let constitution = match prompt_select(
+        match ask!(ask_select(
             "Constitution setup",
             &[
                 "Reference existing docs",
@@ -285,27 +240,67 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
                 "Draft from docs",
             ],
             constitution_to_index(input.default_constitution),
-        )? {
+        )) {
             0 => ConstitutionMode::Reference,
             1 => ConstitutionMode::Stub,
             _ => ConstitutionMode::FromDocs,
-        };
-        let append_agents_md =
-            prompt_yes_no("Append AGENTS.md guidance?", input.default_append_agents_md)?;
-        let no_hooks = if input.no_hooks_forced {
-            true
-        } else {
-            !prompt_yes_no("Install Codex instructions/hooks?", true)?
-        };
-        (constitution, append_agents_md, no_hooks)
+        }
     };
 
-    let vscode = prompt_yes_no("Write VS Code tasks config?", input.default_vscode)?;
-    let jetbrains = prompt_yes_no(
-        "Write JetBrains run configurations?",
+    // Collapse the old chain of yes/no toggles into one multi-select with
+    // sensible defaults pre-checked.
+    let hooks_offered = !greenfield && !input.no_hooks_forced;
+    let mut toggles: Vec<(Toggle, &str, bool)> =
+        vec![(Toggle::ConventionalCommits, "Conventional commits", true)];
+    if !greenfield {
+        toggles.push((
+            Toggle::AppendAgentsMd,
+            "Append AGENTS.md guidance",
+            input.default_append_agents_md,
+        ));
+    }
+    if hooks_offered {
+        toggles.push((Toggle::Hooks, "Install Codex instructions / hooks", true));
+    }
+    toggles.push((Toggle::VsCode, "VS Code tasks", input.default_vscode));
+    toggles.push((
+        Toggle::JetBrains,
+        "JetBrains run configurations",
         input.default_jetbrains,
-    )?;
-    let force = prompt_yes_no("Enable force overwrite?", input.default_force)?;
+    ));
+    toggles.push((
+        Toggle::Force,
+        "Force overwrite existing files",
+        input.default_force,
+    ));
+
+    let labels: Vec<&str> = toggles.iter().map(|(_, label, _)| *label).collect();
+    let defaults: Vec<usize> = toggles
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, on))| *on)
+        .map(|(index, _)| index)
+        .collect();
+    let chosen_indices = ask!(ask_multiselect(
+        "Options  (↑↓ move · space toggles · enter confirms)",
+        &labels,
+        &defaults,
+    ));
+    let chosen: HashSet<Toggle> = chosen_indices
+        .into_iter()
+        .map(|index| toggles[index].0)
+        .collect();
+
+    let conventional_commits = chosen.contains(&Toggle::ConventionalCommits);
+    let append_agents_md = !greenfield && chosen.contains(&Toggle::AppendAgentsMd);
+    let no_hooks = if hooks_offered {
+        !chosen.contains(&Toggle::Hooks)
+    } else {
+        input.no_hooks_forced
+    };
+    let vscode = chosen.contains(&Toggle::VsCode);
+    let jetbrains = chosen.contains(&Toggle::JetBrains);
+    let force = chosen.contains(&Toggle::Force);
 
     let output = WizardOutput {
         greenfield,
@@ -326,11 +321,45 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
 
     print_preview(&input, &output);
 
-    if !prompt_yes_no("Proceed?", true)? {
+    if !ask!(ask_confirm("Proceed?", true)) {
         return Ok(WizardSelection::Cancelled);
     }
 
     Ok(WizardSelection::Proceed(Box::new(output)))
+}
+
+/// Keys for the consolidated options multi-select.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Toggle {
+    ConventionalCommits,
+    AppendAgentsMd,
+    Hooks,
+    VsCode,
+    JetBrains,
+    Force,
+}
+
+fn print_info(input: &WizardInput<'_>) {
+    println!("  {:<9}  {}", "repo", input.repo_root.display());
+    println!(
+        "  {:<9}  {}",
+        "config",
+        if input.has_existing_config {
+            "found".to_owned()
+        } else {
+            dim("not found")
+        }
+    );
+    println!(
+        "  {:<9}  {}",
+        "status",
+        if input.likely_existing_project {
+            "existing project"
+        } else {
+            "new project"
+        }
+    );
+    println!();
 }
 
 // ─── preview ─────────────────────────────────────────────────────────────────
@@ -433,155 +462,78 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
 
 // ─── prompt helpers ───────────────────────────────────────────────────────────
 
-fn prompt_text(prompt: &str, default: &str) -> Result<String, crate::CliError> {
-    print!("  {prompt} {}: ", dim(&format!("[{default}]")));
-    io::stdout().flush().map_err(|error| crate::CliError::Io {
-        path: "<stdout>".into(),
-        source: error,
-    })?;
-    let mut buffer = String::new();
-    let read = io::stdin()
-        .read_line(&mut buffer)
-        .map_err(|error| crate::CliError::Io {
-            path: "<stdin>".into(),
-            source: error,
-        })?;
-    if read == 0 {
-        return Ok(default.to_owned());
-    }
-    let value = buffer.trim();
-    if value.is_empty() {
-        Ok(default.to_owned())
-    } else {
-        Ok(value.to_owned())
+/// Maps an inquire result into `Option<T>`: `Esc`/`Ctrl-C` becomes `None`
+/// (cancel the wizard); any other error surfaces as a `CliError`.
+fn inquire_opt<T>(result: inquire::error::InquireResult<T>) -> Result<Option<T>, crate::CliError> {
+    use inquire::InquireError::{OperationCanceled, OperationInterrupted};
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(OperationCanceled | OperationInterrupted) => Ok(None),
+        Err(error) => Err(crate::message(format!("wizard prompt failed: {error}"))),
     }
 }
 
-fn prompt_yes_no(prompt: &str, default_yes: bool) -> Result<bool, crate::CliError> {
-    let hint = if default_yes {
-        format!("[{}/n]", bold("Y"))
-    } else {
-        format!("[y/{}]", bold("N"))
-    };
-    loop {
-        print!("  {prompt} {} ", dim(&hint));
-        io::stdout().flush().map_err(|error| crate::CliError::Io {
-            path: "<stdout>".into(),
-            source: error,
-        })?;
-        let mut buffer = String::new();
-        let read = io::stdin()
-            .read_line(&mut buffer)
-            .map_err(|error| crate::CliError::Io {
-                path: "<stdin>".into(),
-                source: error,
-            })?;
-        if read == 0 {
-            return Ok(default_yes);
-        }
-        let answer = buffer.trim().to_ascii_lowercase();
-        if answer.is_empty() {
-            return Ok(default_yes);
-        }
-        if matches!(answer.as_str(), "y" | "yes") {
-            return Ok(true);
-        }
-        if matches!(answer.as_str(), "n" | "no") {
-            return Ok(false);
-        }
-        eprintln!("  Please answer yes or no.");
+/// A free-text prompt with an inline default. When `prefix` is set, the input
+/// is validated as a ticket prefix and re-asked until valid.
+fn ask_text(
+    prompt: &str,
+    default: &str,
+    is_prefix: bool,
+) -> Result<Option<String>, crate::CliError> {
+    let mut text = Text::new(prompt).with_default(default);
+    if is_prefix {
+        text = text.with_validator(|input: &str| match validate_prefix(input) {
+            Ok(()) => Ok(Validation::Valid),
+            Err(error) => Ok(Validation::Invalid(error.to_string().into())),
+        });
     }
+    inquire_opt(text.prompt())
 }
 
-fn prompt_select(
+/// An arrow-key single-select returning the chosen option's index.
+fn ask_select(
     prompt: &str,
     options: &[&str],
     default_index: usize,
-) -> Result<usize, crate::CliError> {
-    println!();
-    println!("  {}", bold(prompt));
-    println!();
-    for (index, option) in options.iter().enumerate() {
-        println!("    {}  {option}", dim(&format!("{}", index + 1)));
-    }
-    println!();
-    loop {
-        print!("  {} ", cyan("›"));
-        io::stdout().flush().map_err(|error| crate::CliError::Io {
-            path: "<stdout>".into(),
-            source: error,
-        })?;
-        let mut buffer = String::new();
-        let read = io::stdin()
-            .read_line(&mut buffer)
-            .map_err(|error| crate::CliError::Io {
-                path: "<stdin>".into(),
-                source: error,
-            })?;
-        if read == 0 {
-            return Ok(default_index);
-        }
-        let trimmed = buffer.trim();
-        if trimmed.is_empty() {
-            return Ok(default_index);
-        }
-        if let Ok(choice) = trimmed.parse::<usize>() {
-            if (1..=options.len()).contains(&choice) {
-                return Ok(choice - 1);
-            }
-        }
-        eprintln!("  Please enter a number between 1 and {}.", options.len());
-    }
+) -> Result<Option<usize>, crate::CliError> {
+    let select = Select::new(prompt, options.to_vec()).with_starting_cursor(default_index);
+    Ok(inquire_opt(select.raw_prompt())?.map(|choice| choice.index))
 }
 
-fn prompt_model(
+/// A yes/no confirm with a default.
+fn ask_confirm(prompt: &str, default_yes: bool) -> Result<Option<bool>, crate::CliError> {
+    inquire_opt(Confirm::new(prompt).with_default(default_yes).prompt())
+}
+
+/// A multi-select returning the chosen option indices; `defaults` are the
+/// indices pre-checked when the prompt opens.
+fn ask_multiselect(
+    prompt: &str,
+    options: &[&str],
+    defaults: &[usize],
+) -> Result<Option<Vec<usize>>, crate::CliError> {
+    let select = MultiSelect::new(prompt, options.to_vec()).with_default(defaults);
+    Ok(inquire_opt(select.raw_prompt())?
+        .map(|chosen| chosen.into_iter().map(|choice| choice.index).collect()))
+}
+
+/// A model picker: lists `id (description)` and returns the chosen model id,
+/// starting on `default_model_id`.
+fn ask_model(
     prompt: &str,
     models: &[(&str, &str)],
     default_model_id: &str,
-) -> Result<String, crate::CliError> {
+) -> Result<Option<String>, crate::CliError> {
     let default = models
         .iter()
         .position(|(id, _)| *id == default_model_id)
         .unwrap_or(0);
-    println!();
-    println!("  {}", bold(prompt));
-    println!();
-    for (index, (id, description)) in models.iter().enumerate() {
-        println!(
-            "    {}  {} {}",
-            dim(&format!("{}", index + 1)),
-            id,
-            dim(&format!("({description})"))
-        );
-    }
-    println!();
-    loop {
-        print!("  {} ", cyan("›"));
-        io::stdout().flush().map_err(|error| crate::CliError::Io {
-            path: "<stdout>".into(),
-            source: error,
-        })?;
-        let mut buffer = String::new();
-        let read = io::stdin()
-            .read_line(&mut buffer)
-            .map_err(|error| crate::CliError::Io {
-                path: "<stdin>".into(),
-                source: error,
-            })?;
-        if read == 0 {
-            return Ok(models[default].0.to_owned());
-        }
-        let trimmed = buffer.trim();
-        if trimmed.is_empty() {
-            return Ok(models[default].0.to_owned());
-        }
-        if let Ok(choice) = trimmed.parse::<usize>() {
-            if (1..=models.len()).contains(&choice) {
-                return Ok(models[choice - 1].0.to_owned());
-            }
-        }
-        eprintln!("  Please enter a number between 1 and {}.", models.len());
-    }
+    let labels: Vec<String> = models
+        .iter()
+        .map(|(id, description)| format!("{id}  ({description})"))
+        .collect();
+    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    Ok(ask_select(prompt, &label_refs, default)?.map(|index| models[index].0.to_owned()))
 }
 
 // ─── validation ──────────────────────────────────────────────────────────────
@@ -686,9 +638,18 @@ pub(crate) fn prompt_constitution(yes: bool) -> Result<ConstitutionSeeds, crate:
     );
     println!("  Answer a few questions — you can edit the file any time.");
 
-    let language = prompt_text("Primary language(s)  [e.g. Go, TypeScript, Rust]", "")?;
+    // Escaping any prompt here falls back to default (empty) seeds rather than
+    // aborting init — the constitution can always be edited afterwards.
+    let Some(language) = ask_text(
+        "Primary language(s)  [e.g. Go, TypeScript, Rust]",
+        "",
+        false,
+    )?
+    else {
+        return Ok(ConstitutionSeeds::default());
+    };
 
-    let testing_idx = prompt_select(
+    let testing = match ask_select(
         "Testing approach",
         &[
             "unit tests only",
@@ -697,16 +658,22 @@ pub(crate) fn prompt_constitution(yes: bool) -> Result<ConstitutionSeeds, crate:
             "property-based / fuzzing",
         ],
         0,
-    )?;
-    let testing = match testing_idx {
-        0 => ConstitutionTestingStyle::UnitOnly,
-        1 => ConstitutionTestingStyle::UnitAndIntegration,
-        2 => ConstitutionTestingStyle::TestDriven,
-        _ => ConstitutionTestingStyle::PropertyBased,
+    )? {
+        Some(0) => ConstitutionTestingStyle::UnitOnly,
+        Some(1) => ConstitutionTestingStyle::UnitAndIntegration,
+        Some(2) => ConstitutionTestingStyle::TestDriven,
+        Some(_) => ConstitutionTestingStyle::PropertyBased,
+        None => return Ok(ConstitutionSeeds::default()),
     };
 
-    let architecture = prompt_text("Architectural constraints  (optional, free text)", "")?;
-    let style = prompt_text("Style / linting notes  (optional, free text)", "")?;
+    let architecture = ask_text(
+        "Architectural constraints  (optional, free text)",
+        "",
+        false,
+    )?
+    .unwrap_or_default();
+    let style =
+        ask_text("Style / linting notes  (optional, free text)", "", false)?.unwrap_or_default();
 
     Ok(ConstitutionSeeds {
         language,
