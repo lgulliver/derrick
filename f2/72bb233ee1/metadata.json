@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "f272bb233ee1",
+  "strategy": "manual-commit",
+  "branch": "feat/foreman-adaptive-model-selection",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "AGENTS.md",
+    "README.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f2/72bb233ee1/0/metadata.json",
+      "transcript": "/f2/72bb233ee1/0/full.jsonl",
+      "content_hash": "/f2/72bb233ee1/0/content_hash.txt",
+      "prompt": "/f2/72bb233ee1/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 6,
+    "cache_creation_tokens": 7,
+    "cache_read_tokens": 53295,
+    "output_tokens": 384,
+    "api_call_count": 1
+  }
+}
