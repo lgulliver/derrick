@@ -11,6 +11,7 @@ pub(crate) mod gain;
 pub(crate) mod init;
 pub(crate) mod init_wizard;
 pub(crate) mod observe;
+pub(crate) mod prompt_input;
 pub(crate) mod run;
 pub(crate) mod scrub;
 pub(crate) mod stack;
@@ -58,6 +59,12 @@ pub(crate) enum Command {
 pub(crate) struct AddArgs {
     /// Feature description. Equivalent to `run add-feature --prompt "..."`.
     pub(crate) prompt: Option<String>,
+    #[arg(
+        long = "prompt-file",
+        value_name = "PATH",
+        help = "Read the feature prompt from a file (use - for stdin)"
+    )]
+    pub(crate) prompt_file: Option<String>,
     #[arg(long = "resume-from")]
     pub(crate) resume_from: Option<String>,
     #[arg(long = "run")]
@@ -240,6 +247,12 @@ pub(crate) enum RunCommand {
 pub(crate) struct AddFeatureArgs {
     #[arg(long)]
     pub(crate) prompt: Option<String>,
+    #[arg(
+        long = "prompt-file",
+        value_name = "PATH",
+        help = "Read the feature prompt from a file (use - for stdin)"
+    )]
+    pub(crate) prompt_file: Option<String>,
     #[arg(long)]
     pub(crate) resume_from: Option<String>,
     #[arg(long = "run")]
