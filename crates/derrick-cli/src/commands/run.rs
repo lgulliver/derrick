@@ -37,7 +37,7 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
 
             if let Some(prior_run_id) = add_feature.force_prior_run_id.clone() {
                 // Force-restart: start a brand-new run but record lineage.
-                let input = pipeline_input(add_feature);
+                let input = pipeline_input(add_feature)?;
                 let outcome = runner
                     .run_pipeline_as_restart("add-feature", input, prior_run_id)
                     .await
@@ -45,7 +45,7 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
                 return Ok(status_code(outcome.status));
             }
 
-            let input = pipeline_input(add_feature);
+            let input = pipeline_input(add_feature)?;
             let outcome = runner
                 .run_pipeline("add-feature", input)
                 .await
@@ -91,7 +91,7 @@ async fn build_runner() -> Result<
     Ok((repo_root, config, substrate, runner))
 }
 
-fn pipeline_input(args: crate::commands::AddFeatureArgs) -> PipelineInput {
+fn pipeline_input(args: crate::commands::AddFeatureArgs) -> Result<PipelineInput, crate::CliError> {
     let mut skip = args
         .skip
         .into_iter()
@@ -103,14 +103,21 @@ fn pipeline_input(args: crate::commands::AddFeatureArgs) -> PipelineInput {
         skip.insert("assay".to_owned());
     }
 
-    PipelineInput {
-        prompt: args.prompt,
+    // On the direct `run add-feature` path the prompt may arrive via
+    // `--prompt-file` or stdin; resolve it here.  When `add.rs` is the caller it
+    // has already resolved the prompt and cleared `prompt_file`, so this is a
+    // no-op for that path.
+    let prompt =
+        crate::commands::prompt_input::resolve_prompt_from_env(args.prompt, args.prompt_file)?;
+
+    Ok(PipelineInput {
+        prompt,
         skip,
         unskip: args.unskip.into_iter().collect(),
         dry_run: args.dry_run,
         run_id: args.run_id,
         no_github_issues: args.no_github_issues,
-    }
+    })
 }
 
 fn status_code(status: derrick_flow::RunStatus) -> CliExitCode {
