@@ -815,6 +815,35 @@ fn run_add_feature_smoke_writes_real_artifacts() -> TestResult {
 }
 
 #[test]
+fn add_reads_prompt_from_stdin() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+    fs::create_dir_all(dir.path().join(".specify/memory"))?;
+    fs::write(
+        dir.path().join(".specify/memory/constitution.md"),
+        "constitution",
+    )?;
+    let path = mock_flow_path(dir.path())?;
+
+    // `derrick add -` reads the feature prompt from stdin, sidestepping
+    // shell-escaping for multi-line briefs.
+    derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .args(["add", "-", "--run", "stdin-smoke"])
+        .write_stdin("hello\n")
+        .assert()
+        .success();
+
+    assert!(dir.path().join("specs/001-hello/spec.md").exists());
+    assert!(dir
+        .path()
+        .join(".derrick/runs/stdin-smoke/manifest.json")
+        .exists());
+    Ok(())
+}
+
+#[test]
 fn completions_emit_for_each_shell() -> TestResult {
     for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
         let output = derrick()?
