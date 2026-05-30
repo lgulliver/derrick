@@ -1,0 +1,1 @@
+yeah I would have thought that opencode should allow us to set its model when we use opencode in the same way we would change model for copilot.

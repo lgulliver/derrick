@@ -1,0 +1,60 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "050de525ad80",
+  "session_id": "ee1a4069-d828-47a2-9d6f-57c4ba260f68",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-30T19:51:20.213058Z",
+  "branch": "feat/host-executor-model-forwarding",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "DESIGN.md",
+    "crates/derrick-cli/Cargo.toml",
+    "crates/derrick-cli/src/commands/foreman.rs",
+    "crates/derrick-flow/src/lib.rs",
+    "crates/derrick-flow/src/steps.rs",
+    "crates/derrick-hand/Cargo.toml",
+    "crates/derrick-hand/src/lib.rs",
+    "crates/derrick-substrate-native/migrations/0003_hand_kinds.sql",
+    "crates/derrick-substrate-native/src/lib.rs",
+    "crates/derrick-substrate-native/src/tests.rs",
+    "crates/derrick-substrate/src/types.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-haiku-4-5-20251001",
+  "turn_id": "9ee42afba21c",
+  "checkpoint_transcript_start": 525,
+  "transcript_lines_at_start": 525,
+  "token_usage": {
+    "input_tokens": 1254,
+    "cache_creation_tokens": 80413,
+    "cache_read_tokens": 9161112,
+    "output_tokens": 45970,
+    "api_call_count": 30
+  },
+  "session_metrics": {
+    "turn_count": 6
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-30T19:51:20.170216Z",
+    "agent_lines": 965,
+    "agent_removed": 19,
+    "human_added": 276,
+    "human_modified": 95,
+    "human_removed": 0,
+    "total_committed": 1336,
+    "total_lines_changed": 1355,
+    "agent_percentage": 72.619926199262,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
