@@ -142,20 +142,23 @@ impl SurveyServer {
     }
 }
 
-#[tool_handler]
+// Reuse the router built once in `new()` rather than the macro default of
+// rebuilding it via `Self::tool_router()` on every call.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for SurveyServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Query derrick's native code-graph index instead of fanning out across \
-                 grep/glob/read. Use derrick_survey_search to find symbols, \
-                 derrick_survey_context for architecture questions, derrick_survey_impact \
-                 before changing a symbol, and derrick_survey_status to check freshness."
-                    .to_owned(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+        // `ServerInfo` is `#[non_exhaustive]`, so build from the default and
+        // assign the fields we care about rather than using a struct literal.
+        let mut info = ServerInfo::default();
+        info.instructions = Some(
+            "Query derrick's native code-graph index instead of fanning out across \
+             grep/glob/read. Use derrick_survey_search to find symbols, \
+             derrick_survey_context for architecture questions, derrick_survey_impact \
+             before changing a symbol, and derrick_survey_status to check freshness."
+                .to_owned(),
+        );
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info
     }
 }
 
@@ -197,7 +200,7 @@ async fn watch_task(survey: Survey, dirty: Arc<AtomicBool>) {
 mod tests {
     use super::*;
     use crate::{SurveyConfig, SurveyError};
-    use rmcp::model::CallToolRequestParam;
+    use rmcp::model::CallToolRequestParams;
     use rmcp::service::ServiceExt;
     use serde_json::json;
 
@@ -244,13 +247,11 @@ mod tests {
         tool: &str,
         args: serde_json::Value,
     ) -> String {
-        let result = client
-            .call_tool(CallToolRequestParam {
-                name: tool.to_owned().into(),
-                arguments: args.as_object().cloned(),
-            })
-            .await
-            .unwrap();
+        // `CallToolRequestParams` is `#[non_exhaustive]`; build from default.
+        let mut req = CallToolRequestParams::default();
+        req.name = tool.to_owned().into();
+        req.arguments = args.as_object().cloned();
+        let result = client.call_tool(req).await.unwrap();
         result
             .content
             .iter()
