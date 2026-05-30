@@ -1,0 +1,53 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "e220cf2c8b2f",
+  "strategy": "manual-commit",
+  "branch": "feat/host-cli-only-models-d64",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "Cargo.lock",
+    "DESIGN.md",
+    "crates/derrick-assay/src/names.rs",
+    "crates/derrick-cli/Cargo.toml",
+    "crates/derrick-cli/src/commands/doctor.rs",
+    "crates/derrick-cli/src/commands/init.rs",
+    "crates/derrick-cli/src/commands/mod.rs",
+    "crates/derrick-cli/src/commands/run.rs",
+    "crates/derrick-cli/src/lib.rs",
+    "crates/derrick-cli/tests/cli.rs",
+    "crates/derrick-config/Cargo.toml",
+    "crates/derrick-config/src/lib.rs",
+    "crates/derrick-flow/src/steps.rs",
+    "crates/derrick-models/Cargo.toml",
+    "crates/derrick-models/src/lib.rs",
+    "crates/derrick-models/src/providers/anthropic.rs",
+    "crates/derrick-models/src/providers/mod.rs",
+    "crates/derrick-models/src/providers/openai_cli.rs",
+    "crates/derrick-models/src/providers/opencode.rs",
+    "crates/derrick-models/src/providers/subprocess.rs",
+    "crates/derrick-models/tests/models.rs",
+    "crates/derrick-tools/src/hosts/claude.rs",
+    "crates/derrick-tools/src/hosts/codex.rs",
+    "crates/derrick-tools/src/hosts/copilot.rs",
+    "crates/derrick-tools/src/hosts/mod.rs",
+    "crates/derrick-tools/src/hosts/opencode.rs",
+    "crates/derrick-tools/src/lib.rs",
+    "crates/derrick-tools/tests/hosts.rs",
+    "templates/derrick.yaml.in"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e2/20cf2c8b2f/0/metadata.json",
+      "transcript": "/e2/20cf2c8b2f/0/full.jsonl",
+      "content_hash": "/e2/20cf2c8b2f/0/content_hash.txt",
+      "prompt": "/e2/20cf2c8b2f/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 22740,
+    "cache_creation_tokens": 60367,
+    "cache_read_tokens": 342792,
+    "output_tokens": 5118,
+    "api_call_count": 8
+  }
+}

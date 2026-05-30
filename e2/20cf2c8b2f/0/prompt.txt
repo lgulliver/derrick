@@ -1,0 +1,11 @@
+there is a comment in the copilot client.rs of:
+
+//! Copilot dispatch client.
+//!
+//! `CopilotDispatchClient` is the trait the dispatcher uses to talk to
+//! GitHub. The production implementation shells to the `gh` CLI; tests use
+//! an in-memory fake. We deliberately go through `gh issue create` +
+//! `gh issue assign @copilot` (instead of the `create_pull_request_with_copilot`
+//! MCP endpoint) because the latter 401'd repeatedly during T013 development;
+
+can we fix this?
