@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.5.4",
+  "checkpoint_id": "cb965a053442",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "DESIGN.md",
+    "README.md",
+    "crates/derrick-survey/Cargo.toml",
+    "crates/derrick-survey/src/mcp.rs",
+    "crates/derrick-survey/src/model.rs",
+    "crates/derrick-survey/src/parse/mod.rs",
+    "crates/derrick-survey/src/parse/queries.rs",
+    "crates/derrick-survey/src/watch.rs",
+    "docs/survey.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/cb/965a053442/0/metadata.json",
+      "transcript": "/cb/965a053442/0/full.jsonl",
+      "content_hash": "/cb/965a053442/0/content_hash.txt",
+      "prompt": "/cb/965a053442/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 29724,
+    "cache_creation_tokens": 544222,
+    "cache_read_tokens": 9605983,
+    "output_tokens": 53320,
+    "api_call_count": 88
+  }
+}

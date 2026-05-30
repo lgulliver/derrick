@@ -1,0 +1,77 @@
+{
+  "cli_version": "0.5.4",
+  "checkpoint_id": "cb965a053442",
+  "session_id": "623a497a-c23a-4525-91e8-9824e38c9e19",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-30T10:14:19.840654Z",
+  "branch": "main",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "DESIGN.md",
+    "README.md",
+    "crates/derrick-survey/Cargo.toml",
+    "crates/derrick-survey/src/mcp.rs",
+    "crates/derrick-survey/src/model.rs",
+    "crates/derrick-survey/src/parse/mod.rs",
+    "crates/derrick-survey/src/parse/queries.rs",
+    "crates/derrick-survey/src/watch.rs",
+    "docs/survey.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-sonnet-4-6",
+  "turn_id": "dcd79d82074d",
+  "token_usage": {
+    "input_tokens": 29724,
+    "cache_creation_tokens": 544222,
+    "cache_read_tokens": 9605983,
+    "output_tokens": 53320,
+    "api_call_count": 88
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-30T10:14:18.47384Z",
+    "agent_lines": 287,
+    "agent_removed": 31,
+    "human_added": 32,
+    "human_modified": 8,
+    "human_removed": 0,
+    "total_committed": 327,
+    "total_lines_changed": 358,
+    "agent_percentage": 88.8268156424581,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
