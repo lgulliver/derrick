@@ -73,13 +73,9 @@ impl Config {
         models.insert(
             "claude-opus".to_owned(),
             ModelDef {
-                provider: "anthropic".to_owned(),
-                model: "claude-opus-4-7".to_owned(),
+                provider: "claude".to_owned(),
+                model: "claude-opus-4-8".to_owned(),
                 cli: None,
-                endpoint: None,
-                region: None,
-                deployment: None,
-                base_url: None,
                 max_tokens: None,
                 temperature: None,
                 cache: None,
@@ -91,13 +87,23 @@ impl Config {
         models.insert(
             "claude-sonnet".to_owned(),
             ModelDef {
-                provider: "anthropic".to_owned(),
+                provider: "claude".to_owned(),
                 model: "claude-sonnet-4-6".to_owned(),
                 cli: None,
-                endpoint: None,
-                region: None,
-                deployment: None,
-                base_url: None,
+                max_tokens: None,
+                temperature: None,
+                cache: None,
+                timeout: None,
+                rate_limit: None,
+                cost_hint: None,
+            },
+        );
+        models.insert(
+            "claude-haiku".to_owned(),
+            ModelDef {
+                provider: "claude".to_owned(),
+                model: "claude-haiku-4-5".to_owned(),
+                cli: None,
                 max_tokens: None,
                 temperature: None,
                 cache: None,
@@ -109,13 +115,9 @@ impl Config {
         models.insert(
             "codex-gpt5".to_owned(),
             ModelDef {
-                provider: "openai-cli".to_owned(),
-                model: "gpt-5".to_owned(),
-                cli: Some("codex exec".to_owned()),
-                endpoint: None,
-                region: None,
-                deployment: None,
-                base_url: None,
+                provider: "codex".to_owned(),
+                model: "gpt-5.5".to_owned(),
+                cli: None,
                 max_tokens: None,
                 temperature: None,
                 cache: None,
@@ -127,13 +129,9 @@ impl Config {
         models.insert(
             "copilot".to_owned(),
             ModelDef {
-                provider: "copilot-cli".to_owned(),
-                model: "gpt-5-codex".to_owned(),
-                cli: Some("copilot".to_owned()),
-                endpoint: None,
-                region: None,
-                deployment: None,
-                base_url: None,
+                provider: "copilot".to_owned(),
+                model: "gpt-5.4".to_owned(),
+                cli: None,
                 max_tokens: None,
                 temperature: None,
                 cache: None,
@@ -148,7 +146,7 @@ impl Config {
             ("drafter".to_owned(), "claude-sonnet".to_owned()),
             ("reviewer".to_owned(), "codex-gpt5".to_owned()),
             ("executor".to_owned(), "copilot".to_owned()),
-            ("summariser".to_owned(), "claude-sonnet".to_owned()),
+            ("summariser".to_owned(), "claude-haiku".to_owned()),
         ]);
 
         Self {
@@ -331,15 +329,16 @@ impl ModelRegistry {
 }
 
 /// A model provider entry from the `models` section.
+///
+/// Post-D64 the inference path is host-delegated, so the direct-API fields
+/// (`endpoint`/`region`/`deployment`/`base_url`) are gone and `cli` is
+/// deprecated — it is still parsed (and used by the `shell` escape hatch) but
+/// ignored for host providers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelDef {
     provider: String,
     model: String,
     cli: Option<String>,
-    endpoint: Option<String>,
-    region: Option<String>,
-    deployment: Option<String>,
-    base_url: Option<String>,
     max_tokens: Option<u32>,
     temperature: Option<f64>,
     cache: Option<bool>,
@@ -360,28 +359,11 @@ impl ModelDef {
     }
 
     /// Returns the optional CLI command.
+    ///
+    /// Deprecated post-D64: only the `shell` provider still reads this. Host
+    /// providers ignore it.
     pub fn cli(&self) -> Option<&str> {
         self.cli.as_deref()
-    }
-
-    /// Returns the optional endpoint URL.
-    pub fn endpoint(&self) -> Option<&str> {
-        self.endpoint.as_deref()
-    }
-
-    /// Returns the optional provider region.
-    pub fn region(&self) -> Option<&str> {
-        self.region.as_deref()
-    }
-
-    /// Returns the optional deployment name.
-    pub fn deployment(&self) -> Option<&str> {
-        self.deployment.as_deref()
-    }
-
-    /// Returns the optional base URL.
-    pub fn base_url(&self) -> Option<&str> {
-        self.base_url.as_deref()
     }
 
     /// Returns the optional maximum token budget.
@@ -1160,6 +1142,10 @@ pub enum Host {
     Codex,
     /// Copilot CLI.
     Copilot,
+    /// OpenCode CLI.
+    Opencode,
+    /// Aider CLI.
+    Aider,
 }
 
 /// Assay rejection policy.
@@ -1605,9 +1591,16 @@ struct ModelDefLayer {
     provider: Option<String>,
     model: Option<String>,
     cli: Option<String>,
+    // Removed in D64 (direct-API fields). Still accepted on the wire so that
+    // pre-D64 `derrick.yaml` files keep loading; dropped at finalize with a
+    // one-line warning. No CONFIG_VERSION bump.
+    #[serde(default)]
     endpoint: Option<String>,
+    #[serde(default)]
     region: Option<String>,
+    #[serde(default)]
     deployment: Option<String>,
+    #[serde(default)]
     base_url: Option<String>,
     max_tokens: Option<u32>,
     temperature: Option<f64>,
@@ -1617,16 +1610,46 @@ struct ModelDefLayer {
     cost_hint: Option<String>,
 }
 
+/// Maps a legacy provider name to its D64 host-delegated equivalent.
+///
+/// One-release compatibility shim so pinned user `derrick.yaml` files that
+/// still name the pre-D64 providers continue to load. Returns the input
+/// unchanged when it is not a known legacy alias.
+fn canonical_provider(provider: &str) -> &str {
+    match provider {
+        "copilot-cli" => "copilot",
+        "anthropic" => "claude",
+        "openai-cli" => "codex",
+        other => other,
+    }
+}
+
 impl ModelDefLayer {
     fn finalize(self) -> Result<ModelDef, ConfigError> {
+        let raw_provider = required(self.provider, "models.*.provider")?;
+        let provider = canonical_provider(&raw_provider).to_owned();
+        if provider != raw_provider {
+            tracing::warn!(
+                target: "derrick_config",
+                "provider `{raw_provider}` is a pre-D64 alias; treating it as `{provider}`. \
+                 Update your config to the host name."
+            );
+        }
+        if self.endpoint.is_some()
+            || self.region.is_some()
+            || self.deployment.is_some()
+            || self.base_url.is_some()
+        {
+            tracing::warn!(
+                target: "derrick_config",
+                "models.*.{{endpoint,region,deployment,base_url}} are removed since D64 \
+                 (host-CLI-only routing); ignoring them. Remove these fields from your config."
+            );
+        }
         Ok(ModelDef {
-            provider: required(self.provider, "models.*.provider")?,
+            provider,
             model: required(self.model, "models.*.model")?,
             cli: self.cli,
-            endpoint: self.endpoint,
-            region: self.region,
-            deployment: self.deployment,
-            base_url: self.base_url,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             cache: self.cache,
@@ -1643,10 +1666,10 @@ impl From<ModelDef> for ModelDefLayer {
             provider: Some(model.provider),
             model: Some(model.model),
             cli: model.cli,
-            endpoint: model.endpoint,
-            region: model.region,
-            deployment: model.deployment,
-            base_url: model.base_url,
+            endpoint: None,
+            region: None,
+            deployment: None,
+            base_url: None,
             max_tokens: model.max_tokens,
             temperature: model.temperature,
             cache: model.cache,
@@ -3026,10 +3049,9 @@ state:
         assert_eq!(model.provider(), "azure-openai");
         assert_eq!(model.model(), "gpt-5");
         assert_eq!(model.cli(), Some("az ai"));
-        assert_eq!(model.endpoint(), Some("https://example.test"));
-        assert_eq!(model.region(), Some("eu-west-2"));
-        assert_eq!(model.deployment(), Some("prod"));
-        assert_eq!(model.base_url(), Some("https://base.example.test"));
+        // endpoint/region/deployment/base_url are still accepted on the wire
+        // (the YAML above sets them) but are dropped at finalize per D64, so
+        // they are no longer queryable on ModelDef.
         assert_eq!(model.max_tokens(), Some(4096));
         assert_eq!(model.temperature(), Some(0.2));
         assert_eq!(model.cache(), Some(true));

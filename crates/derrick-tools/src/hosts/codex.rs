@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
+use crate::catalogue;
 use crate::process::{is_available, run_host, CommandSpec};
 use crate::{HostAdapter, HostError, HostRequest, HostResponse};
 
@@ -53,7 +54,7 @@ impl HostAdapter for CodexHost {
         ];
         if let Some(ref model) = request.model {
             args.push(OsString::from("--model"));
-            args.push(OsString::from(model.as_str()));
+            args.push(OsString::from(catalogue::normalize(self.name(), model)));
         }
         args.push(OsString::from(&request.prompt));
         let spec = CommandSpec {

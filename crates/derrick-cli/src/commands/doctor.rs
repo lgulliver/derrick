@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use derrick_config::{Config, Host, ModelDef, Runner, StackBackendKind, SubstrateBackendKind};
-use derrick_models::AuthStore;
 use derrick_substrate_native::NativeSubstrate;
 use serde_json::json;
 use serde_json::Value;
@@ -90,16 +89,10 @@ async fn add_config_driven_checks(repo_root: &Path, config: &Config, checks: &mu
         checks.push(binary_check(&binary, true));
     }
 
-    let mut auth = AuthStore::from_env();
-    for (provider, env_var) in requirements.env_vars {
-        auth.require(&provider, &env_var);
-    }
-    for (provider, env_var) in auth.missing_required() {
-        checks.push(Check::fail(
-            format!("{provider} credentials"),
-            format!("{env_var} is not set"),
-            format!("export {env_var} before running derrick"),
-        ));
+    // D64: validate every role's model/host binding against the curated
+    // catalogue using the same core that backs `derrick models check`.
+    for model_check in crate::commands::models::models_check_core(config) {
+        checks.push(Check::from_model_check(model_check));
     }
 
     match config.tools().substrate().backend() {
@@ -204,7 +197,6 @@ fn verify_sqlite_header(path: &Path) -> Result<(), String> {
 #[derive(Default)]
 struct Requirements {
     binaries: BTreeSet<String>,
-    env_vars: BTreeSet<(String, String)>,
 }
 
 fn derive_requirements(config: &Config) -> Requirements {
@@ -256,6 +248,9 @@ fn derive_requirements(config: &Config) -> Requirements {
 }
 
 fn add_model_requirement(model: &ModelDef, requirements: &mut Requirements) {
+    // Post-D64, inference is host-delegated: the provider name equals the host
+    // CLI binary name (after the legacy-alias remap applied at config finalize).
+    // The only non-host provider is `shell`, whose binary comes from its `cli`.
     match model.provider() {
         "shell" => {
             if let Some(cli) = model.cli() {
@@ -264,46 +259,8 @@ fn add_model_requirement(model: &ModelDef, requirements: &mut Requirements) {
                 }
             }
         }
-        "openai-cli" => {
-            requirements.binaries.insert("codex".to_owned());
-        }
-        "copilot-cli" => {
-            requirements.binaries.insert("copilot".to_owned());
-        }
-        "anthropic" => {
-            requirements
-                .env_vars
-                .insert(("anthropic".to_owned(), "ANTHROPIC_API_KEY".to_owned()));
-        }
-        "openai" => {
-            requirements
-                .env_vars
-                .insert(("openai".to_owned(), "OPENAI_API_KEY".to_owned()));
-        }
-        "google" => {
-            requirements
-                .env_vars
-                .insert(("google".to_owned(), "GOOGLE_API_KEY".to_owned()));
-        }
-        "bedrock" => {
-            requirements
-                .env_vars
-                .insert(("bedrock".to_owned(), "AWS_ACCESS_KEY_ID".to_owned()));
-        }
-        "azure-openai" => {
-            requirements
-                .env_vars
-                .insert(("azure-openai".to_owned(), "AZURE_OPENAI_API_KEY".to_owned()));
-        }
-        "ollama" => {
-            requirements
-                .env_vars
-                .insert(("ollama".to_owned(), "OLLAMA_HOST".to_owned()));
-        }
-        "llamacpp" => {
-            requirements
-                .env_vars
-                .insert(("llamacpp".to_owned(), "LLAMACPP_BASE_URL".to_owned()));
+        "claude" | "codex" | "copilot" | "opencode" | "aider" => {
+            requirements.binaries.insert(model.provider().to_owned());
         }
         _ => {}
     }
@@ -314,6 +271,8 @@ fn host_binary(host: Host) -> &'static str {
         Host::Claude => "claude",
         Host::Codex => "codex",
         Host::Copilot => "copilot",
+        Host::Opencode => "opencode",
+        Host::Aider => "aider",
     }
 }
 
@@ -627,6 +586,28 @@ impl Check {
             status: CheckStatus::Fail,
             message: message.into(),
             remediation: Some(remediation.into()),
+        }
+    }
+
+    /// Converts a `derrick models check` finding into a doctor check.
+    fn from_model_check(check: crate::commands::models::ModelCheck) -> Self {
+        use crate::commands::models::CheckLevel;
+        let status = match check.level {
+            CheckLevel::Pass => CheckStatus::Pass,
+            CheckLevel::Warn => CheckStatus::Warn,
+            CheckLevel::Fail => CheckStatus::Fail,
+        };
+        let remediation = match check.level {
+            CheckLevel::Warn | CheckLevel::Fail => Some(
+                "run `derrick models check` and align the model/host with the catalogue".to_owned(),
+            ),
+            CheckLevel::Pass => None,
+        };
+        Self {
+            name: check.subject,
+            status,
+            message: check.message,
+            remediation,
         }
     }
 }

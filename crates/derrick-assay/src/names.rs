@@ -7,6 +7,8 @@ pub fn host_name(host: Host) -> &'static str {
         Host::Claude => "claude",
         Host::Codex => "codex",
         Host::Copilot => "copilot",
+        Host::Opencode => "opencode",
+        Host::Aider => "aider",
     }
 }
 

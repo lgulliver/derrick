@@ -97,11 +97,19 @@ pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliErr
         None => return Ok(CliExitCode::Success),
     };
 
-    if resolved.greenfield {
+    let outcome = if resolved.greenfield {
         greenfield_init(&repo_root, &resolved).await
     } else {
         brownfield_init(&repo_root, &resolved).await
+    };
+
+    // D15/D64: after the config exists, run the soft (WARN-only) model/host
+    // check so any catalogue or installation issues surface at init time.
+    if let Ok(config) = derrick_config::Config::load_layered(&repo_root) {
+        crate::commands::models::emit_soft_warnings(&config);
     }
+
+    outcome
 }
 
 fn resolve_options(
@@ -603,6 +611,7 @@ pub(crate) fn available_model_choices() -> Vec<(&'static str, &'static str)> {
             "claude-sonnet",
             "balanced default for drafting and summaries",
         ),
+        ("claude-haiku", "fast and cheap for summaries"),
         ("codex-gpt5", "good for code review and implementation"),
         ("copilot", "good for Copilot CLI workflows"),
     ]
