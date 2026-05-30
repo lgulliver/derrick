@@ -3,11 +3,21 @@
   "checkpoint_id": "a225e50240a9",
   "strategy": "manual-commit",
   "branch": "feat/foreman-adaptive-model-selection",
-  "checkpoints_count": 1,
+  "checkpoints_count": 2,
   "files_touched": [
+    "Cargo.lock",
     "DESIGN.md",
+    "crates/derrick-claude/Cargo.toml",
+    "crates/derrick-claude/src/dispatcher.rs",
+    "crates/derrick-cli/src/commands/foreman.rs",
+    "crates/derrick-cli/src/commands/models.rs",
+    "crates/derrick-cli/tests/cli.rs",
+    "crates/derrick-config/src/lib.rs",
+    "crates/derrick-copilot/Cargo.toml",
     "crates/derrick-copilot/src/local_dispatcher.rs",
+    "crates/derrick-flow/src/steps.rs",
     "crates/derrick-hand/src/lib.rs",
+    "crates/derrick-models/tests/models.rs",
     "crates/derrick-stack/src/lib.rs",
     "crates/derrick-substrate-native/migrations/0004_ticket_complexity.sql",
     "crates/derrick-substrate-native/src/foreman.rs",
@@ -17,7 +27,8 @@
     "crates/derrick-substrate/src/lib.rs",
     "crates/derrick-substrate/src/types.rs",
     "crates/derrick-tools/src/catalogue.rs",
-    "crates/derrick-tools/src/lib.rs"
+    "crates/derrick-tools/src/lib.rs",
+    "templates/derrick.yaml.in"
   ],
   "sessions": [
     {
@@ -25,13 +36,19 @@
       "transcript": "/a2/25e50240a9/0/full.jsonl",
       "content_hash": "/a2/25e50240a9/0/content_hash.txt",
       "prompt": "/a2/25e50240a9/0/prompt.txt"
+    },
+    {
+      "metadata": "/a2/25e50240a9/1/metadata.json",
+      "transcript": "/a2/25e50240a9/1/full.jsonl",
+      "content_hash": "/a2/25e50240a9/1/content_hash.txt",
+      "prompt": "/a2/25e50240a9/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 19029,
-    "cache_creation_tokens": 247041,
-    "cache_read_tokens": 9226697,
-    "output_tokens": 67477,
-    "api_call_count": 71
+    "input_tokens": 19049,
+    "cache_creation_tokens": 339563,
+    "cache_read_tokens": 9616832,
+    "output_tokens": 72398,
+    "api_call_count": 81
   }
 }
