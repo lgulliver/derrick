@@ -1,0 +1,57 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "75e9043151b7",
+  "session_id": "449b62bd-5728-4afc-96c7-4626a270f588",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-30T16:45:07.357002Z",
+  "branch": "claude/practical-kapitsa-9493a5",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "crates/derrick-cli/src/commands/add.rs",
+    "crates/derrick-cli/src/commands/mod.rs",
+    "crates/derrick-cli/src/commands/prompt_input.rs",
+    "crates/derrick-cli/src/commands/run.rs",
+    "crates/derrick-cli/tests/cli.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "10352b0ba444",
+  "token_usage": {
+    "input_tokens": 23314,
+    "cache_creation_tokens": 78121,
+    "cache_read_tokens": 2635837,
+    "output_tokens": 19457,
+    "api_call_count": 37
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-30T16:45:07.340377Z",
+    "agent_lines": 307,
+    "agent_removed": 9,
+    "human_added": 8,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 315,
+    "total_lines_changed": 324,
+    "agent_percentage": 97.53086419753086,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 307,
+      "agent_lines_removed": 9
+    }
+  ]
+}

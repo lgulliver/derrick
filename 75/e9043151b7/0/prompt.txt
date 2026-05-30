@@ -1,0 +1,24 @@
+derrick should also be able to support passing data to speckit specify e.g. "/speckit.specify
+
+Build the Chronographer foundation.
+
+Chronographer is a freemium SaaS for RPG DMs/GMs. This feature should establish the base Nuxt/Vue application, authentication, user ownership, project layout, database connection, and core application shell.
+
+Scope:
+- Set up Nuxt, Vue 3, TypeScript, Tailwind CSS, and shadcn-vue.
+- Set up Neon Postgres with Drizzle ORM.
+- Set up Better Auth for sign up, sign in, sign out, and session handling.
+- Create the authenticated app shell with sidebar navigation.
+- Add base routes for Dashboard, Campaigns, Sessions, World, Settings.
+- Ensure all authenticated data is scoped to the current user.
+- Add initial PostHog and Sentry integration points.
+- Add basic empty states and dark RPG-inspired styling.
+
+Do not implement campaigns, sessions, transcription, AI, billing, or world objects yet.
+
+Success criteria:
+- A user can sign up, sign in, and sign out.
+- Authenticated users see the Chronographer app shell.
+- Unauthenticated users are redirected to sign in.
+- The database connection and migration flow work.
+- The UI has the initial dark fantasy design direction."
