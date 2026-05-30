@@ -17,7 +17,9 @@ models:
     model: gpt-5.5
   copilot:
     provider: copilot
-    model: gpt-5.4
+    # `auto` (D67): the foreman picks the best copilot model per ticket by
+    # complexity. Pin a specific id here to override.
+    model: auto
 roles:
   proposer: claude-opus
   drafter: claude-sonnet

@@ -217,6 +217,40 @@ pub trait HandDispatcher: Send + Sync {
     async fn dispatch(&self, ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError>;
 }
 
+/// Best-effort removal of a per-ticket hand worktree directory via
+/// `git worktree remove --force`, rooted at `repo_root`. Shared by the local
+/// hand dispatchers so they stay behaviourally identical; the row is forgotten
+/// separately via [`NativeSubstrate::forget_ticket_worktree`]. Logs on failure
+/// (the foreman TTL cleanup pass is the backstop) and never propagates.
+pub async fn prune_ticket_worktree_dir(repo_root: &Path, worktree_path: &Path) {
+    let result = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "remove", "--force"])
+        .arg(worktree_path)
+        .kill_on_drop(true)
+        .output()
+        .await;
+    match result {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            warn!(
+                worktree = %worktree_path.display(),
+                %stderr,
+                "git worktree remove failed during hand worktree cleanup"
+            );
+        }
+        Err(error) => {
+            warn!(
+                ?error,
+                worktree = %worktree_path.display(),
+                "failed to spawn git worktree remove during hand worktree cleanup"
+            );
+        }
+    }
+}
+
 /// Human-hand dispatcher: emits a `Note` event marking the ticket ready
 /// for human work and leaves it `InFlight` until the user runs
 /// `derrick ticket review`.

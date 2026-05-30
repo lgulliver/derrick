@@ -753,9 +753,12 @@ fn doctor_exit_code_equals_fail_count() -> TestResult {
     let path = mock_path(dir.path(), &["git"])?;
 
     // With only `git` on PATH the host CLIs are all absent, so doctor fails the
-    // two pipeline-host binary checks (claude, codex) plus the five role-binding
-    // host checks (D65 models-check core), for seven failures total. The exit
-    // code equals that count.
+    // two pipeline-host binary checks (claude, codex) plus the per-model host
+    // checks (D65 models-check core). The executor role binds the `copilot`
+    // model whose id is now `auto` (D67): `auto` is foreman-selected per ticket,
+    // but the host CLI must still be installed, so the missing `copilot` binary
+    // FAILs before the `auto` short-circuit — the host check runs first. That
+    // leaves seven failures total, and the exit code equals that count.
     let output = derrick()?
         .current_dir(dir.path())
         .env("PATH", path)

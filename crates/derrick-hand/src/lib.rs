@@ -22,13 +22,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use derrick_substrate::{
-    EventKind, EventScope, Hand, HandId, HandKind, Substrate, SubstrateError, Ticket,
+    Complexity, EventKind, EventScope, Hand, HandId, HandKind, Substrate, SubstrateError, Ticket,
 };
 use derrick_substrate_native::foreman::{
-    DispatchContext, DispatchError, DispatchResult, HandDispatcher,
+    prune_ticket_worktree_dir, DispatchContext, DispatchError, DispatchResult, HandDispatcher,
 };
 use derrick_substrate_native::NativeSubstrate;
-use derrick_tools::{HostRegistry, HostRequest};
+use derrick_tools::{select_model, HostRegistry, HostRequest, ModelChoice, Tier};
 use tokio::process::Command;
 use tracing::{info, instrument, warn};
 
@@ -87,19 +87,31 @@ pub struct HostCliHandDispatcher {
     hosts: Arc<HostRegistry>,
     host_name: &'static str,
     hand_kind: HandKind,
-    model: Option<String>,
+    model_choice: ModelChoice,
     config: HostCliHandDispatcherConfig,
+}
+
+/// Map a ticket's optional [`Complexity`] to a [`Tier`] for adaptive model
+/// selection (D67). `None` and `Standard` both resolve to `Standard`.
+fn tier_for(complexity: Option<Complexity>) -> Tier {
+    match complexity {
+        Some(Complexity::Low) => Tier::Light,
+        Some(Complexity::Heavy) => Tier::Heavy,
+        // `None`, `Standard`, and any future variant default to Standard.
+        _ => Tier::Standard,
+    }
 }
 
 impl HostCliHandDispatcher {
     /// Construct a dispatcher for `host_name`, registering hands of
-    /// `hand_kind` and passing `model` (RAW) to the host adapter.
+    /// `hand_kind`. The per-ticket model is resolved at dispatch time from
+    /// `model_choice` and the ticket's complexity (D67).
     pub fn new(
         substrate: Arc<NativeSubstrate>,
         hosts: Arc<HostRegistry>,
         host_name: &'static str,
         hand_kind: HandKind,
-        model: Option<String>,
+        model_choice: ModelChoice,
         config: HostCliHandDispatcherConfig,
     ) -> Self {
         Self {
@@ -107,7 +119,7 @@ impl HostCliHandDispatcher {
             hosts,
             host_name,
             hand_kind,
-            model,
+            model_choice,
             config,
         }
     }
@@ -241,34 +253,18 @@ impl HostCliHandDispatcher {
         Ok(worktree_path)
     }
 
-    /// Best-effort removal of a per-ticket worktree after a failed dispatch so
-    /// the foreman cleanup pass (worktree_ttl) does not have to reclaim it.
-    /// Logs but does not propagate failures.
-    async fn cleanup_worktree(&self, worktree_path: &std::path::Path) {
-        let result = Command::new("git")
-            .args(["worktree", "remove", "--force"])
-            .arg(worktree_path)
-            .current_dir(&self.config.repo_root)
-            .kill_on_drop(true)
-            .output()
-            .await;
-        match result {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-                warn!(
-                    worktree = %worktree_path.display(),
-                    %stderr,
-                    "git worktree remove failed during host CLI cleanup"
-                );
-            }
-            Err(error) => {
-                warn!(
-                    ?error,
-                    worktree = %worktree_path.display(),
-                    "failed to spawn git worktree remove during host CLI cleanup"
-                );
-            }
+    /// Remove a per-ticket worktree (on-disk directory + tracked substrate row)
+    /// once it is no longer needed — a terminal ticket state or a released hand.
+    /// Best-effort: logs but does not propagate failures, since the foreman TTL
+    /// cleanup pass is the backstop for anything left behind.
+    async fn cleanup_ticket_worktree(&self, ticket_id: &str, worktree_path: &std::path::Path) {
+        prune_ticket_worktree_dir(&self.config.repo_root, worktree_path).await;
+        if let Err(error) = self.substrate.forget_ticket_worktree(ticket_id).await {
+            warn!(
+                ?error,
+                ticket = %ticket_id,
+                "forget_ticket_worktree failed during host CLI cleanup"
+            );
         }
     }
 }
@@ -321,9 +317,26 @@ impl HandDispatcher for HostCliHandDispatcher {
             .ensure_worktree(ticket, &branch, &ctx.parent_branch)
             .await?;
 
+        // 3b. Track the worktree as a ticket-keyed substrate row so the foreman
+        //     TTL cleanup pass can reclaim it if this process dies before the
+        //     deterministic terminal-state removal below runs. Still pre-assign,
+        //     so a failure leaves the ticket Ready.
+        if let Err(error) = self
+            .substrate
+            .register_ticket_worktree(ticket.id.as_str(), &branch, &worktree_path)
+            .await
+        {
+            prune_ticket_worktree_dir(&self.config.repo_root, &worktree_path).await;
+            return Err(DispatchError::Substrate(error));
+        }
+
         // 4. Atomic Ready -> InFlight + owner = hand. From here every failure
         //    path must release the ticket and tear down the worktree.
-        self.substrate.assign_to_hand(&ticket.id, &hand_id).await?;
+        if let Err(error) = self.substrate.assign_to_hand(&ticket.id, &hand_id).await {
+            self.cleanup_ticket_worktree(ticket.id.as_str(), &worktree_path)
+                .await;
+            return Err(DispatchError::Substrate(error));
+        }
 
         // 5. Run the rest of dispatch with cleanup-on-error: any error after
         //    assignment releases the hand back to Ready and removes the
@@ -348,7 +361,8 @@ impl HandDispatcher for HostCliHandDispatcher {
             let _ = self
                 .record_note(ctx, format!("{} hand released: {reason}", self.host_name))
                 .await;
-            self.cleanup_worktree(&worktree_path).await;
+            self.cleanup_ticket_worktree(ticket.id.as_str(), &worktree_path)
+                .await;
             // Surface the failure to the foreman so it is NOT recorded as
             // dispatched (foreman.rs Phase 3). A released ticket is re-queued
             // on the next tick.
@@ -381,7 +395,11 @@ impl HostCliHandDispatcher {
         let body = self.render_body(ticket, branch, &ctx.parent_branch, worktree_path);
         let mut request = HostRequest::new(body, worktree_path);
         request.headless = true;
-        request.model = self.model.clone();
+        request.model = select_model(
+            self.host_name,
+            &self.model_choice,
+            tier_for(ticket.complexity),
+        );
         request.timeout = self.config.poll_timeout;
 
         // If auto-dispatch is off, leave the ticket InFlight and surface a
@@ -441,7 +459,14 @@ impl HostCliHandDispatcher {
             ),
         )
         .await?;
-        self.check_terminal_state(ctx).await;
+        // If the hand drove the ticket to a terminal hand state (it ran
+        // `derrick ticket review`, so the branch is pushed and the checkout is
+        // dead weight), remove the worktree now. Otherwise keep it: an operator
+        // may still need it, and the foreman TTL pass reclaims abandoned ones.
+        if self.check_terminal_state(ctx).await {
+            self.cleanup_ticket_worktree(ctx.ticket.id.as_str(), worktree_path)
+                .await;
+        }
         Ok(())
     }
 
@@ -459,13 +484,17 @@ impl HostCliHandDispatcher {
         Ok(())
     }
 
-    async fn check_terminal_state(&self, ctx: &DispatchContext<'_>) {
+    /// Inspect the ticket after the host CLI exits. Returns `true` when it
+    /// reached a terminal hand state (`InReview`/`Done`) so the caller can tear
+    /// down the worktree; `false` otherwise (unknown/in-flight — keep it).
+    async fn check_terminal_state(&self, ctx: &DispatchContext<'_>) -> bool {
         match self.substrate.get_ticket(&ctx.ticket.id).await {
             Ok(Some(ticket)) => {
-                if matches!(
+                let terminal = matches!(
                     ticket.state,
                     derrick_substrate::TicketState::InReview | derrick_substrate::TicketState::Done
-                ) {
+                );
+                if terminal {
                     info!(
                         ticket = %ticket.id,
                         state = %ticket.state,
@@ -481,12 +510,15 @@ impl HostCliHandDispatcher {
                          need to run `derrick ticket review`"
                     );
                 }
+                terminal
             }
             Ok(None) => {
                 warn!(ticket = %ctx.ticket.id, host = self.host_name, "ticket not found after host CLI exit");
+                false
             }
             Err(error) => {
                 warn!(?error, ticket = %ctx.ticket.id, host = self.host_name, "failed to read ticket after host CLI exit");
+                false
             }
         }
     }
@@ -538,6 +570,119 @@ mod tests {
             .await
             .map_err(|error| format!("create: {error}"))
             .unwrap_or_else(|message| panic!("{message}"))
+    }
+
+    async fn make_ticket_with_complexity(
+        substrate: &NativeSubstrate,
+        id: &str,
+        complexity: Option<derrick_substrate::Complexity>,
+    ) -> Ticket {
+        let mut new = NewTicket::new(
+            TicketId::new(id)
+                .map_err(|error| format!("ticket id: {error}"))
+                .unwrap_or_else(|message| panic!("{message}")),
+            None,
+            None,
+            "title",
+            "body content for ticket",
+            Vec::new(),
+        )
+        .map_err(|error| format!("new ticket: {error}"))
+        .unwrap_or_else(|message| panic!("{message}"));
+        new.complexity = complexity;
+        substrate
+            .create_ticket(new)
+            .await
+            .map_err(|error| format!("create: {error}"))
+            .unwrap_or_else(|message| panic!("{message}"))
+    }
+
+    /// Dispatch a ticket through a StubHost and return the model the request
+    /// carried. Shared by the per-ticket selection tests below.
+    async fn captured_model_for(
+        complexity: Option<derrick_substrate::Complexity>,
+        model_choice: ModelChoice,
+        ticket_id: &str,
+    ) -> Option<String> {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let repo = tempdir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        init_repo(&repo);
+        let worktree_root = tempdir.path().join("host-worktrees");
+
+        let state_td = TempDir::new_in(tempdir.path()).expect("state td");
+        let substrate = open_substrate(&state_td).await;
+        let ticket = make_ticket_with_complexity(&substrate, ticket_id, complexity).await;
+
+        let captured = Arc::new(Mutex::new(None));
+        let mut registry = HostRegistry::empty();
+        registry.register(
+            "claude",
+            Box::new(StubHost {
+                name: "claude",
+                captured: Arc::clone(&captured),
+            }),
+        );
+
+        let dispatcher = HostCliHandDispatcher::new(
+            Arc::clone(&substrate),
+            Arc::new(registry),
+            "claude",
+            HandKind::Claude,
+            model_choice,
+            test_config(repo, worktree_root),
+        );
+
+        dispatcher
+            .dispatch(&ctx(&ticket, tempdir.path()))
+            .await
+            .expect("dispatch");
+        let request = captured
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("host run invoked");
+        request.model
+    }
+
+    #[tokio::test]
+    async fn auto_selects_heavy_model_for_heavy_ticket() {
+        let model = captured_model_for(
+            Some(derrick_substrate::Complexity::Heavy),
+            ModelChoice::Auto { bias: None },
+            "drk-300",
+        )
+        .await;
+        assert_eq!(model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[tokio::test]
+    async fn auto_selects_light_model_for_low_ticket() {
+        let model = captured_model_for(
+            Some(derrick_substrate::Complexity::Low),
+            ModelChoice::Auto { bias: None },
+            "drk-301",
+        )
+        .await;
+        assert_eq!(model.as_deref(), Some("claude-haiku-4-5"));
+    }
+
+    #[tokio::test]
+    async fn auto_selects_standard_model_for_unset_complexity() {
+        let model = captured_model_for(None, ModelChoice::Auto { bias: None }, "drk-302").await;
+        assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[tokio::test]
+    async fn explicit_pin_wins_over_complexity() {
+        // A heavy ticket would auto-pick opus, but the pin must win.
+        let model = captured_model_for(
+            Some(derrick_substrate::Complexity::Heavy),
+            ModelChoice::Pinned("claude-haiku-4-5".to_owned()),
+            "drk-303",
+        )
+        .await;
+        assert_eq!(model.as_deref(), Some("claude-haiku-4-5"));
     }
 
     /// Host adapter that captures the request it was handed and returns a
@@ -661,7 +806,7 @@ mod tests {
             Arc::new(registry),
             "codex",
             HandKind::Codex,
-            Some("openai/gpt-5.5".to_owned()),
+            ModelChoice::Pinned("openai/gpt-5.5".to_owned()),
             test_config(repo.clone(), worktree_root.clone()),
         );
 
@@ -672,14 +817,17 @@ mod tests {
             .unwrap_or_else(|message| panic!("{message}"));
         assert!(!result.completed_synchronously);
 
-        // (2) Captured request carries the RAW model, headless = true, and the
-        // cwd is the per-ticket worktree (NOT the shared worktree_root).
+        // (2) Captured request carries the per-host-normalised model (the
+        // pinned `openai/gpt-5.5` has its `openai/` prefix stripped for the
+        // bare-id codex host by `select_model`; the adapter re-normalising is a
+        // no-op), headless = true, and the cwd is the per-ticket worktree (NOT
+        // the shared worktree_root).
         let request = captured
             .lock()
             .expect("lock")
             .clone()
             .unwrap_or_else(|| panic!("host run was invoked"));
-        assert_eq!(request.model, Some("openai/gpt-5.5".to_owned()));
+        assert_eq!(request.model, Some("gpt-5.5".to_owned()));
         assert!(request.headless);
         let expected_worktree = worktree_root.join("drk-200");
         assert_eq!(request.cwd, expected_worktree);
@@ -689,6 +837,18 @@ mod tests {
         assert!(
             expected_worktree.join(".git").exists(),
             "worktree .git not found at {expected_worktree:?}"
+        );
+
+        // The StubHost did not run `derrick ticket review`, so the ticket is
+        // still InFlight (non-terminal): the worktree is kept and tracked as a
+        // ticket-keyed row for the foreman TTL backstop.
+        let rows = substrate
+            .list_worktrees(false)
+            .await
+            .expect("list worktrees");
+        assert!(
+            rows.iter().any(|w| w.run_id == "ticket:drk-200"),
+            "expected a tracked ticket worktree row, got {rows:?}"
         );
 
         // (3) Ticket transitioned Ready -> InFlight, owned by the new hand.
@@ -733,7 +893,7 @@ mod tests {
             Arc::new(registry),
             "codex",
             HandKind::Codex,
-            Some("openai/gpt-5.5".to_owned()),
+            ModelChoice::Pinned("openai/gpt-5.5".to_owned()),
             test_config(repo, worktree_root.clone()),
         );
 
@@ -771,7 +931,7 @@ mod tests {
             Arc::new(registry),
             "codex",
             HandKind::Codex,
-            Some("openai/gpt-5.5".to_owned()),
+            ModelChoice::Pinned("openai/gpt-5.5".to_owned()),
             test_config(repo, worktree_root.clone()),
         );
 
@@ -791,6 +951,112 @@ mod tests {
         assert!(
             !worktree_root.join("drk-202").join(".git").exists(),
             "worktree should be removed after a failed dispatch"
+        );
+        // The tracked row is forgotten too, so the foreman does not later try to
+        // reclaim an already-removed worktree.
+        assert!(
+            substrate
+                .list_worktrees(true)
+                .await
+                .expect("list worktrees")
+                .is_empty(),
+            "ticket worktree row should be forgotten after a failed dispatch"
+        );
+    }
+
+    /// Host adapter that simulates a hand running `derrick ticket review`:
+    /// it transitions the (InFlight) ticket to InReview before returning
+    /// success, so the dispatcher observes a terminal hand state.
+    struct ReviewingHost {
+        name: &'static str,
+        substrate: Arc<NativeSubstrate>,
+        ticket_id: TicketId,
+        branch: String,
+    }
+
+    #[async_trait]
+    impl HostAdapter for ReviewingHost {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn run(&self, _request: HostRequest) -> Result<HostResponse, HostError> {
+            self.substrate
+                .transition_to_in_review(
+                    &self.ticket_id,
+                    derrick_substrate::InReviewMetadata {
+                        branch: self.branch.clone(),
+                        pr_url: None,
+                        pr_number: None,
+                        head_sha: "deadbeef".to_owned(),
+                    },
+                )
+                .await
+                .expect("transition to in_review");
+            Ok(HostResponse {
+                stdout: "ok\n".to_owned(),
+                stderr: String::new(),
+                exit_code: 0,
+                elapsed: Duration::from_millis(1),
+                tokens_in: 0,
+                tokens_out: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_ticket_removes_worktree_and_forgets_row() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let repo = tempdir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        init_repo(&repo);
+        let worktree_root = tempdir.path().join("host-worktrees");
+
+        let state_td = TempDir::new_in(tempdir.path()).expect("state td");
+        let substrate = open_substrate(&state_td).await;
+        let ticket = make_ticket(&substrate, "drk-203").await;
+
+        let mut registry = HostRegistry::empty();
+        registry.register(
+            "codex",
+            Box::new(ReviewingHost {
+                name: "codex",
+                substrate: Arc::clone(&substrate),
+                ticket_id: ticket.id.clone(),
+                branch: "derrick/ad-hoc/drk-203".to_owned(),
+            }),
+        );
+        let dispatcher = HostCliHandDispatcher::new(
+            Arc::clone(&substrate),
+            Arc::new(registry),
+            "codex",
+            HandKind::Codex,
+            ModelChoice::Auto { bias: None },
+            test_config(repo, worktree_root.clone()),
+        );
+
+        dispatcher
+            .dispatch(&ctx(&ticket, tempdir.path()))
+            .await
+            .expect("dispatch");
+
+        // Hand drove the ticket to InReview, so the worktree dir is removed and
+        // its tracked row is forgotten.
+        assert!(
+            !worktree_root.join("drk-203").join(".git").exists(),
+            "worktree should be removed once the ticket reaches a terminal state"
+        );
+        assert!(
+            substrate
+                .list_worktrees(true)
+                .await
+                .expect("list worktrees")
+                .is_empty(),
+            "ticket worktree row should be forgotten on terminal state"
         );
     }
 }

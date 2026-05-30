@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use derrick_config::Site;
 use derrick_substrate::{
-    Batch, BatchName, BlockReason, Event, EventId, EventKind, EventScope, ForemanMode,
+    Batch, BatchName, BlockReason, Complexity, Event, EventId, EventKind, EventScope, ForemanMode,
     ForemanStatus, Hand, HandId, HandKind, InReviewMetadata, Link, LinkKind, ManualDoneAttestation,
     NewEvent, NewTicket, Substrate, SubstrateError, Ticket, TicketFilter, TicketId, TicketState,
     TypedEvent,
@@ -16,11 +16,12 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use tokio::task;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 const READER_POOL_SIZE: usize = 4;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_state_machine_integrity.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_hand_kinds.sql");
+const MIGRATION_0004: &str = include_str!("../migrations/0004_ticket_complexity.sql");
 
 /// Configuration for opening the native substrate.
 #[derive(Clone, Debug)]
@@ -251,6 +252,82 @@ impl NativeSubstrate {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(sql_error)?;
             Ok(rows)
+        })
+        .await
+    }
+
+    /// Track a per-ticket hand worktree so the foreman TTL cleanup pass can
+    /// reclaim it if it is ever abandoned (crash before terminal-state removal).
+    ///
+    /// Unlike [`reserve_worktree`](Self::reserve_worktree) — which derives the
+    /// path from the substrate's `worktree_root` and is keyed on a run id — hand
+    /// dispatchers choose their own worktree root and use the ticket id as the
+    /// directory name, so the caller supplies the explicit `path`. The row reuses
+    /// the `worktrees` table with a `ticket:`-namespaced key to avoid colliding
+    /// with run-keyed rows. Re-dispatch (same ticket) reopens the existing row.
+    pub async fn register_ticket_worktree(
+        &self,
+        ticket_id: &str,
+        branch: &str,
+        path: &Path,
+    ) -> Result<(), SubstrateError> {
+        let key = ticket_worktree_key(ticket_id);
+        let branch = branch.to_owned();
+        let path = path.to_string_lossy().into_owned();
+        self.run_write(move |connection| {
+            // Reopen an existing row for this ticket first (re-dispatch case).
+            let updated = connection
+                .execute(
+                    "UPDATE worktrees SET branch = ?1, path = ?2, created_at = ?3, closed_at = NULL
+                     WHERE run_id = ?4",
+                    params![branch, path, now_text(), key],
+                )
+                .map_err(sql_error)?;
+            if updated == 0 {
+                connection
+                    .execute(
+                        "INSERT INTO worktrees (run_id, branch, path, created_at, closed_at)
+                         VALUES (?1, ?2, ?3, ?4, NULL)",
+                        params![key, branch, path, now_text()],
+                    )
+                    .map_err(conflict_or_sql)?;
+            }
+            insert_typed_event_raw(
+                connection,
+                &EventScope::Worktree {
+                    run_id: key.clone(),
+                },
+                &EventKind::WorktreeReserved {
+                    run_id: key.clone(),
+                    branch: branch.clone(),
+                },
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Forget a per-ticket hand worktree row after the dispatcher has removed the
+    /// on-disk checkout (ticket reached a terminal state or the hand was
+    /// released). No-op if the row was never registered.
+    pub async fn forget_ticket_worktree(&self, ticket_id: &str) -> Result<(), SubstrateError> {
+        let key = ticket_worktree_key(ticket_id);
+        self.run_write(move |connection| {
+            let deleted = connection
+                .execute("DELETE FROM worktrees WHERE run_id = ?1", params![key])
+                .map_err(sql_error)?;
+            if deleted > 0 {
+                insert_typed_event_raw(
+                    connection,
+                    &EventScope::Worktree {
+                        run_id: key.clone(),
+                    },
+                    &EventKind::WorktreeFinalized {
+                        run_id: key.clone(),
+                    },
+                )?;
+            }
+            Ok(())
         })
         .await
     }
@@ -636,15 +713,17 @@ impl Substrate for NativeSubstrate {
                 .execute(
                     "INSERT INTO tickets
                      (id, batch, ordinal, title, body, state, owner, merge_sha,
-                      block_reason, block_reason_detail, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'ready', NULL, NULL, NULL, NULL, ?6, ?6)",
+                      block_reason, block_reason_detail, created_at, updated_at,
+                      complexity)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'ready', NULL, NULL, NULL, NULL, ?6, ?6, ?7)",
                     params![
                         ticket.id.as_str(),
                         ticket.batch.as_ref().map(BatchName::as_str),
                         ticket.ordinal.map(i64::from),
                         ticket.title,
                         ticket.body,
-                        now
+                        now,
+                        ticket.complexity.map(|c| c.to_string())
                     ],
                 )
                 .map_err(conflict_or_sql)?;
@@ -2001,6 +2080,23 @@ fn migrate(connection: &mut Connection) -> Result<(), SubstrateError> {
     if version < 3 {
         run_migration_0003(connection)?;
     }
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    if version < 4 {
+        run_migration_0004(connection)?;
+    }
+    Ok(())
+}
+
+fn run_migration_0004(connection: &mut Connection) -> Result<(), SubstrateError> {
+    // A plain additive column: no table rebuild, so no foreign_keys toggle and
+    // no foreign_key_check (nothing references `tickets.complexity`).
+    let transaction = connection.transaction().map_err(sql_error)?;
+    transaction
+        .execute_batch(MIGRATION_0004)
+        .map_err(sql_error)?;
+    transaction.commit().map_err(sql_error)?;
     Ok(())
 }
 
@@ -2294,7 +2390,7 @@ fn select_optional_ticket(
     let row = connection
         .query_row(
             "SELECT id, batch, ordinal, title, body, state, owner, merge_sha,
-                    block_reason_detail, created_at, updated_at
+                    block_reason_detail, created_at, updated_at, complexity
              FROM tickets WHERE id = ?1",
             params![id.as_str()],
             ticket_base_from_row,
@@ -2474,6 +2570,7 @@ fn ticket_base_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ticket> {
     let block_reason_detail: Option<String> = row.get(8)?;
     let created_at: String = row.get(9)?;
     let updated_at: String = row.get(10)?;
+    let complexity: Option<String> = row.get(11)?;
 
     let block_reason = match block_reason_detail {
         Some(detail) => Some(parse_in_row(detail, |s| serde_json::from_str(&s))?),
@@ -2491,6 +2588,7 @@ fn ticket_base_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ticket> {
         owner: parse_optional_in_row(owner, HandId::new)?,
         merge_sha,
         block_reason,
+        complexity: parse_optional_in_row(complexity, |value| Complexity::from_str(&value))?,
         created_at: parse_time_in_row(created_at)?,
         updated_at: parse_time_in_row(updated_at)?,
     })
@@ -2789,6 +2887,12 @@ fn absolute_path(path: PathBuf) -> Result<PathBuf, SubstrateError> {
 
 fn now_text() -> String {
     format_time(Utc::now())
+}
+
+/// Namespaced `worktrees.run_id` key for a per-ticket hand worktree, kept
+/// distinct from run-keyed rows reserved by [`NativeSubstrate::reserve_worktree`].
+fn ticket_worktree_key(ticket_id: &str) -> String {
+    format!("ticket:{ticket_id}")
 }
 
 fn format_time(time: DateTime<Utc>) -> String {

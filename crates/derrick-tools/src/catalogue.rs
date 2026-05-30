@@ -21,6 +21,18 @@ pub enum ModelIdStyle {
     ProviderModel,
 }
 
+/// Complexity tier the foreman resolves a ticket to before picking a model
+/// within the configured host (D67). Ordered lightest to heaviest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Tier {
+    /// Smallest, cheapest model for low-complexity tickets.
+    Light,
+    /// The default tier for ordinary tickets.
+    Standard,
+    /// The strongest model for heavy tickets.
+    Heavy,
+}
+
 /// Catalogue entry for one host.
 #[derive(Clone, Copy, Debug)]
 pub struct HostModels {
@@ -33,6 +45,102 @@ pub struct HostModels {
     pub known: &'static [&'static str],
     /// How the host expects a model id to be shaped.
     pub id_style: ModelIdStyle,
+    /// Per-tier model ids for adaptive selection (D67), ordered light→heavy.
+    /// May be empty for hosts that expose no tier mapping.
+    pub tiers: &'static [(Tier, &'static str)],
+}
+
+impl HostModels {
+    /// Returns the model id for `tier` with a fallback that never silently
+    /// escalates to a heavier model than Standard.
+    ///
+    /// - exact tier match → that id;
+    /// - else the Standard-tier entry (the safe middle ground);
+    /// - else the host's `default_model`;
+    /// - else the FIRST (lightest) `tiers` entry;
+    /// - else `None`.
+    pub fn model_for_tier(&self, tier: Tier) -> Option<&'static str> {
+        if let Some((_, id)) = self.tiers.iter().find(|(entry, _)| *entry == tier) {
+            return Some(id);
+        }
+        if let Some((_, id)) = self
+            .tiers
+            .iter()
+            .find(|(entry, _)| *entry == Tier::Standard)
+        {
+            return Some(id);
+        }
+        if let Some(default) = self.default_model {
+            return Some(default);
+        }
+        self.tiers.first().map(|(_, id)| *id)
+    }
+}
+
+/// How a configured executor model id resolves at dispatch time (D67).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelChoice {
+    /// An explicit model id pinned in config — always wins.
+    Pinned(String),
+    /// Foreman-selected per ticket. `bias` overrides the ticket's resolved
+    /// tier when set (e.g. `auto:heavy`).
+    Auto {
+        /// Optional tier override parsed from `auto:<tier>`.
+        bias: Option<Tier>,
+    },
+}
+
+/// Parses a configured executor model id into a [`ModelChoice`].
+///
+/// The input is trimmed first, so surrounding whitespace never leaks into a
+/// pin nor blocks the `auto` sentinels (e.g. `" auto "` parses as Auto, and
+/// `"  anthropic/x  "` pins `anthropic/x`).
+///
+/// Returns [`ModelChoice::Auto`] ONLY for the exact strings `auto`,
+/// `auto:light`, `auto:standard`, and `auto:heavy`. Everything else —
+/// including `auto-foo` and the empty string — is treated as a pin.
+pub fn parse_model_choice(raw: &str) -> ModelChoice {
+    match raw.trim() {
+        "auto" => ModelChoice::Auto { bias: None },
+        "auto:light" => ModelChoice::Auto {
+            bias: Some(Tier::Light),
+        },
+        "auto:standard" => ModelChoice::Auto {
+            bias: Some(Tier::Standard),
+        },
+        "auto:heavy" => ModelChoice::Auto {
+            bias: Some(Tier::Heavy),
+        },
+        other => ModelChoice::Pinned(other.to_owned()),
+    }
+}
+
+/// Resolves the model id to pass to `host` for `choice` given the ticket's
+/// resolved `tier` (D67).
+///
+/// - [`ModelChoice::Pinned`] with non-blank content → that id, normalised
+///   for `host`;
+/// - [`ModelChoice::Pinned`] that is blank → `None` (host picks its default);
+/// - [`ModelChoice::Auto`] → the host's model for `bias.unwrap_or(tier)`,
+///   normalised for `host`.
+///
+/// The chosen id is always passed through [`HostCatalogue::normalize`] before
+/// returning, so a pinned `provider/model` reaches a bare-id host
+/// (claude/codex/copilot) with the leading `provider/` stripped (D65). This
+/// matters for the dispatchers that spawn their CLI directly with this value
+/// (`ClaudeHandDispatcher`, `LocalCopilotHandDispatcher`); `normalize` is
+/// idempotent, so the generic [`HostCliHandDispatcher`] re-normalising inside
+/// the adapter is a safe no-op, and auto-tier ids (already correctly shaped)
+/// are unaffected.
+pub fn select_model(host: &str, choice: &ModelChoice, tier: Tier) -> Option<String> {
+    match choice {
+        ModelChoice::Pinned(id) if !id.trim().is_empty() => Some(normalize(host, id.trim())),
+        ModelChoice::Pinned(_) => None,
+        ModelChoice::Auto { bias } => builtin()
+            .host(host)?
+            .model_for_tier(bias.unwrap_or(tier))
+            .map(|m| normalize(host, m)),
+    }
 }
 
 /// The full curated catalogue across all hosts.
@@ -90,12 +198,22 @@ pub const fn builtin() -> HostCatalogue {
                 default_model: Some("claude-opus-4-8"),
                 known: &["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
                 id_style: ModelIdStyle::BareId,
+                tiers: &[
+                    (Tier::Light, "claude-haiku-4-5"),
+                    (Tier::Standard, "claude-sonnet-4-6"),
+                    (Tier::Heavy, "claude-opus-4-8"),
+                ],
             },
             HostModels {
                 host: "codex",
                 default_model: Some("gpt-5.5"),
                 known: &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2-codex"],
                 id_style: ModelIdStyle::BareId,
+                tiers: &[
+                    (Tier::Light, "gpt-5.4-mini"),
+                    (Tier::Standard, "gpt-5.4"),
+                    (Tier::Heavy, "gpt-5.5"),
+                ],
             },
             HostModels {
                 host: "copilot",
@@ -108,6 +226,11 @@ pub const fn builtin() -> HostCatalogue {
                     "gpt-5.4-mini",
                 ],
                 id_style: ModelIdStyle::BareId,
+                tiers: &[
+                    (Tier::Light, "claude-haiku-4.5"),
+                    (Tier::Standard, "gpt-5.4"),
+                    (Tier::Heavy, "gpt-5.3-codex"),
+                ],
             },
             HostModels {
                 host: "opencode",
@@ -118,12 +241,22 @@ pub const fn builtin() -> HostCatalogue {
                     "openai/gpt-5.5",
                 ],
                 id_style: ModelIdStyle::ProviderModel,
+                tiers: &[
+                    (Tier::Light, "anthropic/claude-sonnet-4-6"),
+                    (Tier::Standard, "anthropic/claude-sonnet-4-6"),
+                    (Tier::Heavy, "anthropic/claude-opus-4-8"),
+                ],
             },
             HostModels {
                 host: "aider",
                 default_model: None,
                 known: &["anthropic/claude-sonnet-4-6", "openai/gpt-5.5"],
                 id_style: ModelIdStyle::ProviderModel,
+                tiers: &[
+                    (Tier::Light, "anthropic/claude-sonnet-4-6"),
+                    (Tier::Standard, "anthropic/claude-sonnet-4-6"),
+                    (Tier::Heavy, "openai/gpt-5.5"),
+                ],
             },
         ],
     }
@@ -216,5 +349,214 @@ mod tests {
             hosts,
             vec!["claude", "codex", "copilot", "opencode", "aider"]
         );
+    }
+
+    #[test]
+    fn parse_model_choice_auto_only_for_exact_forms() {
+        assert_eq!(parse_model_choice("auto"), ModelChoice::Auto { bias: None });
+        assert_eq!(
+            parse_model_choice("auto:light"),
+            ModelChoice::Auto {
+                bias: Some(Tier::Light)
+            }
+        );
+        assert_eq!(
+            parse_model_choice("auto:standard"),
+            ModelChoice::Auto {
+                bias: Some(Tier::Standard)
+            }
+        );
+        assert_eq!(
+            parse_model_choice("auto:heavy"),
+            ModelChoice::Auto {
+                bias: Some(Tier::Heavy)
+            }
+        );
+        // Anything else is a pin, including near-misses and the empty string.
+        for raw in ["auto-foo", "", "auto:weird", "AUTO", "claude-opus-4-8"] {
+            assert_eq!(
+                parse_model_choice(raw),
+                ModelChoice::Pinned(raw.to_owned()),
+                "{raw:?} should be a pin"
+            );
+        }
+    }
+
+    #[test]
+    fn model_for_tier_resolves_per_host() {
+        let cat = builtin();
+        let claude = cat.host("claude").expect("claude entry");
+        assert_eq!(claude.model_for_tier(Tier::Light), Some("claude-haiku-4-5"));
+        assert_eq!(
+            claude.model_for_tier(Tier::Standard),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(claude.model_for_tier(Tier::Heavy), Some("claude-opus-4-8"));
+
+        // aider now has an explicit Light tier (D67 fix): low-complexity aider
+        // tickets must NOT fall through to the heaviest model.
+        let aider = cat.host("aider").expect("aider entry");
+        assert_eq!(
+            aider.model_for_tier(Tier::Light),
+            Some("anthropic/claude-sonnet-4-6")
+        );
+        assert_eq!(
+            aider.model_for_tier(Tier::Standard),
+            Some("anthropic/claude-sonnet-4-6")
+        );
+        assert_eq!(aider.model_for_tier(Tier::Heavy), Some("openai/gpt-5.5"));
+    }
+
+    #[test]
+    fn every_host_resolves_all_three_tiers() {
+        // Every built-in host must map Light/Standard/Heavy to a non-empty id —
+        // no tier may fall through to nothing (D67).
+        let cat = builtin();
+        for entry in cat.entries {
+            for tier in [Tier::Light, Tier::Standard, Tier::Heavy] {
+                let id = entry.model_for_tier(tier);
+                assert!(
+                    id.is_some_and(|id| !id.is_empty()),
+                    "host `{}` resolves no model for {tier:?}",
+                    entry.host
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_tier_never_resolves_heavier_than_standard() {
+        // Construct a host with only a Standard tier so Light/Heavy must fall
+        // back. The fallback must land on Standard — never on a strictly-heavier
+        // entry (the old `tiers.last()` bug picked the heaviest).
+        let host = HostModels {
+            host: "synthetic",
+            default_model: None,
+            known: &[],
+            id_style: ModelIdStyle::ProviderModel,
+            tiers: &[(Tier::Standard, "standard-model")],
+        };
+        assert_eq!(host.model_for_tier(Tier::Light), Some("standard-model"));
+        assert_eq!(host.model_for_tier(Tier::Heavy), Some("standard-model"));
+        assert_eq!(host.model_for_tier(Tier::Standard), Some("standard-model"));
+    }
+
+    #[test]
+    fn parse_model_choice_trims_input() {
+        // Surrounding whitespace must not leak into a pin nor block `auto`.
+        assert_eq!(
+            parse_model_choice(" auto "),
+            ModelChoice::Auto { bias: None }
+        );
+        assert_eq!(
+            parse_model_choice("  anthropic/x  "),
+            ModelChoice::Pinned("anthropic/x".to_owned())
+        );
+    }
+
+    #[test]
+    fn select_model_pin_wins_and_blank_is_none() {
+        assert_eq!(
+            select_model(
+                "claude",
+                &ModelChoice::Pinned("claude-sonnet-4-6".to_owned()),
+                Tier::Light
+            ),
+            Some("claude-sonnet-4-6".to_owned())
+        );
+        assert_eq!(
+            select_model(
+                "claude",
+                &ModelChoice::Pinned("   ".to_owned()),
+                Tier::Heavy
+            ),
+            None
+        );
+        assert_eq!(
+            select_model("claude", &ModelChoice::Pinned(String::new()), Tier::Heavy),
+            None
+        );
+    }
+
+    #[test]
+    fn select_model_normalises_pin_per_host() {
+        // A pinned provider/model on a bare-id host (claude) has its leading
+        // `provider/` stripped, so the value reaching a directly-spawned CLI is
+        // already shaped correctly.
+        assert_eq!(
+            select_model(
+                "claude",
+                &ModelChoice::Pinned("anthropic/claude-sonnet-4-6".to_owned()),
+                Tier::Standard,
+            ),
+            Some("claude-sonnet-4-6".to_owned())
+        );
+        // The same pin on a provider/model host (opencode) is left unchanged.
+        assert_eq!(
+            select_model(
+                "opencode",
+                &ModelChoice::Pinned("anthropic/claude-sonnet-4-6".to_owned()),
+                Tier::Standard,
+            ),
+            Some("anthropic/claude-sonnet-4-6".to_owned())
+        );
+        // An openai-prefixed pin on codex (bare-id) is stripped to the bare id.
+        assert_eq!(
+            select_model(
+                "codex",
+                &ModelChoice::Pinned("openai/gpt-5.4".to_owned()),
+                Tier::Standard,
+            ),
+            Some("gpt-5.4".to_owned())
+        );
+    }
+
+    #[test]
+    fn select_model_auto_per_host_and_tier() {
+        let auto = ModelChoice::Auto { bias: None };
+        assert_eq!(
+            select_model("claude", &auto, Tier::Heavy),
+            Some("claude-opus-4-8".to_owned())
+        );
+        assert_eq!(
+            select_model("claude", &auto, Tier::Light),
+            Some("claude-haiku-4-5".to_owned())
+        );
+        assert_eq!(
+            select_model("copilot", &auto, Tier::Light),
+            Some("claude-haiku-4.5".to_owned())
+        );
+        assert_eq!(
+            select_model("codex", &auto, Tier::Standard),
+            Some("gpt-5.4".to_owned())
+        );
+        // Unknown host -> None under Auto.
+        assert_eq!(select_model("mystery", &auto, Tier::Heavy), None);
+    }
+
+    #[test]
+    fn select_model_bias_overrides_ticket_tier() {
+        let biased = ModelChoice::Auto {
+            bias: Some(Tier::Light),
+        };
+        // Ticket tier is Heavy, but the explicit bias forces the light model.
+        assert_eq!(
+            select_model("claude", &biased, Tier::Heavy),
+            Some("claude-haiku-4-5".to_owned())
+        );
+    }
+
+    #[test]
+    fn select_model_never_returns_literal_auto() {
+        for host in ["claude", "codex", "copilot", "opencode", "aider"] {
+            for tier in [Tier::Light, Tier::Standard, Tier::Heavy] {
+                let resolved = select_model(host, &ModelChoice::Auto { bias: None }, tier);
+                assert_ne!(
+                    resolved.as_deref(),
+                    Some("auto"),
+                    "select_model must never return the literal auto for {host}"
+                );
+            }
+        }
     }
 }

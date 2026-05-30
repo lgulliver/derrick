@@ -533,6 +533,49 @@ async fn cleanup_prunes_abandoned_worktrees_past_ttl() {
 }
 
 #[tokio::test]
+async fn cleanup_prunes_abandoned_ticket_worktree_past_ttl() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+
+    // A ticket-keyed hand worktree row (the backstop case: dispatcher crashed
+    // before its deterministic terminal-state removal could forget the row).
+    let wt_path = tempdir.path().join("host-worktrees").join("drk-1");
+    substrate
+        .register_ticket_worktree("drk-1", "derrick/ad-hoc/drk-1", &wt_path)
+        .await
+        .expect("register ticket worktree");
+
+    let stale_text = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+    let conn = rusqlite::Connection::open(tempdir.path().join("derrick.db")).unwrap();
+    conn.execute(
+        "UPDATE worktrees SET created_at = ?1 WHERE run_id = ?2",
+        rusqlite::params![stale_text, "ticket:drk-1"],
+    )
+    .unwrap();
+    drop(conn);
+
+    let hand = register_hand_simple(&substrate, "h1").await;
+    let foreman = build_foreman(
+        substrate.clone(),
+        Box::new(MockRepoState::new()),
+        no_op_dispatcher(substrate.clone(), hand),
+        tempdir.path().to_path_buf(),
+    );
+    let report = foreman.tick().await.expect("tick");
+    let pruned: Vec<_> = report
+        .cleanup_actions
+        .iter()
+        .filter_map(|a| match a {
+            CleanupAction::PrunedAbandonedWorktree { run_id } => Some(run_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pruned, vec!["ticket:drk-1".to_owned()]);
+    let remaining = substrate.list_worktrees(true).await.unwrap();
+    assert!(remaining.iter().all(|w| w.run_id != "ticket:drk-1"));
+}
+
+#[tokio::test]
 async fn cleanup_requeues_inflight_with_dead_hand() {
     let tempdir = TempDir::new().expect("tempdir");
     let substrate = open_substrate(&tempdir).await;
