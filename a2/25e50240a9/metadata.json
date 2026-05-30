@@ -1,0 +1,37 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "a225e50240a9",
+  "strategy": "manual-commit",
+  "branch": "feat/foreman-adaptive-model-selection",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "DESIGN.md",
+    "crates/derrick-copilot/src/local_dispatcher.rs",
+    "crates/derrick-hand/src/lib.rs",
+    "crates/derrick-stack/src/lib.rs",
+    "crates/derrick-substrate-native/migrations/0004_ticket_complexity.sql",
+    "crates/derrick-substrate-native/src/foreman.rs",
+    "crates/derrick-substrate-native/src/foreman/tests.rs",
+    "crates/derrick-substrate-native/src/lib.rs",
+    "crates/derrick-substrate-native/src/tests.rs",
+    "crates/derrick-substrate/src/lib.rs",
+    "crates/derrick-substrate/src/types.rs",
+    "crates/derrick-tools/src/catalogue.rs",
+    "crates/derrick-tools/src/lib.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a2/25e50240a9/0/metadata.json",
+      "transcript": "/a2/25e50240a9/0/full.jsonl",
+      "content_hash": "/a2/25e50240a9/0/content_hash.txt",
+      "prompt": "/a2/25e50240a9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 19029,
+    "cache_creation_tokens": 247041,
+    "cache_read_tokens": 9226697,
+    "output_tokens": 67477,
+    "api_call_count": 71
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "cli_version": "0.6.3",
+  "checkpoint_id": "a225e50240a9",
+  "session_id": "5f0a35c8-717b-437f-9125-52d87142bb75",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-30T20:49:19.834001Z",
+  "branch": "feat/foreman-adaptive-model-selection",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "DESIGN.md",
+    "crates/derrick-copilot/src/local_dispatcher.rs",
+    "crates/derrick-hand/src/lib.rs",
+    "crates/derrick-stack/src/lib.rs",
+    "crates/derrick-substrate-native/migrations/0004_ticket_complexity.sql",
+    "crates/derrick-substrate-native/src/foreman.rs",
+    "crates/derrick-substrate-native/src/foreman/tests.rs",
+    "crates/derrick-substrate-native/src/lib.rs",
+    "crates/derrick-substrate-native/src/tests.rs",
+    "crates/derrick-substrate/src/lib.rs",
+    "crates/derrick-substrate/src/types.rs",
+    "crates/derrick-tools/src/catalogue.rs",
+    "crates/derrick-tools/src/lib.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "2a4de5682169",
+  "token_usage": {
+    "input_tokens": 19029,
+    "cache_creation_tokens": 247041,
+    "cache_read_tokens": 9226697,
+    "output_tokens": 67477,
+    "api_call_count": 71
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-30T20:49:19.795784Z",
+    "agent_lines": 1140,
+    "agent_removed": 76,
+    "human_added": 247,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1387,
+    "total_lines_changed": 1542,
+    "agent_percentage": 78.85862516212711,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}

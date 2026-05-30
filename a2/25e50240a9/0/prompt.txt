@@ -1,0 +1,9 @@
+Both local hand dispatchers create per-ticket git worktrees via raw `git worktree add` and never clean them up on a SUCCESSFUL dispatch, so `.derrick/copilot-worktrees/<ticket-id>` and `.derrick/host-worktrees/<ticket-id>` checkouts accumulate over time. They are NOT tracked by the substrate `reserve_worktree` row, so the foreman TTL pruning pass (`list_stale_open_worktrees` in crates/derrick-substrate-native/src/foreman.rs ~635) never removes them. Only the failure path removes the worktree.
+
+Affected:
+- crates/derrick-copilot/src/local_dispatcher.rs (LocalCopilotHandDispatcher) — pre-existing.
+- crates/derrick-hand/src/lib.rs (HostCliHandDispatcher, added in D66) — matches the same pattern deliberately.
+
+Goal: give per-ticket hand worktrees a real lifecycle. Options to evaluate: (a) register them as substrate worktree rows (reserve_worktree/close_worktree, but those are keyed on run_id today — may need a ticket-keyed variant) so the foreman TTL pass prunes abandoned ones; or (b) remove the worktree once the ticket reaches a terminal state (InReview/Done/merged) via the foreman reconcile path — but confirm the verify/merge flow doesn't still need the checkout before removing it. Fix BOTH dispatchers together so they stay behaviourally identical. Add tests for the chosen cleanup trigger.
+
+Context: introduced/observed during D66 (host-executor model forwarding + host-CLI crew hands), PR for branch feat/host-executor-model-forwarding. A Codex review flagged it MAJOR; we judged it a pre-existing cross-cutting gap and deferred it rather than gold-plate only the new dispatcher.
