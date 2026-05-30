@@ -64,7 +64,7 @@ owo-colors = "4"
 rayon = "1"
 blake3 = "1"
 walkdir = "2"
-rmcp = { version = "0.9", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "1.4", features = ["server", "transport-io", "macros"] }
 schemars = "1"
 tree-sitter = "0.26"
 streaming-iterator = "0.1"
