@@ -1,0 +1,5 @@
+yeah I would have thought that opencode should allow us to set its model when we use opencode in the same way we would change model for copilot.
+
+---
+
+My belief is that the crew should use the best model for the job available unless otherwise specified. This should be able to be determined by the foreman. The user can configure which tool they want to use i.e. copilot, opencode, etc but its down to the foreman to establish what models are available to each and which model should be used for given tasks based on size and complexity.  a user can override it in derrick.yaml though
