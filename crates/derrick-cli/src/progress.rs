@@ -79,13 +79,23 @@ impl ProgressReporter for CliReporter {
 
         let pb = self.multi.add(ProgressBar::new_spinner());
         pb.set_style(
-            ProgressStyle::with_template("  {spinner:.cyan} {msg} {elapsed:.dimmed}")
+            ProgressStyle::with_template("  {spinner:.cyan} {prefix}{msg} {elapsed:.dimmed}")
                 .expect("static spinner template is valid")
                 .tick_strings(TICK_STRINGS),
         );
-        pb.set_message(format!("{counter}{step_id}"));
+        // Static label in the prefix; the live output tail goes in the message.
+        pb.set_prefix(format!("{counter}{step_id}"));
         pb.enable_steady_tick(Duration::from_millis(90));
         self.bars.lock().unwrap().insert(step_id.to_owned(), pb);
+    }
+
+    fn step_output(&self, step_id: &str, line: &str) {
+        let Some(snippet) = tail_snippet(line) else {
+            return;
+        };
+        if let Some(bar) = self.bars.lock().unwrap().get(step_id) {
+            bar.set_message(format!("  {}", snippet.bright_black()));
+        }
     }
 
     fn step_finished(&self, progress: StepProgress<'_>) {
@@ -196,6 +206,28 @@ fn humanize_count(n: u64) -> String {
     }
 }
 
+/// Condense a raw output line into a short single-line heartbeat for the
+/// spinner: collapse internal whitespace, drop control characters, and truncate
+/// with an ellipsis. Returns `None` for blank lines (don't disturb the spinner).
+fn tail_snippet(line: &str) -> Option<String> {
+    const MAX: usize = 72;
+    let collapsed: String = line
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned: String = collapsed.chars().filter(|c| !c.is_control()).collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    if cleaned.chars().count() > MAX {
+        let truncated: String = cleaned.chars().take(MAX - 1).collect();
+        Some(format!("{truncated}…"))
+    } else {
+        Some(cleaned)
+    }
+}
+
 /// Format a duration like `3.2s` or `1m04s`, or `None` when zero (skipped).
 fn format_elapsed(elapsed: Duration) -> Option<String> {
     if elapsed.is_zero() {
@@ -249,6 +281,20 @@ mod tests {
             format_elapsed(Duration::from_secs(64)),
             Some("1m04s".to_owned())
         );
+    }
+
+    #[test]
+    fn tail_snippet_blanks_and_truncates() {
+        assert_eq!(tail_snippet("   "), None);
+        assert_eq!(tail_snippet("\t\n"), None);
+        assert_eq!(
+            tail_snippet("  reading   src/main.rs  "),
+            Some("reading src/main.rs".to_owned())
+        );
+        let long = "x".repeat(100);
+        let snippet = tail_snippet(&long).unwrap();
+        assert_eq!(snippet.chars().count(), 72);
+        assert!(snippet.ends_with('…'));
     }
 
     #[test]

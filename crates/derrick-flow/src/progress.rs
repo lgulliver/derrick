@@ -65,6 +65,14 @@ pub trait ProgressReporter: Send + Sync {
         let _ = (step_id, index, total, interactive);
     }
 
+    /// A line of live output from the running step's agent subprocess
+    /// (run-feedback Layer 2). Called once per complete stdout/stderr line while
+    /// the step runs; high-frequency, so implementations must be cheap and must
+    /// not block. Default is a no-op.
+    fn step_output(&self, step_id: &str, line: &str) {
+        let _ = (step_id, line);
+    }
+
     /// A step finished — success, skip, halt, or failure.
     fn step_finished(&self, progress: StepProgress<'_>) {
         let _ = progress;

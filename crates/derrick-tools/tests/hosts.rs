@@ -78,7 +78,52 @@ fn request(cwd: &Path) -> HostRequest {
         copilot_tools: CopilotToolPermission::Default,
         model: None,
         headless: false,
+        output_sink: None,
     }
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn output_sink_streams_lines_while_capturing_full_output() -> TestResult {
+    use derrick_tools::{OutputSink, StreamSource};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    let _guard = process_lock().await;
+    let host = mock_host(
+        "codex",
+        "#!/bin/sh\nprintf 'line one\\nline two\\n'\nprintf 'oops\\n' >&2\n",
+    )?;
+    let cwd = tempdir()?;
+    let adapter = CodexHost::with_binary(host.path().join("codex"));
+
+    let collected: Arc<StdMutex<Vec<(StreamSource, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+    let sink_collected = Arc::clone(&collected);
+    let mut req = request(cwd.path());
+    req.output_sink = Some(OutputSink::new(move |source, line| {
+        sink_collected
+            .lock()
+            .unwrap()
+            .push((source, line.to_owned()));
+    }));
+
+    let response = adapter.run(req).await?;
+
+    // Full output is still captured byte-for-byte.
+    assert!(response.stdout.contains("line one"));
+    assert!(response.stdout.contains("line two"));
+
+    // The sink saw each line as it streamed, attributed to the right stream.
+    let lines = collected.lock().unwrap();
+    let stdout_lines: Vec<&str> = lines
+        .iter()
+        .filter(|(s, _)| *s == StreamSource::Stdout)
+        .map(|(_, l)| l.as_str())
+        .collect();
+    assert_eq!(stdout_lines, vec!["line one", "line two"]);
+    assert!(lines
+        .iter()
+        .any(|(s, l)| *s == StreamSource::Stderr && l == "oops"));
+    Ok(())
 }
 
 #[cfg(unix)]

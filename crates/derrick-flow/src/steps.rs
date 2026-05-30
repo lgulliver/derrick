@@ -28,12 +28,22 @@ pub async fn execute_step(
     state: &mut ExecutionState,
     run_id: &str,
     manifest_path: &Path,
+    output_sink: Option<derrick_tools::OutputSink>,
 ) -> Result<StepRecord, RunError> {
     let started_at = Utc::now();
     let log_path = state.run_dir.join(format!("step-{}.log", step.id()));
     let result = match (step.role(), step.runner()) {
         (Some(_), None) => {
-            execute_role_step(config, &hosts, repo_root, step, state, &log_path).await
+            execute_role_step(
+                config,
+                &hosts,
+                repo_root,
+                step,
+                state,
+                &log_path,
+                output_sink,
+            )
+            .await
         }
         (None, Some(StepRunner::Derrick)) => {
             execute_derrick_step(
@@ -152,6 +162,7 @@ async fn execute_role_step(
     step: &PipelineStep,
     state: &mut ExecutionState,
     log_path: &Path,
+    output_sink: Option<derrick_tools::OutputSink>,
 ) -> Result<StepExecution, RunError> {
     if let Some(host) = step.host() {
         let command = derrick_assay::io::required_step_text(step.command(), step.id(), "command")?;
@@ -194,6 +205,7 @@ async fn execute_role_step(
         let prompt_len = prompt.len();
         let mut request = HostRequest::new(prompt, working_dir(state, repo_root));
         request.headless = true;
+        request.output_sink = output_sink;
         if host_name == "copilot" {
             request.copilot_tools = CopilotToolPermission::AllowAll;
         }

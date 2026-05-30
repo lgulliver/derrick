@@ -68,6 +68,17 @@ impl Runner {
         self
     }
 
+    /// Builds a per-line output sink that forwards a step's live agent output to
+    /// the progress reporter (run-feedback Layer 2). The closure captures the
+    /// step id so the reporter can route lines to the right spinner.
+    fn output_sink_for(&self, step_id: &str) -> Option<derrick_tools::OutputSink> {
+        let reporter = Arc::clone(&self.reporter);
+        let step_id = step_id.to_owned();
+        Some(derrick_tools::OutputSink::new(move |_source, line| {
+            reporter.step_output(&step_id, line);
+        }))
+    }
+
     /// Execute the named pipeline.
     pub async fn run_pipeline(
         &self,
@@ -252,6 +263,13 @@ impl Runner {
                     let interactive = is_interactive_step(step);
                     self.reporter
                         .step_started(step.id(), idx + 1, total_steps, interactive);
+                    // Interactive steps own the terminal (stdin prompts), so do
+                    // not stream their output over the prompt.
+                    let sink = if interactive {
+                        None
+                    } else {
+                        self.output_sink_for(step.id())
+                    };
                     let step_timer = std::time::Instant::now();
                     let record = steps::execute_step(
                         &self.config,
@@ -262,6 +280,7 @@ impl Runner {
                         &mut state,
                         &run_id,
                         &self.manifest_path(&run_id),
+                        sink,
                     )
                     .await?;
                     self.reporter.step_finished(StepProgress {
@@ -761,6 +780,7 @@ impl Runner {
                                 RunError::Config("semaphore closed unexpectedly".to_owned())
                             })?;
                             let mut st = state_clone;
+                            let sink = runner.output_sink_for(step.id());
                             let step_timer = std::time::Instant::now();
                             let record = steps::execute_step(
                                 &runner.config,
@@ -771,6 +791,7 @@ impl Runner {
                                 &mut st,
                                 &run_id,
                                 &runner.manifest_path(&run_id),
+                                sink,
                             )
                             .await?;
                             runner.reporter.step_finished(StepProgress {

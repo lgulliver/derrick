@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,6 +29,45 @@ pub trait HostAdapter: Send + Sync {
 
     /// Invokes the host CLI with the given request.
     async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError>;
+}
+
+/// Which standard stream a streamed output line came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamSource {
+    /// The process's standard output.
+    Stdout,
+    /// The process's standard error.
+    Stderr,
+}
+
+/// The boxed per-line callback behind an [`OutputSink`].
+type OutputSinkFn = Arc<dyn Fn(StreamSource, &str) + Send + Sync>;
+
+/// A callback invoked once per complete line of host output as it arrives.
+///
+/// This is how derrick surfaces live agent activity (run-feedback Layer 2)
+/// without the host layer depending on any UI: the caller supplies a closure
+/// that forwards each line to a progress front-end. The full output is still
+/// captured and returned in [`HostResponse`] regardless.
+#[derive(Clone)]
+pub struct OutputSink(OutputSinkFn);
+
+impl OutputSink {
+    /// Wraps a per-line callback.
+    pub fn new(sink: impl Fn(StreamSource, &str) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(sink))
+    }
+
+    /// Delivers one line to the callback.
+    pub(crate) fn emit(&self, source: StreamSource, line: &str) {
+        (self.0)(source, line);
+    }
+}
+
+impl std::fmt::Debug for OutputSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OutputSink(..)")
+    }
 }
 
 /// Input for a host CLI invocation.
@@ -58,6 +98,13 @@ pub struct HostRequest {
     /// `false` so interactive invocations (e.g. `derrick run` in a developer
     /// terminal) retain the host's normal confirmation behaviour.
     pub headless: bool,
+    /// Optional per-line sink for streaming host output as it is produced.
+    ///
+    /// When set, [`run`](HostAdapter::run) invokes the sink once per complete
+    /// line of stdout/stderr while the process runs, in addition to capturing
+    /// the full output in [`HostResponse`]. `None` (the default) preserves the
+    /// previous capture-only behaviour.
+    pub output_sink: Option<OutputSink>,
 }
 
 impl HostRequest {
@@ -71,6 +118,7 @@ impl HostRequest {
             copilot_tools: CopilotToolPermission::Default,
             model: None,
             headless: false,
+            output_sink: None,
         }
     }
 }

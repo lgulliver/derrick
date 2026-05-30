@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
 
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::time;
 
-use crate::{HostError, HostRequest, HostResponse};
+use crate::{HostError, HostRequest, HostResponse, OutputSink, StreamSource};
 
 pub(crate) struct CommandSpec {
     pub(crate) binary: PathBuf,
@@ -36,7 +37,7 @@ pub(crate) async fn run_host(
     tracing::debug!(host, cwd = %request.cwd.display(), "invoking host CLI");
 
     let started = Instant::now();
-    let child = command.spawn().map_err(|source| {
+    let mut child = command.spawn().map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
             HostError::NotFound {
                 host: host.to_owned(),
@@ -49,25 +50,41 @@ pub(crate) async fn run_host(
         }
     })?;
 
+    // Drain both pipes concurrently while the child runs. Reading on separate
+    // tasks prevents the classic pipe-buffer-full deadlock and lets us forward
+    // each line to the sink as it arrives (Layer 2), while still accumulating
+    // the complete output byte-for-byte for the captured `HostResponse`.
+    let sink = request.output_sink.clone();
+    let stdout_task = tokio::spawn(pump(
+        child.stdout.take(),
+        sink.clone(),
+        StreamSource::Stdout,
+    ));
+    let stderr_task = tokio::spawn(pump(child.stderr.take(), sink, StreamSource::Stderr));
+
     let timeout = request.timeout;
-    let output = match time::timeout(timeout, child.wait_with_output()).await {
-        Ok(output) => output.map_err(|source| HostError::Io {
+    let status = match time::timeout(timeout, child.wait()).await {
+        Ok(status) => status.map_err(|source| HostError::Io {
             host: host.to_owned(),
             source,
         })?,
         Err(_) => {
+            // `kill_on_drop` reaps the child; the detached pump tasks finish at EOF.
             return Err(HostError::Timeout {
                 host: host.to_owned(),
                 seconds: timeout.as_secs(),
             });
         }
     };
+    // Pipes are closed once the child has exited, so these joins resolve promptly.
+    let stdout_bytes = stdout_task.await.unwrap_or_default();
+    let stderr_bytes = stderr_task.await.unwrap_or_default();
     let elapsed = started.elapsed();
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    let exit_code = status.code().unwrap_or(-1);
 
-    if output.status.success() {
+    if status.success() {
         Ok(HostResponse {
             stdout,
             stderr,
@@ -83,6 +100,52 @@ pub(crate) async fn run_host(
             stderr,
         })
     }
+}
+
+/// Reads `reader` to EOF, returning the raw bytes. When `sink` is set, each
+/// complete line (newline-delimited, trailing `\r` trimmed) is forwarded as it
+/// arrives, plus any final unterminated line. Returning the raw bytes keeps the
+/// captured `HostResponse` byte-identical to the previous capture-only path.
+async fn pump<R>(reader: Option<R>, sink: Option<OutputSink>, source: StreamSource) -> Vec<u8>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let Some(mut reader) = reader else {
+        return Vec::new();
+    };
+    let mut raw = Vec::new();
+    let mut line = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(sink) = &sink {
+                    for &byte in &buf[..n] {
+                        if byte == b'\n' {
+                            emit_line(sink, source, &line);
+                            line.clear();
+                        } else {
+                            line.push(byte);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(sink) = &sink {
+        if !line.is_empty() {
+            emit_line(sink, source, &line);
+        }
+    }
+    raw
+}
+
+/// Decode one buffered line lossily, trim a trailing `\r`, and forward it.
+fn emit_line(sink: &OutputSink, source: StreamSource, line: &[u8]) {
+    let text = String::from_utf8_lossy(line);
+    sink.emit(source, text.trim_end_matches('\r'));
 }
 
 pub(crate) fn is_available(binary: &Path) -> bool {
