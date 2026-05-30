@@ -558,6 +558,17 @@ pub(crate) fn recommended_role_bindings(
         available_models,
         &["copilot", "codex-gpt5", "claude-sonnet", "claude-opus"],
     );
+    // Summariser favours the cheap, fast model, matching Config::defaults().
+    let claude_haiku = pick_model(
+        available_models,
+        &[
+            "claude-haiku",
+            "claude-sonnet",
+            "claude-opus",
+            "codex-gpt5",
+            "copilot",
+        ],
+    );
 
     match mode {
         crate::commands::InitMode::Solo => RoleBindings {
@@ -565,21 +576,21 @@ pub(crate) fn recommended_role_bindings(
             drafter: claude_sonnet.clone(),
             reviewer: codex.clone(),
             executor: copilot.clone(),
-            summariser: claude_sonnet,
+            summariser: claude_haiku,
         },
         crate::commands::InitMode::Copilot => RoleBindings {
             proposer: claude_sonnet.clone(),
             drafter: claude_sonnet.clone(),
             reviewer: codex.clone(),
             executor: copilot.clone(),
-            summariser: claude_sonnet,
+            summariser: claude_haiku,
         },
         crate::commands::InitMode::Crew => RoleBindings {
             proposer: claude_opus,
             drafter: claude_sonnet.clone(),
             reviewer: codex.clone(),
             executor: copilot,
-            summariser: claude_sonnet,
+            summariser: claude_haiku,
         },
     }
 }

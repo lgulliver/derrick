@@ -1034,8 +1034,11 @@ models:
 Fields `endpoint`, `region`, `deployment`, and `base_url` are
 parsed-and-ignored (with a one-line deprecation warning) so
 existing `derrick.yaml` files continue to load after D65. The
-`cli` field is similarly deprecated and ignored. No
-`CONFIG_VERSION` bump.
+`cli` field is deprecated for the host providers
+(`claude`/`codex`/`copilot`/`opencode`/`aider`) and ignored
+there, but remains in use by the `shell` escape-hatch provider,
+which still spawns the configured command. No `CONFIG_VERSION`
+bump.
 
 Cost hints are optional but power the §9.B.7 telemetry — without
 them, `derrick gain` reports token counts only, not dollars.
