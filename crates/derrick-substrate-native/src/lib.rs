@@ -12,7 +12,7 @@ use derrick_substrate::{
     NewEvent, NewTicket, Substrate, SubstrateError, Ticket, TicketFilter, TicketId, TicketState,
     TypedEvent,
 };
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use tokio::task;
 use uuid::Uuid;
 

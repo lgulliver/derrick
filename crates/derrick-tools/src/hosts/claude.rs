@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::catalogue;
-use crate::process::{is_available, run_host, CommandSpec};
+use crate::process::{CommandSpec, is_available, run_host};
 use crate::{HostAdapter, HostError, HostRequest, HostResponse};
 
 const NAME: &str = "claude";

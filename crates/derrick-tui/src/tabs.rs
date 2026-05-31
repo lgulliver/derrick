@@ -5,11 +5,11 @@
 //! `Block` — to keep v1 maintenance cost low.
 
 use chrono::Utc;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{BarChart, Block, Borders, Cell, List, ListItem, Paragraph, Row, Table};
-use ratatui::Frame;
 
 use crate::app::{App, TicketSort};
 use crate::data::{ActivityFilter, HandRow, Tab, TicketRow};

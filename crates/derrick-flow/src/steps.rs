@@ -9,15 +9,15 @@ use derrick_substrate::{
     BatchName, Complexity, Hand, HandId, HandKind, NewTicket, TicketFilter, TicketId, TicketState,
 };
 use derrick_tools::{
-    catalogue, parse_model_choice, CopilotToolPermission, HostRegistry, HostRequest, ModelChoice,
-    Tier,
+    CopilotToolPermission, HostRegistry, HostRequest, ModelChoice, Tier, catalogue,
+    parse_model_choice,
 };
 use owo_colors::OwoColorize;
 
 use crate::clarify;
 use derrick_assay::io::write_log;
 use derrick_assay::names::host_name;
-use derrick_assay::template::{render_template, TemplateContext};
+use derrick_assay::template::{TemplateContext, render_template};
 use derrick_assay::types::{RunError, StepExecution, StepRecord, StepStatus};
 use derrick_assay::{self as assay, ExecutionState};
 

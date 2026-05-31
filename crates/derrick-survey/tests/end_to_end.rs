@@ -111,10 +111,12 @@ async fn builds_and_queries_a_mixed_repo() {
     )
     .unwrap();
     let status = survey.status().await.unwrap();
-    assert!(status
-        .pending
-        .iter()
-        .any(|p| p.path == "app.py" && p.reason == "modified"));
+    assert!(
+        status
+            .pending
+            .iter()
+            .any(|p| p.path == "app.py" && p.reason == "modified")
+    );
 
     let report = survey.build(BuildOptions::default()).await.unwrap();
     assert_eq!(report.files_indexed, 1, "only the changed file reparsed");

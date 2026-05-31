@@ -140,8 +140,8 @@ async fn set_ticket_state_rejected_refused_with_d31_message() -> Result<(), Subs
 }
 
 #[tokio::test]
-async fn set_ticket_state_in_review_refused_pointing_at_transition_to_in_review(
-) -> Result<(), SubstrateError> {
+async fn set_ticket_state_in_review_refused_pointing_at_transition_to_in_review()
+-> Result<(), SubstrateError> {
     let tempdir = tempfile::tempdir().map_err(io_error)?;
     let substrate = open_substrate(&tempdir).await?;
     substrate.create_ticket(new_ticket("drk-1")?).await?;
@@ -334,8 +334,8 @@ async fn transition_to_in_review_records_metadata_in_event() -> Result<(), Subst
 }
 
 #[tokio::test]
-async fn stack_submit_idempotent_re_records_metadata_for_in_review_ticket(
-) -> Result<(), SubstrateError> {
+async fn stack_submit_idempotent_re_records_metadata_for_in_review_ticket()
+-> Result<(), SubstrateError> {
     // Reproduces the `derrick stack submit` idempotent path: a ticket
     // is already InReview without a PR URL; submit publishes the PR
     // and re-records `TicketTransitionedToInReview` with the fresh
@@ -582,9 +582,11 @@ async fn tail_typed_events_returns_deserialised_kinds() -> Result<(), SubstrateE
         )
         .await?;
     let events = substrate.tail_typed_events(None, 50).await?;
-    assert!(events
-        .iter()
-        .any(|e| matches!(&e.kind, EventKind::Note { body } if body == "ping")));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::Note { body } if body == "ping"))
+    );
     Ok(())
 }
 
@@ -1466,10 +1468,12 @@ async fn link_and_unlink_round_trip() -> Result<(), SubstrateError> {
     substrate
         .unlink(&ticket_id("drk-1")?, &ticket_id("drk-2")?, LinkKind::Blocks)
         .await?;
-    assert!(substrate
-        .outgoing_links(&ticket_id("drk-1")?)
-        .await?
-        .is_empty());
+    assert!(
+        substrate
+            .outgoing_links(&ticket_id("drk-1")?)
+            .await?
+            .is_empty()
+    );
     Ok(())
 }
 

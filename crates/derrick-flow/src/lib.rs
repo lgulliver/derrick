@@ -7,7 +7,7 @@ mod progress;
 mod runner;
 mod steps;
 
-pub use code_review::{run_code_review, CodeReviewOutcome};
+pub use code_review::{CodeReviewOutcome, run_code_review};
 pub use derrick_assay::types::{
     PipelineInput, RunError, RunOutcome, RunStatus, StepRecord, StepStatus,
 };
@@ -52,19 +52,19 @@ mod code_review_tests {
 #[cfg(test)]
 mod tests {
     use crate::clarify::{
-        parse_clarify_questions, render_clarify_markdown, select_clarify_answer, ClarifyQuestion,
+        ClarifyQuestion, parse_clarify_questions, render_clarify_markdown, select_clarify_answer,
     };
     use crate::runner::Runner;
+    use derrick_assay::ExecutionState;
     use derrick_assay::io::FEATURE_JSON;
     use derrick_assay::types::{PipelineInput, RunError, RunStatus, StepStatus};
-    use derrick_assay::ExecutionState;
     use derrick_config::Config;
     use derrick_substrate_native::{NativeConfig, NativeSubstrate};
     use derrick_tools::{HostAdapter, HostError, HostRegistry, HostRequest, HostResponse};
     use std::error::Error;
     use std::path::PathBuf;
     use std::time::Duration;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -702,18 +702,19 @@ fi
         assert!(dir.path().join("specs/001-test/plan.md").exists());
         assert!(dir.path().join("specs/001-test/tasks.md").exists());
         assert!(dir.path().join("specs/001-test/assay/verdict.md").exists());
-        assert!(dir
-            .path()
-            .join(".derrick/runs/run-1/manifest.json")
-            .exists());
+        assert!(
+            dir.path()
+                .join(".derrick/runs/run-1/manifest.json")
+                .exists()
+        );
         Ok(())
     }
 
     #[tokio::test]
     async fn run_pipeline_drives_the_progress_reporter() -> TestResult {
         use crate::{ProgressReporter, RunProgress, StepProgress};
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Mutex as StdMutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         #[derive(Default)]
         struct CountingReporter {

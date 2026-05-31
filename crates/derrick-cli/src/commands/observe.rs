@@ -4,7 +4,7 @@ use derrick_tui::Tab;
 
 use crate::commands::ObserveArgs;
 use crate::exit_code::CliExitCode;
-use crate::{message, CliError};
+use crate::{CliError, message};
 
 pub(crate) async fn execute(args: ObserveArgs) -> Result<CliExitCode, CliError> {
     let initial_tab = match args.tab.as_deref() {

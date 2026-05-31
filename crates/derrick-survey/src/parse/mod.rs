@@ -271,9 +271,11 @@ mod tests {
             .iter()
             .position(|s| s.name == "caller")
             .unwrap();
-        assert!(attributed
-            .iter()
-            .any(|(idx, r)| *idx == caller_idx && r.dst_name == "helper"));
+        assert!(
+            attributed
+                .iter()
+                .any(|(idx, r)| *idx == caller_idx && r.dst_name == "helper")
+        );
     }
 
     #[test]
@@ -331,9 +333,11 @@ mod tests {
             .iter()
             .position(|s| s.name == "Greet" && s.start_line == 4)
             .unwrap();
-        assert!(attributed
-            .iter()
-            .any(|(idx, r)| *idx == greet_idx && r.dst_name == "Build"));
+        assert!(
+            attributed
+                .iter()
+                .any(|(idx, r)| *idx == greet_idx && r.dst_name == "Build")
+        );
     }
 
     #[test]
@@ -356,9 +360,11 @@ mod tests {
             .iter()
             .position(|s| s.name == "total" && s.start_line == 4)
             .unwrap();
-        assert!(attributed
-            .iter()
-            .any(|(idx, r)| *idx == total_idx && r.dst_name == "compute"));
+        assert!(
+            attributed
+                .iter()
+                .any(|(idx, r)| *idx == total_idx && r.dst_name == "compute")
+        );
     }
 
     #[test]
@@ -381,9 +387,11 @@ mod tests {
             .iter()
             .position(|s| s.name == "build")
             .unwrap();
-        assert!(attributed
-            .iter()
-            .any(|(idx, r)| *idx == build_idx && r.dst_name == "helper"));
+        assert!(
+            attributed
+                .iter()
+                .any(|(idx, r)| *idx == build_idx && r.dst_name == "helper")
+        );
     }
 
     #[test]

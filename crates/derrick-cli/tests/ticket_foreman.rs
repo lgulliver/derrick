@@ -149,9 +149,11 @@ async fn cli_ticket_block_writes_link_and_blocks_when_predecessor_open() -> Test
     }
     // Link present.
     let outgoing = substrate.outgoing_links(&b).await?;
-    assert!(outgoing
-        .iter()
-        .any(|link| link.to == a && link.kind == LinkKind::Blocks));
+    assert!(
+        outgoing
+            .iter()
+            .any(|link| link.to == a && link.kind == LinkKind::Blocks)
+    );
     Ok(())
 }
 
@@ -187,9 +189,11 @@ async fn cli_ticket_block_writes_link_only_when_predecessor_terminal() -> TestRe
         "should not have changed state"
     );
     let outgoing = substrate.outgoing_links(&b).await?;
-    assert!(outgoing
-        .iter()
-        .any(|link| link.to == a && link.kind == LinkKind::Blocks));
+    assert!(
+        outgoing
+            .iter()
+            .any(|link| link.to == a && link.kind == LinkKind::Blocks)
+    );
     Ok(())
 }
 

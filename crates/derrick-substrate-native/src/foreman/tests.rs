@@ -452,10 +452,12 @@ async fn verifier_escalates_stuck_in_review_past_ttl() {
     // Sleep briefly so the ticket's updated_at is past the threshold.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let report = foreman.tick().await.expect("tick");
-    assert!(report
-        .verifier_actions
-        .iter()
-        .any(|a| matches!(a, VerifierAction::StuckEscalated { .. })));
+    assert!(
+        report
+            .verifier_actions
+            .iter()
+            .any(|a| matches!(a, VerifierAction::StuckEscalated { .. }))
+    );
 }
 
 #[tokio::test]
@@ -647,10 +649,12 @@ async fn cleanup_triggers_eager_verifier_on_stale_in_review() {
         tempdir.path().to_path_buf(),
     );
     let report = foreman.tick().await.expect("tick");
-    assert!(report
-        .cleanup_actions
-        .iter()
-        .any(|a| matches!(a, CleanupAction::TriggeredStaleInReviewCheck { .. })));
+    assert!(
+        report
+            .cleanup_actions
+            .iter()
+            .any(|a| matches!(a, CleanupAction::TriggeredStaleInReviewCheck { .. }))
+    );
 }
 
 // ---- Unblock tests --------------------------------------------------------
@@ -1229,10 +1233,12 @@ async fn restack_dependents_called_after_merge() {
     assert_eq!(calls[0].old_parent, "derrick/alpha/drk-1");
     assert_eq!(calls[0].new_parent, "main");
 
-    assert!(report
-        .verifier_actions
-        .iter()
-        .any(|action| matches!(action, VerifierAction::Restacked { .. })));
+    assert!(
+        report
+            .verifier_actions
+            .iter()
+            .any(|action| matches!(action, VerifierAction::Restacked { .. }))
+    );
 }
 
 #[tokio::test]
@@ -1281,10 +1287,12 @@ async fn restack_conflict_blocks_ticket() {
         }
         other => panic!("expected RestackConflict, got {other:?}"),
     }
-    assert!(report
-        .verifier_actions
-        .iter()
-        .any(|action| matches!(action, VerifierAction::RestackConflict { .. })));
+    assert!(
+        report
+            .verifier_actions
+            .iter()
+            .any(|action| matches!(action, VerifierAction::RestackConflict { .. }))
+    );
 }
 
 // ---- Fan-out concurrency proof -------------------------------------------

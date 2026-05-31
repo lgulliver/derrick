@@ -17,11 +17,11 @@ use derrick_substrate::{
     Complexity, EventKind, EventScope, Hand, HandId, HandKind, Substrate, SubstrateError, Ticket,
     TicketId,
 };
+use derrick_substrate_native::NativeSubstrate;
 use derrick_substrate_native::foreman::{
     DispatchContext, DispatchError, DispatchResult, HandDispatcher,
 };
-use derrick_substrate_native::NativeSubstrate;
-use derrick_tools::{select_model, ModelChoice, Tier};
+use derrick_tools::{ModelChoice, Tier, select_model};
 use tokio::process::Command;
 use tracing::{error, info, instrument, warn};
 

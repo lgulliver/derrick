@@ -8,12 +8,12 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
+use crate::SurveyError;
 use crate::model::{BuildOptions, BuildReport};
 use crate::parse::{self, ParsedFile};
 use crate::walk::{self, Discovered};
-use crate::SurveyError;
 
 /// A discovered file with its content and freshness metadata.
 struct FileMeta {

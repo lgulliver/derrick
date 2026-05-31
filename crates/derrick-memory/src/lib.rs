@@ -808,7 +808,7 @@ mod tests {
     use chrono::TimeZone;
     use derrick_config::Config;
     use serde_json::json;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     use super::*;
 
@@ -970,10 +970,12 @@ state:
             .unwrap_or_else(|error| panic!("unmemoize should succeed: {error}"));
 
         assert!(outside.exists());
-        assert!(!store
-            .host_site_dir()
-            .unwrap_or_else(|| panic!("host dir exists"))
-            .exists());
+        assert!(
+            !store
+                .host_site_dir()
+                .unwrap_or_else(|| panic!("host dir exists"))
+                .exists()
+        );
     }
 
     #[test]
@@ -1319,17 +1321,21 @@ state:
         )
         .unwrap_or_else(|error| panic!("store should open: {error}"));
 
-        assert!(store
-            .seed(&seeds())
-            .unwrap_or_else(|error| panic!("seed should no-op: {error}"))
-            .is_empty());
+        assert!(
+            store
+                .seed(&seeds())
+                .unwrap_or_else(|error| panic!("seed should no-op: {error}"))
+                .is_empty()
+        );
         store
             .unmemoize()
             .unwrap_or_else(|error| panic!("unmemoize should no-op: {error}"));
-        assert!(store
-            .list()
-            .unwrap_or_else(|error| panic!("list should work: {error}"))
-            .is_empty());
+        assert!(
+            store
+                .list()
+                .unwrap_or_else(|error| panic!("list should work: {error}"))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1349,16 +1355,20 @@ state:
     fn missing_and_invalid_inputs_take_explicit_paths() {
         let (dir, store) = store_with_host();
 
-        assert!(store
-            .list()
-            .unwrap_or_else(|error| panic!("empty store should list: {error}"))
-            .is_empty());
+        assert!(
+            store
+                .list()
+                .unwrap_or_else(|error| panic!("empty store should list: {error}"))
+                .is_empty()
+        );
         fs::create_dir_all(store.paths.repo_state.join("runs/empty"))
             .unwrap_or_else(|error| panic!("empty run dir fixture should write: {error}"));
-        assert!(store
-            .list()
-            .unwrap_or_else(|error| panic!("store with empty run should list: {error}"))
-            .is_empty());
+        assert!(
+            store
+                .list()
+                .unwrap_or_else(|error| panic!("store with empty run should list: {error}"))
+                .is_empty()
+        );
         let mut entries = Vec::new();
         collect_file_entry(
             &store.paths.repo_state.join(RUNS_DIR),

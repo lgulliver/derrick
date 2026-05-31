@@ -117,11 +117,7 @@ pub(crate) fn project_dir(repo_root: &Path) -> Option<PathBuf> {
         .join(".claude")
         .join("projects")
         .join(key);
-    if path.is_dir() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.is_dir() { Some(path) } else { None }
 }
 
 /// Return the path to the most-recently-modified session file, or `None`.

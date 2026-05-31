@@ -7,11 +7,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use derrick_config::Config;
 use derrick_models::{
-    resolve_role, AuthStore, CompletionEvent, CompletionRequest, CompletionResponse,
-    CompletionStream, FinishReason, Model, ModelError, ProviderRegistry, Secret,
+    AuthStore, CompletionEvent, CompletionRequest, CompletionResponse, CompletionStream,
+    FinishReason, Model, ModelError, ProviderRegistry, Secret, resolve_role,
 };
-use futures::{stream, StreamExt};
-use tempfile::{tempdir, TempDir};
+use futures::{StreamExt, stream};
+use tempfile::{TempDir, tempdir};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -197,23 +197,29 @@ fn auth_store_for_testing_returns_override() -> TestResult {
 
 #[test]
 fn model_error_retryability_matches_error_kind() {
-    assert!(ModelError::Timeout {
-        provider: "shell".to_owned(),
-        seconds: 1,
-    }
-    .is_retryable());
-    assert!(ModelError::Provider {
-        provider: "shell".to_owned(),
-        message: "retry".to_owned(),
-        retryable: true,
-    }
-    .is_retryable());
+    assert!(
+        ModelError::Timeout {
+            provider: "shell".to_owned(),
+            seconds: 1,
+        }
+        .is_retryable()
+    );
+    assert!(
+        ModelError::Provider {
+            provider: "shell".to_owned(),
+            message: "retry".to_owned(),
+            retryable: true,
+        }
+        .is_retryable()
+    );
     assert!(!ModelError::UnknownProvider("nope".to_owned()).is_retryable());
-    assert!(!ModelError::InvalidConfig {
-        model: "bad".to_owned(),
-        message: "invalid".to_owned(),
-    }
-    .is_retryable());
+    assert!(
+        !ModelError::InvalidConfig {
+            model: "bad".to_owned(),
+            message: "invalid".to_owned(),
+        }
+        .is_retryable()
+    );
 }
 
 #[tokio::test]

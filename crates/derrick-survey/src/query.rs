@@ -5,11 +5,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 
+use crate::SurveyError;
 use crate::model::{ImpactSet, IndexStatus, PendingFile, SymbolContext, SymbolHit, SymbolKind};
 use crate::walk;
-use crate::SurveyError;
 
 /// Columns selected for a [`SymbolHit`], plus the symbol id as column 0.
 const HIT_COLUMNS: &str = "s.id, s.name, s.kind, f.path, s.start_line, s.end_line, s.signature";

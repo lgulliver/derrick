@@ -6,7 +6,7 @@
 //! three never drift.
 
 use derrick_config::Config;
-use derrick_tools::{catalogue, parse_model_choice, HostRegistry, ModelChoice};
+use derrick_tools::{HostRegistry, ModelChoice, catalogue, parse_model_choice};
 use serde_json::json;
 
 use crate::commands::ModelsArgs;
@@ -407,9 +407,11 @@ state:
     fn host_missing_is_fail() {
         let config = config_with_model("claude", "claude-opus-4-8");
         let checks = models_check_core_with(&config, &|_| false);
-        assert!(checks
-            .iter()
-            .any(|c| c.level == CheckLevel::Fail && c.message.contains("not installed")));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.level == CheckLevel::Fail && c.message.contains("not installed"))
+        );
     }
 
     #[test]
@@ -472,9 +474,11 @@ state:
     fn opencode_without_slash_is_warn() {
         let config = config_with_model("opencode", "sonnet");
         let checks = models_check_core_with(&config, &|_| true);
-        assert!(checks
-            .iter()
-            .any(|c| c.level == CheckLevel::Warn && c.message.contains("provider/model")));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.level == CheckLevel::Warn && c.message.contains("provider/model"))
+        );
         assert_eq!(fail_count(&checks), 0);
     }
 

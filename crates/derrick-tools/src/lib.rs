@@ -21,7 +21,7 @@ mod process;
 pub mod catalogue;
 pub mod hosts;
 
-pub use catalogue::{parse_model_choice, select_model, ModelChoice, Tier};
+pub use catalogue::{ModelChoice, Tier, parse_model_choice, select_model};
 pub use hosts::{AiderHost, ClaudeHost, CodexHost, CopilotHost, OpencodeHost};
 
 /// One host CLI that derrick can invoke.

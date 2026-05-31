@@ -3,8 +3,8 @@ use std::path::Path;
 
 use derrick_config::{Config, Host, ModelDef, Runner, StackBackendKind, SubstrateBackendKind};
 use derrick_substrate_native::NativeSubstrate;
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 
 use crate::commands::DoctorArgs;
 use crate::exit_code::CliExitCode;

@@ -12,13 +12,13 @@ use derrick_flow::hand_kind_for_executor;
 use derrick_hand::{HostCliHandDispatcher, HostCliHandDispatcherConfig};
 use derrick_stack::{GraphiteStackBackend, NativeStackBackend, NoneStackBackend, StackBackend};
 use derrick_substrate::{HandKind, Substrate};
+use derrick_substrate_native::NativeSubstrate;
 #[allow(deprecated)]
 use derrick_substrate_native::foreman::CopilotStubDispatcher;
 use derrick_substrate_native::foreman::{
     Foreman, ForemanTtls, GhRepoState, HandDispatcher, MultiDispatcher,
 };
-use derrick_substrate_native::NativeSubstrate;
-use derrick_tools::{parse_model_choice, HostRegistry, ModelChoice};
+use derrick_tools::{HostRegistry, ModelChoice, parse_model_choice};
 
 use crate::commands::{
     ForemanArgs, ForemanCommand, ForemanStartArgs, ForemanStartMode, ForemanStopArgs,

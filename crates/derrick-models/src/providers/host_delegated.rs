@@ -20,8 +20,8 @@ use derrick_config::ModelDef;
 use derrick_tools::{CopilotToolPermission, HostAdapter, HostError, HostRequest, HostResponse};
 
 use crate::{
-    builtin_cost_hint, AuthStore, CompletionEvent, CompletionRequest, CompletionStream, CostHint,
-    FinishReason, Model, ModelError,
+    AuthStore, CompletionEvent, CompletionRequest, CompletionStream, CostHint, FinishReason, Model,
+    ModelError, builtin_cost_hint,
 };
 
 /// A model whose inference is delegated to a `derrick-tools` host adapter.

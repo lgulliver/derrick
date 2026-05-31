@@ -24,11 +24,11 @@ use chrono::Utc;
 use derrick_substrate::{
     Complexity, EventKind, EventScope, Hand, HandId, HandKind, Substrate, SubstrateError, Ticket,
 };
-use derrick_substrate_native::foreman::{
-    prune_ticket_worktree_dir, DispatchContext, DispatchError, DispatchResult, HandDispatcher,
-};
 use derrick_substrate_native::NativeSubstrate;
-use derrick_tools::{select_model, HostRegistry, HostRequest, ModelChoice, Tier};
+use derrick_substrate_native::foreman::{
+    DispatchContext, DispatchError, DispatchResult, HandDispatcher, prune_ticket_worktree_dir,
+};
+use derrick_tools::{HostRegistry, HostRequest, ModelChoice, Tier, select_model};
 use tokio::process::Command;
 use tracing::{info, instrument, warn};
 

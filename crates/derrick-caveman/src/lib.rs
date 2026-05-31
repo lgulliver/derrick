@@ -568,11 +568,7 @@ fn remove_phrases(input: &str, _intensity: Intensity) -> String {
             regex
                 .replace_all(input, |caps: &regex::Captures<'_>| {
                     let matched = caps.get(0).map_or("", |m| m.as_str());
-                    if matched.ends_with(' ') {
-                        " "
-                    } else {
-                        ""
-                    }
+                    if matched.ends_with(' ') { " " } else { "" }
                 })
                 .into_owned()
         },

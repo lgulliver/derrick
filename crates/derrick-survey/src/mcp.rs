@@ -5,15 +5,15 @@
 //! rebuild, (2) a per-response staleness banner emitted only while the index is
 //! dirty, and (3) a connect-time incremental build before the first query.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::service::ServiceExt;
 use rmcp::transport::stdio;
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -274,9 +274,10 @@ mod tests {
 
         // `get_info` is delivered to the client during initialize.
         let info = client.peer_info();
-        assert!(info
-            .and_then(|i| i.instructions.as_deref())
-            .is_some_and(|i| i.contains("derrick_survey_search")));
+        assert!(
+            info.and_then(|i| i.instructions.as_deref())
+                .is_some_and(|i| i.contains("derrick_survey_search"))
+        );
 
         client.cancel().await.unwrap();
         handle.abort();

@@ -768,11 +768,7 @@ pub fn reconcile_verdicts(
             // In autonomous mode, fall back to majority semantics so the
             // pipeline can proceed headlessly. A deliberate `reject` still
             // halts the pipeline.
-            if any_hard_reject {
-                "reject"
-            } else {
-                "accept"
-            }
+            if any_hard_reject { "reject" } else { "accept" }
         }
     };
 

@@ -10,10 +10,10 @@ use chrono::{DateTime, Utc};
 
 pub use derrick_config::Site;
 pub use types::{
-    ticket_id_pattern, Batch, BatchName, BlockReason, Complexity, Event, EventId, EventKind,
-    EventScope, ForemanMode, ForemanStatus, Hand, HandId, HandKind, InReviewMetadata, Link,
-    LinkKind, ManualDoneAttestation, NewEvent, NewTicket, SubstrateError, Ticket, TicketFilter,
-    TicketId, TicketState, TypedEvent,
+    Batch, BatchName, BlockReason, Complexity, Event, EventId, EventKind, EventScope, ForemanMode,
+    ForemanStatus, Hand, HandId, HandKind, InReviewMetadata, Link, LinkKind, ManualDoneAttestation,
+    NewEvent, NewTicket, SubstrateError, Ticket, TicketFilter, TicketId, TicketState, TypedEvent,
+    ticket_id_pattern,
 };
 
 /// Storage contract implemented by derrick substrate backends.

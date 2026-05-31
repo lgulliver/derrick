@@ -32,7 +32,7 @@ use owo_colors::OwoColorize;
 
 use crate::commands::{AddArgs, AddFeatureArgs, RunArgs, RunCommand};
 use crate::exit_code::CliExitCode;
-use crate::{current_repo_root, read_config, CliError};
+use crate::{CliError, current_repo_root, read_config};
 
 pub(crate) async fn execute(args: AddArgs) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root()?;

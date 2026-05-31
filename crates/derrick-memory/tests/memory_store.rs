@@ -7,11 +7,11 @@ use std::thread;
 use chrono::{DateTime, TimeZone, Utc};
 use derrick_config::{Config, Site};
 use derrick_memory::{
-    extract_query_tags, Lesson, MemoryError, MemoryLayer, MemoryPaths, MemoryStore, Seeds,
+    Lesson, MemoryError, MemoryLayer, MemoryPaths, MemoryStore, Seeds, extract_query_tags,
 };
 use derrick_substrate::ticket_id_pattern;
-use serde_json::{json, Value};
-use tempfile::{tempdir, TempDir};
+use serde_json::{Value, json};
+use tempfile::{TempDir, tempdir};
 
 fn temp_dir() -> TempDir {
     tempdir().unwrap_or_else(|error| panic!("tempdir should be created: {error}"))
@@ -138,11 +138,13 @@ fn seed_list_and_unmemoize_cover_host_memory_domain() {
         read_to_string(&site_dir.join("MEMORY.md")),
         "- feedback/guardrails.md\n- project/prefix.md\n- project/site.md\n- reference/tasks.md\n"
     );
-    assert!(store
-        .list()
-        .unwrap_or_else(|error| panic!("list should work: {error}"))
-        .iter()
-        .any(|entry| entry.layer == MemoryLayer::Project));
+    assert!(
+        store
+            .list()
+            .unwrap_or_else(|error| panic!("list should work: {error}"))
+            .iter()
+            .any(|entry| entry.layer == MemoryLayer::Project)
+    );
 
     let outside = dir.path().join("host-memory/outside.md");
     fs::write(&outside, "keep")
@@ -252,9 +254,11 @@ fn append_digest_is_safe_under_parallel_writers() {
     let entries = store
         .list()
         .unwrap_or_else(|error| panic!("list should work: {error}"));
-    assert!(entries
-        .iter()
-        .any(|entry| entry.layer == MemoryLayer::RunDigest));
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.layer == MemoryLayer::RunDigest)
+    );
 }
 
 #[test]

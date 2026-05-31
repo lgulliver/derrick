@@ -810,10 +810,11 @@ fn run_add_feature_smoke_writes_real_artifacts() -> TestResult {
     assert!(dir.path().join("specs/001-hello/plan.md").exists());
     assert!(dir.path().join("specs/001-hello/tasks.md").exists());
     assert!(dir.path().join("specs/001-hello/assay/verdict.md").exists());
-    assert!(dir
-        .path()
-        .join(".derrick/runs/smoke/manifest.json")
-        .exists());
+    assert!(
+        dir.path()
+            .join(".derrick/runs/smoke/manifest.json")
+            .exists()
+    );
     Ok(())
 }
 
@@ -839,10 +840,11 @@ fn add_reads_prompt_from_stdin() -> TestResult {
         .success();
 
     assert!(dir.path().join("specs/001-hello/spec.md").exists());
-    assert!(dir
-        .path()
-        .join(".derrick/runs/stdin-smoke/manifest.json")
-        .exists());
+    assert!(
+        dir.path()
+            .join(".derrick/runs/stdin-smoke/manifest.json")
+            .exists()
+    );
     Ok(())
 }
 

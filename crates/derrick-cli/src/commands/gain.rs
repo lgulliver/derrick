@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn gain_json_with_survey_queries_includes_savings() {
-        use crate::telemetry::{TokenUsage, SURVEY_TOKENS_SAVED_PER_QUERY};
+        use crate::telemetry::{SURVEY_TOKENS_SAVED_PER_QUERY, TokenUsage};
         let u = TokenUsage {
             input_tokens: 500,
             output_tokens: 100,

@@ -11,9 +11,10 @@ use owo_colors::OwoColorize;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 
-use crate::manifest::{prior_feature_dir, FlagsManifest, ManifestStep, RunManifest};
+use crate::manifest::{FlagsManifest, ManifestStep, RunManifest, prior_feature_dir};
 use crate::progress::{NoopReporter, ProgressReporter, RunProgress, StepProgress};
 use crate::steps;
+use derrick_assay::ExecutionState;
 use derrick_assay::io::{
     config_hash, create_dir_all, default_run_id, read_dir_names, read_feature_dir,
 };
@@ -22,7 +23,6 @@ use derrick_assay::template::{validate_rounds_template, validate_template};
 use derrick_assay::types::{
     PipelineInput, RunError, RunOutcome, RunStatus, StepRecord, StepStatus,
 };
-use derrick_assay::ExecutionState;
 
 const ADD_FEATURE_PIPELINE: &str = "add-feature";
 
@@ -217,8 +217,7 @@ impl Runner {
         let run_timer = std::time::Instant::now();
         // Constitution is a repo-wide guardrail; always check (and write) it
         // against the main working tree, not a per-run worktree.
-        steps::ensure_constitution(&self.config, &self.repo_root, self.hosts.clone())
-            .await?;
+        steps::ensure_constitution(&self.config, &self.repo_root, self.hosts.clone()).await?;
 
         let tail = &self.config.pipeline()[start_index..];
         let total_steps = tail.len();
@@ -468,8 +467,7 @@ impl Runner {
                                             eprintln!(
                                                 "  {} Would you like these tasks created as GitHub Issues? {}",
                                                 "\u{276f}".cyan(),
-                                                format!("({task_count} issues)")
-                                                    .bright_black()
+                                                format!("({task_count} issues)").bright_black()
                                             );
                                             eprint!("  {} [Y/n] ", "\u{276f}".cyan());
                                             std::io::stderr().flush().ok();

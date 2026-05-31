@@ -20,11 +20,11 @@ use derrick_substrate::{
     Complexity, EventKind, EventScope, Hand, HandId, HandKind, InReviewMetadata,
     ManualDoneAttestation, Substrate, SubstrateError, Ticket, TicketId, TicketState,
 };
-use derrick_substrate_native::foreman::{
-    prune_ticket_worktree_dir, DispatchContext, DispatchError, DispatchResult, HandDispatcher,
-};
 use derrick_substrate_native::NativeSubstrate;
-use derrick_tools::{select_model, ModelChoice, Tier};
+use derrick_substrate_native::foreman::{
+    DispatchContext, DispatchError, DispatchResult, HandDispatcher, prune_ticket_worktree_dir,
+};
+use derrick_tools::{ModelChoice, Tier, select_model};
 use tokio::process::Command;
 use tracing::{error, info, instrument, warn};
 

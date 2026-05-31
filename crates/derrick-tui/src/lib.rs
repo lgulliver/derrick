@@ -17,4 +17,4 @@ pub use data::{
     OverviewData, ParseTabError, StackNode, StackSummary, StepTokenSummary, Tab, TicketRow,
     TokenSummary,
 };
-pub use event_loop::{install_panic_hook, run_event_loop, EventLoopPaths};
+pub use event_loop::{EventLoopPaths, install_panic_hook, run_event_loop};

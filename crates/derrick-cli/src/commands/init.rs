@@ -3,11 +3,11 @@ use std::io::IsTerminal;
 use std::path::Path;
 
 use derrick_adopt::{AdoptOptions, Adopter, ConstitutionMode};
-use derrick_config::{render_init_template, Config, InitTemplateVars};
+use derrick_config::{Config, InitTemplateVars, render_init_template};
 use derrick_substrate_native::NativeSubstrate;
 
-use crate::commands::init_wizard::{AiConfigurationStyle, WizardInput, WizardSelection};
 use crate::commands::InitArgs;
+use crate::commands::init_wizard::{AiConfigurationStyle, WizardInput, WizardSelection};
 use crate::exit_code::CliExitCode;
 use crate::ui;
 use crate::{create_dir_all, current_repo_root, message, native_paths, read_config, write_file};
@@ -821,7 +821,9 @@ fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
         true
     } else if std::io::stdin().is_terminal() {
         if ui::styled() {
-            eprint!("  \x1b[36m›\x1b[0m  Install speckit now (\x1b[1muv tool install specify-cli\x1b[0m)? [Y/n] ");
+            eprint!(
+                "  \x1b[36m›\x1b[0m  Install speckit now (\x1b[1muv tool install specify-cli\x1b[0m)? [Y/n] "
+            );
         } else {
             eprint!("  ›  Install speckit now (uv tool install specify-cli)? [Y/n] ");
         }
@@ -858,10 +860,14 @@ fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
             // `uv` is not on PATH — treat the same as a failed install.
             if ui::styled() {
                 eprintln!("  \x1b[33m⚠\x1b[0m  speckit install failed — `uv` not found on PATH.");
-                eprintln!("     Install uv (<https://docs.astral.sh/uv/>) then run \x1b[1muv tool install specify-cli\x1b[0m.");
+                eprintln!(
+                    "     Install uv (<https://docs.astral.sh/uv/>) then run \x1b[1muv tool install specify-cli\x1b[0m."
+                );
             } else {
                 eprintln!("  ⚠  speckit install failed — `uv` not found on PATH.");
-                eprintln!("     Install uv (https://docs.astral.sh/uv/) then run `uv tool install specify-cli`.");
+                eprintln!(
+                    "     Install uv (https://docs.astral.sh/uv/) then run `uv tool install specify-cli`."
+                );
             }
             return Ok(());
         }
@@ -876,7 +882,9 @@ fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {
     if !status.success() {
         if ui::styled() {
             eprintln!("  \x1b[33m⚠\x1b[0m  speckit install failed — falling back to shims.");
-            eprintln!("     Run \x1b[1muv tool install specify-cli\x1b[0m manually and re-run \x1b[1mderrick init\x1b[0m.");
+            eprintln!(
+                "     Run \x1b[1muv tool install specify-cli\x1b[0m manually and re-run \x1b[1mderrick init\x1b[0m."
+            );
         } else {
             eprintln!("  ⚠  speckit install failed — falling back to shims.");
             eprintln!("     Run `uv tool install specify-cli` manually and re-run `derrick init`.");
@@ -992,9 +1000,13 @@ fn maybe_initial_commit(repo_root: &Path) -> Result<(), crate::CliError> {
     if !add_status.success() {
         // Non-fatal: the user can commit manually if something is odd.
         if ui::styled() {
-            eprintln!("  \x1b[33m⚠\x1b[0m  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`.");
+            eprintln!(
+                "  \x1b[33m⚠\x1b[0m  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`."
+            );
         } else {
-            eprintln!("  ⚠  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`.");
+            eprintln!(
+                "  ⚠  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`."
+            );
         }
         return Ok(());
     }
@@ -1009,9 +1021,13 @@ fn maybe_initial_commit(repo_root: &Path) -> Result<(), crate::CliError> {
         })?;
     if !commit_status.success() {
         if ui::styled() {
-            eprintln!("  \x1b[33m⚠\x1b[0m  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`.");
+            eprintln!(
+                "  \x1b[33m⚠\x1b[0m  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`."
+            );
         } else {
-            eprintln!("  ⚠  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`.");
+            eprintln!(
+                "  ⚠  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`."
+            );
         }
         return Ok(());
     }

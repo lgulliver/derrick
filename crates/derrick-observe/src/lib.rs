@@ -17,7 +17,7 @@ use derrick_config::Config;
 use derrick_substrate::Substrate;
 use derrick_substrate_native::{NativeConfig, NativeSubstrate};
 use derrick_tui::{
-    install_panic_hook, run_event_loop, App, DataModel, EventLoopPaths, MemoryEntry, StackNode, Tab,
+    App, DataModel, EventLoopPaths, MemoryEntry, StackNode, Tab, install_panic_hook, run_event_loop,
 };
 
 const MEMORY_PREVIEW_CHARS: usize = 200;

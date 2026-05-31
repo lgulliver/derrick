@@ -15,9 +15,9 @@ use std::time::Duration;
 use crossterm::event::{Event as CtEvent, EventStream, KeyCode};
 use derrick_substrate::Substrate;
 use futures::StreamExt;
+use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::app::App;

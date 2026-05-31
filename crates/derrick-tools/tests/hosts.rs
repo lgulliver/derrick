@@ -8,7 +8,7 @@ use derrick_tools::{
     AiderHost, ClaudeHost, CodexHost, CopilotHost, CopilotToolPermission, HostAdapter, HostError,
     HostRegistry, HostRequest, OpencodeHost,
 };
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 use tokio::sync::{Mutex, MutexGuard};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -128,9 +128,11 @@ async fn output_sink_streams_lines_while_capturing_full_output() -> TestResult {
         .map(|(_, l)| l.as_str())
         .collect();
     assert_eq!(stdout_lines, vec!["line one", "line two"]);
-    assert!(lines
-        .iter()
-        .any(|(s, l)| *s == StreamSource::Stderr && l == "oops"));
+    assert!(
+        lines
+            .iter()
+            .any(|(s, l)| *s == StreamSource::Stderr && l == "oops")
+    );
     Ok(())
 }
 
