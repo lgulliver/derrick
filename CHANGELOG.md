@@ -6,6 +6,22 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] — 2026-05-31
+
+### Added
+- **`derrick survey setup`** — standalone MCP wiring for any git repo. Creates
+  `.derrick/` + `.gitignore` and merges the `derrick-survey` server into
+  `.mcp.json` without requiring `derrick init`, a `derrick.yaml`, or a
+  substrate database. Useful for Cursor, Windsurf, or any other MCP-capable
+  host that does not need the full derrick pipeline. `docs/survey.md` updated
+  with a two-path setup guide.
+
+### Fixed
+- **`derrick init` wizard missing `opencode` and `aider`** — both hosts are
+  first-class crew executors (D66) but were absent from
+  `available_model_choices()`, making them unselectable at every role-binding
+  prompt in the wizard.
+
 ## [0.1.0-alpha.2] — 2026-05-31
 
 ### Fixed
@@ -132,5 +148,7 @@ architecture and 68 recorded decisions live in [DESIGN.md](./DESIGN.md).
   `copilot` CLI.
 - Homebrew tap is planned for a later release.
 
-[Unreleased]: https://github.com/lgulliver/derrick/compare/v0.1.0-alpha.1...HEAD
+[Unreleased]: https://github.com/lgulliver/derrick/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/lgulliver/derrick/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
+[0.1.0-alpha.2]: https://github.com/lgulliver/derrick/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/lgulliver/derrick/releases/tag/v0.1.0-alpha.1
