@@ -544,19 +544,47 @@ pub(crate) fn recommended_role_bindings(
 ) -> RoleBindings {
     let claude_opus = pick_model(
         available_models,
-        &["claude-opus", "claude-sonnet", "codex-gpt5", "copilot"],
+        &[
+            "claude-opus",
+            "claude-sonnet",
+            "codex-gpt5",
+            "copilot",
+            "opencode",
+            "aider",
+        ],
     );
     let claude_sonnet = pick_model(
         available_models,
-        &["claude-sonnet", "claude-opus", "codex-gpt5", "copilot"],
+        &[
+            "claude-sonnet",
+            "claude-opus",
+            "codex-gpt5",
+            "copilot",
+            "opencode",
+            "aider",
+        ],
     );
     let codex = pick_model(
         available_models,
-        &["codex-gpt5", "copilot", "claude-sonnet", "claude-opus"],
+        &[
+            "codex-gpt5",
+            "copilot",
+            "opencode",
+            "aider",
+            "claude-sonnet",
+            "claude-opus",
+        ],
     );
     let copilot = pick_model(
         available_models,
-        &["copilot", "codex-gpt5", "claude-sonnet", "claude-opus"],
+        &[
+            "copilot",
+            "codex-gpt5",
+            "opencode",
+            "aider",
+            "claude-sonnet",
+            "claude-opus",
+        ],
     );
     // Summariser favours the cheap, fast model, matching Config::defaults().
     let claude_haiku = pick_model(
@@ -567,6 +595,8 @@ pub(crate) fn recommended_role_bindings(
             "claude-opus",
             "codex-gpt5",
             "copilot",
+            "opencode",
+            "aider",
         ],
     );
 
@@ -625,6 +655,8 @@ pub(crate) fn available_model_choices() -> Vec<(&'static str, &'static str)> {
         ("claude-haiku", "fast and cheap for summaries"),
         ("codex-gpt5", "good for code review and implementation"),
         ("copilot", "good for Copilot CLI workflows"),
+        ("opencode", "good for OpenCode CLI workflows"),
+        ("aider", "good for Aider CLI workflows"),
     ]
 }
 
