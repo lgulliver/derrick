@@ -627,14 +627,13 @@ impl NativeSubstrate {
     {
         let guard = Arc::clone(&self.writer).lock_owned().await;
         let db_path = self.db_path.clone();
-        let result = task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             let _guard = guard;
             let mut connection = open_writer_connection(&db_path)?;
             operation(&mut connection)
         })
         .await
-        .map_err(join_error)?;
-        result
+        .map_err(join_error)?
     }
 
     #[cfg(test)]
