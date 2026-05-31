@@ -531,6 +531,12 @@ pub(crate) enum SurveyCommand {
     Status(SurveyStatusArgs),
     /// Run the MCP server over stdio (what coding-agent hosts launch).
     Serve(SurveyServeArgs),
+    /// Wire the survey MCP server into this repo without running `derrick init`.
+    ///
+    /// Creates `.derrick/` (with a `.gitignore` for the index DB) and merges
+    /// the `derrick-survey` stdio server into `.mcp.json`. Safe to run on any
+    /// git repo — does not require a `derrick.yaml` or a substrate database.
+    Setup(SurveySetupArgs),
 }
 
 #[derive(Debug, Args)]
@@ -578,6 +584,9 @@ pub(crate) struct SurveyServeArgs {
     #[arg(long, default_value_t = true)]
     pub(crate) mcp: bool,
 }
+
+#[derive(Debug, Args)]
+pub(crate) struct SurveySetupArgs {}
 
 impl From<CompletionShell> for clap_complete::Shell {
     fn from(shell: CompletionShell) -> Self {
