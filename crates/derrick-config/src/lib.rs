@@ -2864,7 +2864,8 @@ state:
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let old_home = env::var_os("HOME");
-        env::remove_var("HOME");
+        // SAFETY: single-threaded test context serialised by HOME_LOCK.
+        unsafe { env::remove_var("HOME") };
         let repo = tempfile::tempdir().unwrap_or_else(|error| {
             panic!("failed to create temp repo: {error}");
         });
@@ -2872,7 +2873,8 @@ state:
         let config = Config::load_layered(repo.path())
             .unwrap_or_else(|error| panic!("defaults should layer: {error}"));
         if let Some(old_home) = old_home {
-            env::set_var("HOME", old_home);
+            // SAFETY: single-threaded test context serialised by HOME_LOCK.
+            unsafe { env::set_var("HOME", old_home) };
         }
 
         assert_eq!(config.site().prefix(), "drk");
@@ -2931,13 +2933,16 @@ guardrails:
         );
 
         let old_home = env::var_os("HOME");
-        env::set_var("HOME", home.path());
+        // SAFETY: single-threaded test context serialised by HOME_LOCK.
+        unsafe { env::set_var("HOME", home.path()) };
         let config = Config::load_layered(repo.path())
             .unwrap_or_else(|error| panic!("layered config should load: {error}"));
         if let Some(old_home) = old_home {
-            env::set_var("HOME", old_home);
+            // SAFETY: single-threaded test context serialised by HOME_LOCK.
+            unsafe { env::set_var("HOME", old_home) };
         } else {
-            env::remove_var("HOME");
+            // SAFETY: single-threaded test context serialised by HOME_LOCK.
+            unsafe { env::remove_var("HOME") };
         }
 
         assert_eq!(config.site().name(), "repo-site");

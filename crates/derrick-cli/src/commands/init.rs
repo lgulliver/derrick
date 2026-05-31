@@ -709,18 +709,30 @@ fn init_mode_to_substrate(mode: crate::commands::InitMode) -> derrick_config::Su
 }
 
 fn print_plan(plan: &derrick_adopt::AdoptionPlan) {
+    const INDENT: &str = "             ";
     println!("adoption plan");
     if !plan.writes.is_empty() {
-        println!("writes       {}", join_planned_writes(&plan.writes));
+        let mut iter = plan.writes.iter();
+        println!("writes       {}", iter.next().unwrap().path.display());
+        for write in iter {
+            println!("{INDENT}{}", write.path.display());
+        }
     }
     if !plan.references.is_empty() {
-        let references = plan
-            .references
-            .iter()
-            .map(|reference| format!("{} as {}", reference.path.display(), reference.as_field))
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("references   {references}");
+        let mut iter = plan.references.iter();
+        let first = iter.next().unwrap();
+        println!(
+            "references   {} as {}",
+            first.path.display(),
+            first.as_field
+        );
+        for reference in iter {
+            println!(
+                "{INDENT}{} as {}",
+                reference.path.display(),
+                reference.as_field
+            );
+        }
     }
     for warning in &plan.warnings {
         println!("warning      {warning}");
@@ -728,22 +740,6 @@ fn print_plan(plan: &derrick_adopt::AdoptionPlan) {
     for blocker in &plan.blockers {
         println!("blocker      {blocker}");
     }
-}
-
-fn join_planned_writes(writes: &[derrick_adopt::PlannedWrite]) -> String {
-    let paths = writes
-        .iter()
-        .map(|write| write.path.clone())
-        .collect::<Vec<_>>();
-    join_paths(&paths)
-}
-
-fn join_paths(paths: &[std::path::PathBuf]) -> String {
-    paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn ensure_git_repo(yes: bool) -> Result<std::path::PathBuf, crate::CliError> {

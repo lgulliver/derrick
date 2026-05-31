@@ -6,6 +6,28 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] — 2026-05-31
+
+### Fixed
+- **Splash logo alignment** — all 12 box lines are now exactly 65 display
+  columns wide; ASCII-art rows were 1–2 chars short and the subtitle was 1 char
+  too wide, causing a ragged right border on narrow terminals.
+- **Adoption plan `writes` formatting** — file paths now print one per line with
+  13-char indent continuation instead of a single comma-joined line that wrapped
+  mid-terminal.
+- **`derrick add` false "No constitution found" warning** — `ensure_constitution`
+  was checking the per-run git worktree path (created from HEAD) rather than the
+  main working tree; files not yet committed appeared missing.
+
+### Added
+- **Codex PreToolUse / PostToolUse hooks (D69, resolves D34)** — `derrick init`
+  now writes `.codex/settings.toml` with scrub (`derrick scrub --tool bash`) and
+  caveman (`derrick caveman --intensity lite`) hooks on matchers
+  `Bash|Read|Write|Edit|Glob|Grep`, matching the Claude Code D29 path.
+  `CodexHost::run()` passes `--dangerously-bypass-hook-trust` so hooks fire
+  automatically in non-interactive automation. The "Codex tool I/O not scrubbed"
+  warning on `derrick init` is removed.
+
 ## [0.1.0-alpha.1] — 2026-05-30
 
 First public pre-release. derrick is a unified layer over speckit, courtroom,

@@ -335,7 +335,7 @@ pub async fn run_reviewer_rounds(
     let mut previous_objections: Option<String> = None;
 
     while round <= max_rounds {
-        let (prompt, cached) = if let (2.., Some(ref prev)) = (round, &previous_objections) {
+        let (prompt, cached) = if let (2.., Some(prev)) = (round, &previous_objections) {
             // Rounds 2+: send only the latest delta with the previous objections
             let plan_delta =
                 last_delta_from_plan(&working_dir.join(feature_dir).join("plan.md"), prev)?;

@@ -139,7 +139,8 @@ state:
 #[test]
 fn auth_store_reads_env_vars() -> TestResult {
     let key = unique_env_key("AUTH");
-    std::env::set_var(&key, "test-secret");
+    // SAFETY: unique key; no other thread reads this env var.
+    unsafe { std::env::set_var(&key, "test-secret") };
     let auth = AuthStore::from_env();
 
     let secret = auth.get("anthropic", &key).ok_or("secret should exist")?;
@@ -151,7 +152,8 @@ fn auth_store_reads_env_vars() -> TestResult {
 #[test]
 fn auth_store_env_map_exposes_process_env() -> TestResult {
     let key = unique_env_key("ENVMAP");
-    std::env::set_var(&key, "passthrough-value");
+    // SAFETY: unique key; no other thread reads this env var.
+    unsafe { std::env::set_var(&key, "passthrough-value") };
     let auth = AuthStore::from_env();
 
     let map = auth.env_map();
@@ -658,7 +660,9 @@ async fn host_delegated_complete_returns_host_text_and_tokens() -> TestResult {
         std::iter::once(bin_dir.clone())
             .chain(std::env::split_paths(&old_path.clone().unwrap_or_default())),
     )?;
-    std::env::set_var("PATH", &joined);
+    // SAFETY: tokio::test defaults to a current-thread runtime; no other
+    // threads run concurrently inside this test.
+    unsafe { std::env::set_var("PATH", &joined) };
 
     let (_cfg_dir, config) = write_minimal_config(
         "  c:\n    provider: claude\n    model: claude-opus-4-8\n",
@@ -671,10 +675,12 @@ async fn host_delegated_complete_returns_host_text_and_tokens() -> TestResult {
         .complete(request("hello", Duration::from_secs(10)))
         .await;
 
+    // SAFETY: tokio::test defaults to a current-thread runtime; no other
+    // threads run concurrently inside this test.
     if let Some(path) = old_path {
-        std::env::set_var("PATH", path);
+        unsafe { std::env::set_var("PATH", path) };
     } else {
-        std::env::remove_var("PATH");
+        unsafe { std::env::remove_var("PATH") };
     }
 
     let response = response?;

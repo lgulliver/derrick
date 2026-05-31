@@ -51,6 +51,9 @@ impl HostAdapter for CodexHost {
         let mut args = vec![
             OsString::from("exec"),
             OsString::from("--skip-git-repo-check"),
+            // Hooks written by `derrick init` are derrick-authored; bypass
+            // interactive trust prompts for non-interactive automation (D29/D34).
+            OsString::from("--dangerously-bypass-hook-trust"),
         ];
         if let Some(ref model) = request.model {
             args.push(OsString::from("--model"));

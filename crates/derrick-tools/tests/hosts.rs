@@ -195,6 +195,7 @@ printf 'ok'
         HostKind::Codex => vec![
             "exec".to_owned(),
             "--skip-git-repo-check".to_owned(),
+            "--dangerously-bypass-hook-trust".to_owned(),
             req.prompt.clone(),
         ],
         HostKind::Copilot => vec![
@@ -274,7 +275,7 @@ case "$1:$2:$3:$4" in
   --print:--output-format:json:/speckit.specify\ hello\ world* )
     printf 'prompt-ok'
     ;;
-  exec:--skip-git-repo-check:/speckit.specify\ hello\ world*:* )
+  exec:--skip-git-repo-check:--dangerously-bypass-hook-trust:/speckit.specify\ hello\ world* )
     printf 'prompt-ok'
     ;;
   -p:/speckit.specify\ hello\ world*:*:* )
@@ -387,7 +388,8 @@ exit 0
 "#,
     )?;
     let old_path = std::env::var_os("PATH");
-    std::env::set_var("PATH", path_with(host.path())?);
+    // SAFETY: single-threaded test; process_lock() serialises all PATH mutations.
+    unsafe { std::env::set_var("PATH", path_with(host.path())?) };
     let adapter = kind.default_adapter();
 
     let available = adapter.is_available();
@@ -401,7 +403,8 @@ async fn assert_unavailable_when_absent(kind: HostKind) -> TestResult {
     let _guard = process_lock().await;
     let empty = tempdir()?;
     let old_path = std::env::var_os("PATH");
-    std::env::set_var("PATH", empty.path());
+    // SAFETY: single-threaded test; process_lock() serialises all PATH mutations.
+    unsafe { std::env::set_var("PATH", empty.path()) };
     let adapter = kind.default_adapter();
 
     let available = adapter.is_available();
@@ -412,10 +415,13 @@ async fn assert_unavailable_when_absent(kind: HostKind) -> TestResult {
 }
 
 fn restore_path(path: Option<std::ffi::OsString>) {
-    if let Some(path) = path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
+    // SAFETY: called only inside process_lock() critical section.
+    unsafe {
+        if let Some(path) = path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
     }
 }
 

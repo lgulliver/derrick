@@ -215,7 +215,9 @@ impl Runner {
         let start_index = manifest.steps.len();
         let mut outcome_status = RunStatus::Success;
         let run_timer = std::time::Instant::now();
-        steps::ensure_constitution(&self.config, self.working_dir(&state), self.hosts.clone())
+        // Constitution is a repo-wide guardrail; always check (and write) it
+        // against the main working tree, not a per-run worktree.
+        steps::ensure_constitution(&self.config, &self.repo_root, self.hosts.clone())
             .await?;
 
         let tail = &self.config.pipeline()[start_index..];
