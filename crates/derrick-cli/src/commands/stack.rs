@@ -297,3 +297,126 @@ async fn stack_submit(
     println!("submit summary: opened={opened}");
     Ok(CliExitCode::Success)
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use super::*;
+
+    // build_backend's git-spice/graphite arms shell out to a CLI whose presence
+    // is verified at construction, so these tests put a fake `gs`/`gt` on PATH.
+    // PATH is process-global; serialize via this lock.
+    fn path_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn install_fake(dir: &Path, name: &str) {
+        let path = dir.join(name);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake binary");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod");
+    }
+
+    fn config_with_backend(backend: &str) -> Config {
+        let yaml = format!(
+            r#"
+version: 1
+site:
+  name: test-site
+  prefix: tst
+models:
+  claude-sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-6
+roles:
+  drafter: claude-sonnet
+tools:
+  substrate:
+    backend: native
+    mode: solo
+  git:
+    stacking:
+      backend: {backend}
+pipeline: []
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+state:
+  dir: .derrick
+"#
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("derrick.yaml");
+        fs::write(&path, yaml).expect("write yaml");
+        Config::load_from_path(&path).expect("load config")
+    }
+
+    /// Regression test for the wiring bug: configuring `git-spice` used to map
+    /// to the Graphite stub. It must now build a real git-spice backend.
+    #[test]
+    fn git_spice_config_builds_git_spice_backend() {
+        let _guard = path_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var("PATH").ok();
+        // SAFETY: serialized by path_lock; PATH restored below.
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    tmp.path().display(),
+                    prev.as_deref().unwrap_or("")
+                ),
+            );
+        }
+        install_fake(tmp.path(), "gs");
+
+        let config = config_with_backend("git-spice");
+        let backend = build_backend(Path::new("."), &config).expect("build git-spice backend");
+        assert_eq!(backend.kind(), "git-spice");
+
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    /// Graphite config builds the graphite backend (not the git-spice one).
+    #[test]
+    fn graphite_config_builds_graphite_backend() {
+        let _guard = path_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var("PATH").ok();
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    tmp.path().display(),
+                    prev.as_deref().unwrap_or("")
+                ),
+            );
+        }
+        install_fake(tmp.path(), "gt");
+
+        let config = config_with_backend("graphite");
+        let backend = build_backend(Path::new("."), &config).expect("build graphite backend");
+        assert_eq!(backend.kind(), "graphite");
+
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}

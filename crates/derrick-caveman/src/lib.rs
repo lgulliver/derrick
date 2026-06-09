@@ -242,7 +242,13 @@ fn protected_end_at(input: &str, pos: usize) -> Option<usize> {
         return Some(diagnostic_end(input, pos));
     }
 
-    if rest.starts_with("error:") || rest.starts_with("Error:") {
+    if rest.starts_with("error[")
+        || rest.starts_with("error:")
+        || rest.starts_with("Error:")
+        || (is_line_start(input, pos) && rest.starts_with("note:"))
+        || (is_line_start(input, pos) && rest.starts_with("help:"))
+        || (is_line_start(input, pos) && rest.starts_with("warning:"))
+    {
         return Some(error_end(input, pos));
     }
 
@@ -289,6 +295,32 @@ fn error_end(input: &str, pos: usize) -> usize {
         Some(rest) => rest,
         None => return input.len(),
     };
+
+    // Detect whether this is the start of a compiler diagnostic block.
+    // Rustc format:  error[E0308]: ...   or   error: ...
+    //                  --> src/...
+    //                   |
+    //                nn | code
+    //                   | ^^^^
+    //                   |
+    //                   = note: ...
+    //                   = help: ...
+    // Generic:       Error: ...  followed by  at file:line  or  File "..." line N
+    //
+    // We protect the entire block: run line-by-line until we hit a line that
+    // is neither a diagnostic continuation nor a blank separator inside the
+    // block. A blank line followed by a non-continuation line ends the block.
+
+    let is_compiler_error = rest.starts_with("error[")
+        || (rest.starts_with("error:") && !rest.starts_with("error: ["))
+        || rest.starts_with("Error:");
+
+    if is_compiler_error {
+        return diagnostic_block_end(input, pos);
+    }
+
+    // Fall back to the original first-sentence / first-paragraph heuristic
+    // for generic inline error phrases (e.g. "returns error: foo.").
     let paragraph = rest.find("\n\n").unwrap_or(rest.len());
     let sentence = rest
         .char_indices()
@@ -297,6 +329,91 @@ fn error_end(input: &str, pos: usize) -> usize {
     pos + sentence
         .filter(|end| *end <= paragraph)
         .unwrap_or(paragraph)
+}
+
+/// Protect an entire compiler-diagnostic or stack-trace block starting at
+/// `pos`. The block ends at the first line that is clearly non-diagnostic
+/// after any blank separator lines.
+///
+/// Continuation patterns (lines that belong to the same diagnostic block):
+/// - blank line (used as separator *within* a block — tolerated once)
+/// - `  -->` / ` -->` — file/line pointer
+/// - ` |` / `  |` — gutter line (any content after the bar)
+/// - `  = note:` / `  = help:` — trailing annotations
+/// - `  ...` — elision marker in rustc output
+/// - `note:` / `help:` / `warning:` at line start — secondary messages
+/// - Stack-trace: `    at ` / `   at ` / `at ` line prefix
+/// - Python/Node: `  File "..."` / `Traceback`
+fn diagnostic_block_end(input: &str, pos: usize) -> usize {
+    let rest = match input.get(pos..) {
+        Some(r) => r,
+        None => return input.len(),
+    };
+
+    let mut end = pos;
+    let mut blank_run = 0usize;
+
+    for line in rest.lines() {
+        let line_len = line.len();
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            blank_run += 1;
+            // Allow up to one blank separator inside the block; two consecutive
+            // blank lines always end the block.
+            if blank_run >= 2 {
+                break;
+            }
+            end += line_len + 1; // +1 for '\n'
+            continue;
+        }
+
+        blank_run = 0;
+
+        let is_continuation = trimmed.starts_with("-->")
+            || trimmed.starts_with("| ")
+            || trimmed == "|"
+            || trimmed.starts_with("= note:")
+            || trimmed.starts_with("= help:")
+            || trimmed.starts_with("= warning:")
+            || trimmed.starts_with("note:")
+            || trimmed.starts_with("help:")
+            || trimmed.starts_with("warning:")
+            || trimmed.starts_with("error[")
+            || trimmed.starts_with("error:")
+            || trimmed.starts_with("Error:")
+            || trimmed.starts_with("...")
+            || trimmed.starts_with("at ")          // stack trace
+            || trimmed.starts_with("File \"")      // Python traceback
+            || trimmed.starts_with("Traceback")    // Python
+            || trimmed.starts_with("caused by:")
+            || trimmed.starts_with("^ ")           // some diagnostic pointers
+            || is_gutter_line(trimmed);            // "42 | ..." gutter
+
+        if is_continuation {
+            end += line_len + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Clamp to valid byte boundary.
+    end.min(input.len())
+}
+
+/// True for rustc gutter lines of the form `  42 | ...` or `     | ...`.
+fn is_gutter_line(trimmed: &str) -> bool {
+    // Pattern: optional leading spaces + digits or spaces + " | "
+    let s = trimmed;
+    // Find the first ` | ` or end-of-line ` |`
+    if let Some(bar) = s.find(" | ") {
+        // Everything before the bar must be digits/spaces only.
+        s[..bar].chars().all(|c| c.is_ascii_digit() || c == ' ')
+    } else if let Some(stripped) = s.strip_suffix(" |") {
+        stripped.chars().all(|c| c.is_ascii_digit() || c == ' ')
+    } else {
+        false
+    }
 }
 
 fn markdown_link_end(input: &str, pos: usize) -> Option<usize> {
@@ -751,7 +868,11 @@ fn has_unclosed_autolink(input: &str) -> bool {
 }
 
 fn has_open_error(input: &str) -> bool {
-    let last_error = input.rfind("error:").or_else(|| input.rfind("Error:"));
+    // Look for the last occurrence of an error/Error opener.
+    let last_error = input
+        .rfind("error[")
+        .or_else(|| input.rfind("error:"))
+        .or_else(|| input.rfind("Error:"));
     let Some(pos) = last_error else {
         return false;
     };
@@ -759,7 +880,9 @@ fn has_open_error(input: &str) -> bool {
         Some(tail) => tail,
         None => return false,
     };
-    !tail.contains(['.', '!', '?']) && !tail.contains("\n\n")
+    // A compiler-diagnostic block is "open" (needs more input) if we haven't
+    // yet seen a double-blank-line that would close it.
+    !tail.contains("\n\n")
 }
 
 fn has_open_url_tail(input: &str) -> bool {

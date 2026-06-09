@@ -514,11 +514,17 @@ async fn assign_to_hand_rejects_cross_instance_double_claim() -> Result<(), Subs
     assert_eq!(claimed.owner.as_ref(), Some(&h1));
 
     // Second instance tries to claim the same ticket. It must fail cleanly
-    // with a conflict rather than silently overwriting the owner.
+    // rather than silently overwriting the owner. Which error it gets depends
+    // on when it observes the first claim: `Invalid` when the pre-check reads
+    // the committed in_flight state, `Conflict` when the pre-check still read
+    // Ready and the atomic UPDATE predicate caught the race. Both reject.
     let result = second.assign_to_hand(&ticket_id("drk-1")?, &h2).await;
     assert!(
-        matches!(result, Err(SubstrateError::Conflict { .. })),
-        "second claim should conflict, got {result:?}"
+        matches!(
+            result,
+            Err(SubstrateError::Conflict { .. }) | Err(SubstrateError::Invalid { .. })
+        ),
+        "second claim should be rejected, got {result:?}"
     );
 
     // The ticket must still be owned by the first hand — no lost update.
