@@ -307,7 +307,7 @@ You can override any role binding in `roles`, and pin a role's model to a concre
 
 ## Status
 
-**Active development.** Architecture and 67 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 71 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -334,7 +334,7 @@ What's landed and tested:
 - ✅ `derrick survey` — native code-graph index (SQLite + FTS5) over Rust/TS/JS/Python/Go/C#/Java/Kotlin; MCP server (`survey serve --mcp`) so agents query symbols/callers/impact instead of fanning out across reads; debounced watcher keeps it fresh
 - ✅ `derrick init` — brownfield-safe, VS Code + JetBrains opt-in, Codex instructions
 - ✅ `derrick doctor` — live squash-merge policy check via GitHub API
-- ✅ PR stacking: `stack show / restack / submit`
+- ✅ PR stacking: `stack show / restack / submit` — native, Graphite (`gt`), and git-spice (`gs`) backends
 - ✅ Shell completions (bash / zsh / fish / elvish / powershell)
 - ✅ `scripts/install.sh` — curl-able, platform-detecting (linux-x86\_64, macos-arm64, macos-x86\_64)
 - ✅ GitHub release workflow — builds on `v*` tag push, attaches binaries + checksums
@@ -358,7 +358,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 67 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 71 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 - [docs/survey.md](./docs/survey.md) — derrick survey deep-dive: how it works, setup, CLI reference, MCP tools, token accounting
