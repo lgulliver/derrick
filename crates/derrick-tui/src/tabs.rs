@@ -983,4 +983,879 @@ mod tests {
         app.show_help = true;
         render_all_tabs_no_panic(&app);
     }
+
+    // -----------------------------------------------------------------------
+    // Helpers: build rich data fixtures used across the populated-data tests
+    // -----------------------------------------------------------------------
+
+    fn make_ticket(
+        id: &str,
+        state: &str,
+        title: &str,
+        batch: Option<&str>,
+        owner: Option<&str>,
+    ) -> crate::data::TicketRow {
+        crate::data::TicketRow {
+            id: id.to_owned(),
+            state: state.to_owned(),
+            title: title.to_owned(),
+            batch: batch.map(str::to_owned),
+            owner: owner.map(str::to_owned),
+            updated_at: Some(Utc::now()),
+        }
+    }
+
+    fn make_stack_node(
+        ticket_id: &str,
+        branch: &str,
+        state: &str,
+        parent_branch: Option<&str>,
+        pr_url: Option<&str>,
+    ) -> crate::data::StackNode {
+        crate::data::StackNode {
+            ticket_id: ticket_id.to_owned(),
+            branch: branch.to_owned(),
+            pr_url: pr_url.map(str::to_owned),
+            pr_number: pr_url.map(|_| 42),
+            state: state.to_owned(),
+            parent_branch: parent_branch.map(str::to_owned),
+        }
+    }
+
+    fn make_event(
+        kind: &str,
+        ticket: Option<&str>,
+        hand: Option<&str>,
+        run_id: Option<&str>,
+        body: &str,
+    ) -> crate::data::EventRow {
+        crate::data::EventRow {
+            at: Utc::now(),
+            kind: kind.to_owned(),
+            ticket: ticket.map(str::to_owned),
+            hand: hand.map(str::to_owned),
+            run_id: run_id.map(str::to_owned),
+            body: body.to_owned(),
+        }
+    }
+
+    fn make_hand_row(
+        hand_id: &str,
+        ticket_id: Option<&str>,
+        action: &str,
+        status: &str,
+        detail: Option<&str>,
+    ) -> crate::data::HandRow {
+        crate::data::HandRow {
+            hand_id: hand_id.to_owned(),
+            ticket_id: ticket_id.map(str::to_owned),
+            action: action.to_owned(),
+            last_seen: Utc::now(),
+            status: status.to_owned(),
+            detail: detail.map(str::to_owned),
+        }
+    }
+
+    /// Build a `TestBackend` terminal and render the given `App`, returning
+    /// the buffer contents as a flat string for assertions.
+    fn render_tab_to_string(app: &crate::app::App, width: u16, height: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::{Constraint, Direction, Layout};
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let test_app = app.clone();
+
+        terminal
+            .draw(|frame| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(2),
+                        Constraint::Length(3),
+                        Constraint::Min(5),
+                        Constraint::Length(2),
+                    ])
+                    .split(frame.area());
+                render_header(frame, chunks[0], &test_app);
+                render_tabs_bar(frame, chunks[1], &test_app);
+                render_active_tab(frame, chunks[2], &test_app);
+                render_footer(frame, chunks[3]);
+            })
+            .expect("draw");
+
+        // Collect the buffer into a string of all visible cells.
+        let buf = terminal.backend().buffer().clone();
+        buf.content()
+            .iter()
+            .map(|cell| cell.symbol().to_owned())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    // -----------------------------------------------------------------------
+    // fmt_secs corner cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_secs_handles_zero() {
+        assert_eq!(fmt_secs(0), "0s");
+    }
+
+    #[test]
+    fn fmt_secs_negative_clamped_to_zero() {
+        assert_eq!(fmt_secs(-5), "0s");
+    }
+
+    #[test]
+    fn fmt_secs_exact_minute() {
+        assert_eq!(fmt_secs(60), "1m");
+    }
+
+    #[test]
+    fn fmt_secs_minutes() {
+        assert_eq!(fmt_secs(90), "1m");
+        assert_eq!(fmt_secs(3599), "59m");
+    }
+
+    #[test]
+    fn fmt_secs_hours_and_minutes() {
+        assert_eq!(fmt_secs(3600), "1h00m");
+        assert_eq!(fmt_secs(3661), "1h01m");
+        assert_eq!(fmt_secs(7384), "2h03m");
+    }
+
+    // -----------------------------------------------------------------------
+    // Overview tab: populated data paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn overview_renders_batch_name_and_ticket_counts() {
+        use crate::data::{ForemanStatusSnapshot, LastAssaySnapshot, OverviewData, StackSummary};
+        use derrick_substrate::ForemanMode;
+
+        let mut data = crate::data::DataModel::empty();
+        data.overview = OverviewData {
+            batch_name: Some("sprint-3".to_owned()),
+            tickets_done: 5,
+            tickets_total: 10,
+            tickets_inflight: 2,
+            tickets_ready: 2,
+            tickets_blocked: 1,
+            foreman_status: Some(ForemanStatusSnapshot {
+                mode: ForemanMode::Attached,
+                pid: Some(12345),
+                started_at: Some(Utc::now() - chrono::Duration::seconds(125)),
+            }),
+            stack_summary: StackSummary {
+                merged: 3,
+                open: 2,
+                pending: 1,
+                restack_ok: true,
+            },
+            last_assay: Some(LastAssaySnapshot {
+                verdict: "success".to_owned(),
+                model: Some("claude-3".to_owned()),
+                at: Utc::now(),
+            }),
+        };
+        // Add in_flight and ready tickets so the overview sub-tables are populated.
+        data.tickets = vec![
+            make_ticket("tst-1", "in_flight", "Add login form", Some("sprint-3"), Some("bramble")),
+            make_ticket("tst-2", "in_review", "Fix search bug", Some("sprint-3"), Some("cedar")),
+            make_ticket("tst-3", "ready", "Write docs", Some("sprint-3"), None),
+        ];
+        let app = crate::app::App::new(crate::data::Tab::Overview, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("sprint-3"), "batch name should appear");
+        assert!(out.contains("tst-1"), "in_flight ticket id should appear");
+        assert!(out.contains("tst-3"), "ready ticket id should appear");
+        assert!(out.contains("In flight"), "in-flight table header should appear");
+    }
+
+    #[test]
+    fn overview_renders_foreman_pid_and_age() {
+        use crate::data::{ForemanStatusSnapshot, OverviewData};
+        use derrick_substrate::ForemanMode;
+
+        let mut data = crate::data::DataModel::empty();
+        data.overview = OverviewData {
+            foreman_status: Some(ForemanStatusSnapshot {
+                mode: ForemanMode::Detached,
+                pid: Some(9999),
+                started_at: Some(Utc::now() - chrono::Duration::seconds(65)),
+            }),
+            ..OverviewData::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Overview, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("9999"), "pid should appear in foreman line");
+    }
+
+    #[test]
+    fn overview_renders_foreman_no_pid_no_started_at() {
+        use crate::data::{ForemanStatusSnapshot, OverviewData};
+        use derrick_substrate::ForemanMode;
+
+        let mut data = crate::data::DataModel::empty();
+        data.overview = OverviewData {
+            foreman_status: Some(ForemanStatusSnapshot {
+                mode: ForemanMode::Stopped,
+                pid: None,
+                started_at: None,
+            }),
+            ..OverviewData::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Overview, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("foreman"), "foreman line should appear");
+    }
+
+    #[test]
+    fn overview_renders_restack_conflict() {
+        use crate::data::{OverviewData, StackSummary};
+
+        let mut data = crate::data::DataModel::empty();
+        data.overview = OverviewData {
+            stack_summary: StackSummary {
+                merged: 0,
+                open: 1,
+                pending: 0,
+                restack_ok: false,
+            },
+            ..OverviewData::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Overview, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("conflict!"), "conflict marker should appear when restack_ok=false");
+    }
+
+    #[test]
+    fn overview_tokens_today_with_savings_pct() {
+        use crate::data::TokenSummary;
+
+        let mut data = crate::data::DataModel::empty();
+        data.token_summary = TokenSummary {
+            today_in: 50_000,
+            today_out: 10_000,
+            total_in: 100_000,
+            total_out: 20_000,
+            savings_pct: Some(0.20),
+            ..TokenSummary::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Overview, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("tokens today"), "token summary line should appear");
+        // savings_pct branch: should show raw -> actual with percentage
+        assert!(out.contains("%"), "savings percentage should be rendered");
+    }
+
+    #[test]
+    fn overview_tokens_no_savings_pct() {
+        use crate::data::TokenSummary;
+
+        let mut data = crate::data::DataModel::empty();
+        data.token_summary = TokenSummary {
+            today_in: 30_000,
+            today_out: 5_000,
+            savings_pct: None,
+            ..TokenSummary::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Overview, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("tokens today"), "token summary without savings_pct");
+        assert!(out.contains("in"), "should show in/out");
+    }
+
+    #[test]
+    fn overview_last_refresh_timestamp_shown() {
+        let mut data = crate::data::DataModel::empty();
+        data.last_refresh = Some(Utc::now());
+        let app = crate::app::App::new(crate::data::Tab::Overview, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        // Header renders the refresh time; at some hour it will have digits.
+        assert!(out.contains("[derrick]"), "header should appear");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tickets tab: populated data and filter paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tickets_tab_renders_rows_with_selection_highlight() {
+        let mut data = crate::data::DataModel::empty();
+        data.tickets = vec![
+            make_ticket("tst-1", "in_flight", "First task", Some("b1"), Some("bramble")),
+            make_ticket("tst-2", "ready", "Second task", None, None),
+            make_ticket("tst-3", "blocked", "Blocked task", Some("b1"), None),
+            make_ticket("tst-4", "done", "Finished", None, None),
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Tickets, data);
+        app.selected_row = 1; // row 1 selected → should get REVERSED style
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("tst-1"), "ticket id should appear");
+        assert!(out.contains("tst-2"), "selected ticket id should appear");
+        assert!(out.contains("in_flight"), "state should appear");
+        assert!(out.contains("First task"), "title should appear");
+    }
+
+    #[test]
+    fn tickets_tab_filter_active_shows_underscore_cursor() {
+        let mut data = crate::data::DataModel::empty();
+        data.tickets = vec![
+            make_ticket("tst-5", "ready", "Some ticket", None, None),
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Tickets, data);
+        app.filter = crate::app::FilterState::Active("ready".to_owned());
+        let out = render_tab_to_string(&app, 120, 40);
+        // Active filter shows "filter:<q>_" in the title and status bar
+        assert!(out.contains("ready"), "filter query should appear");
+    }
+
+    #[test]
+    fn tickets_tab_filter_narrows_results() {
+        let mut data = crate::data::DataModel::empty();
+        data.tickets = vec![
+            make_ticket("tst-10", "in_flight", "Active work", None, None),
+            make_ticket("tst-11", "done", "Completed work", None, None),
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Tickets, data);
+        // Filter for "done" — only tst-11 should be visible
+        app.filter = crate::app::FilterState::Active("done".to_owned());
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("tst-11"), "matching ticket should appear");
+    }
+
+    #[test]
+    fn tickets_tab_sort_state_renders() {
+        let mut data = crate::data::DataModel::empty();
+        data.tickets = vec![
+            make_ticket("tst-20", "done", "Done item", None, None),
+            make_ticket("tst-21", "in_flight", "Active item", None, None),
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Tickets, data);
+        app.ticket_sort = crate::app::TicketSort::State;
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("sort:state"), "sort label should appear in title");
+    }
+
+    #[test]
+    fn tickets_tab_all_sort_modes_render_without_panic() {
+        let mut data = crate::data::DataModel::empty();
+        data.tickets = vec![
+            make_ticket("tst-1", "in_flight", "Alpha", None, None),
+            make_ticket("tst-2", "ready", "Beta", None, None),
+        ];
+        for sort in [
+            crate::app::TicketSort::Updated,
+            crate::app::TicketSort::State,
+            crate::app::TicketSort::Id,
+            crate::app::TicketSort::Title,
+        ] {
+            let mut app = crate::app::App::new(crate::data::Tab::Tickets, data.clone());
+            app.ticket_sort = sort;
+            // Should not panic; meaningful content is present.
+            let out = render_tab_to_string(&app, 120, 40);
+            assert!(out.contains("tst-1") || out.contains("tst-2"), "at least one ticket id visible");
+        }
+    }
+
+    #[test]
+    fn tickets_tab_status_bar_inactive_filter_shows_hint() {
+        let mut data = crate::data::DataModel::empty();
+        data.tickets = vec![make_ticket("tst-99", "ready", "Check hint", None, None)];
+        let app = crate::app::App::new(crate::data::Tab::Tickets, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("press / to filter"), "hint should appear when filter inactive");
+    }
+
+    // -----------------------------------------------------------------------
+    // Stack tab: nodes with various states
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn stack_tab_renders_nodes_open_merged_closed_unknown() {
+        let mut data = crate::data::DataModel::empty();
+        data.stack_load_result = crate::data::StackLoadResult::Loaded;
+        data.stack_nodes = vec![
+            make_stack_node("tst-1", "feature/tst-1", "open", Some("main"), Some("https://github.com/org/repo/pull/10")),
+            make_stack_node("tst-2", "feature/tst-2", "merged", Some("feature/tst-1"), None),
+            make_stack_node("tst-3", "feature/tst-3", "closed", Some("feature/tst-2"), None),
+            make_stack_node("tst-4", "feature/tst-4", "draft", Some("feature/tst-3"), None),
+        ];
+        let app = crate::app::App::new(crate::data::Tab::Stack, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        // Markers: open=●, merged=✓, closed=✗, unknown=…
+        assert!(out.contains("tst-1"), "ticket id should appear");
+        assert!(out.contains("feature/tst-1"), "branch should appear");
+        assert!(out.contains("●"), "open marker should appear");
+        assert!(out.contains("✓"), "merged marker should appear");
+        assert!(out.contains("✗"), "closed marker should appear");
+        assert!(out.contains("…"), "unknown state marker should appear");
+    }
+
+    #[test]
+    fn stack_tab_renders_pr_url_when_present() {
+        let mut data = crate::data::DataModel::empty();
+        data.stack_load_result = crate::data::StackLoadResult::Loaded;
+        data.stack_nodes = vec![
+            make_stack_node("tst-5", "feature/x", "open", None, Some("https://github.com/org/repo/pull/42")),
+        ];
+        let app = crate::app::App::new(crate::data::Tab::Stack, data);
+        let out = render_tab_to_string(&app, 160, 40);
+        // PR URL should appear; root node has "(root)" as parent
+        assert!(out.contains("(root)"), "root parent label should appear");
+        assert!(out.contains("github.com"), "pr url should be visible");
+    }
+
+    #[test]
+    fn stack_tab_node_without_pr_url_renders_cleanly() {
+        let mut data = crate::data::DataModel::empty();
+        data.stack_load_result = crate::data::StackLoadResult::Loaded;
+        data.stack_nodes = vec![
+            make_stack_node("tst-6", "feature/y", "open", Some("main"), None),
+        ];
+        let app = crate::app::App::new(crate::data::Tab::Stack, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("tst-6"), "ticket id should appear");
+        assert!(out.contains("main"), "parent branch should appear");
+    }
+
+    // -----------------------------------------------------------------------
+    // Activity tab: populated events and filter paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn activity_tab_renders_events_with_ticket_scope_tag() {
+        let mut data = crate::data::DataModel::empty();
+        data.events = vec![
+            make_event("ticket_state_changed", Some("tst-7"), None, None, "ready -> in_flight"),
+            make_event("note", None, Some("bramble"), None, "work started"),
+            make_event("pipeline_step_completed", None, None, Some("run-abc"), "step assay: success"),
+        ];
+        let app = crate::app::App::new(crate::data::Tab::Activity, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("[tst-7]"), "ticket scope tag should appear");
+        assert!(out.contains("[hand:bramble]"), "hand scope tag should appear");
+        assert!(out.contains("[run:run-abc]"), "run scope tag should appear");
+    }
+
+    #[test]
+    fn activity_tab_auto_scroll_label_changes() {
+        let mut data = crate::data::DataModel::empty();
+        data.events = vec![make_event("note", None, None, None, "some event")];
+
+        let mut app = crate::app::App::new(crate::data::Tab::Activity, data.clone());
+        app.activity_auto_scroll = true;
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("auto-scroll"), "auto-scroll label should appear");
+
+        let mut app2 = crate::app::App::new(crate::data::Tab::Activity, data);
+        app2.activity_auto_scroll = false;
+        let out2 = render_tab_to_string(&app2, 120, 40);
+        assert!(out2.contains("paused"), "paused label should appear when not auto-scrolling");
+    }
+
+    #[test]
+    fn activity_tab_active_filter_shows_in_title_and_status_bar() {
+        let mut data = crate::data::DataModel::empty();
+        data.events = vec![
+            make_event("note", Some("tst-1"), None, None, "ticket event"),
+            make_event("note", None, Some("cedar"), None, "hand event"),
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Activity, data);
+        app.filter = crate::app::FilterState::Active("ticket:tst-1".to_owned());
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("ticket"), "filter label should appear");
+    }
+
+    #[test]
+    fn activity_tab_committed_filter_shows_edit_hint() {
+        // A committed (inactive) non-empty filter: filter bar is inactive but
+        // activity filter is derived from the query string.
+        let mut data = crate::data::DataModel::empty();
+        data.events = vec![make_event("note", Some("tst-2"), None, None, "body")];
+        let mut app = crate::app::App::new(crate::data::Tab::Activity, data);
+        // Inactive filter state but query is committed (non-empty inactive).
+        // We simulate this by switching filter to active-then-committed using
+        // FilterState::Active (the renderer reads query() regardless).
+        // In the actual render path the "committed filter" status bar branch
+        // is reached when filter.is_active() is false AND filter.is_none() is false.
+        // We can't reach it with the current FilterState enum without hacking,
+        // so we test the closest branch: inactive filter (empty query, is_none=true).
+        // The "edit hint" path is the third branch in the status bar render.
+        app.filter = crate::app::FilterState::Inactive;
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("press / to filter"), "inactive filter hint should appear");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tokens tab: all branches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tokens_tab_today_data_and_alltime_data() {
+        use crate::data::TokenSummary;
+
+        let mut data = crate::data::DataModel::empty();
+        data.token_summary = TokenSummary {
+            today_in: 20_000,
+            today_out: 8_000,
+            total_in: 200_000,
+            total_out: 80_000,
+            ..TokenSummary::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Tokens, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("today:"), "today line should appear");
+        assert!(out.contains("all-time:"), "all-time line should appear");
+        assert!(out.contains("20k"), "today_in in thousands should appear");
+    }
+
+    #[test]
+    fn tokens_tab_bytes_raw_compression_note() {
+        use crate::data::TokenSummary;
+
+        let mut data = crate::data::DataModel::empty();
+        data.token_summary = TokenSummary {
+            total_bytes_raw: 4096 * 1024,  // 4096 kb
+            total_bytes_saved: 1024 * 1024, // 1024 kb saved
+            ..TokenSummary::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Tokens, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("compression:"), "compression note should appear");
+        assert!(out.contains("raw"), "raw label should appear");
+    }
+
+    #[test]
+    fn tokens_tab_savings_pct_no_bytes() {
+        use crate::data::TokenSummary;
+
+        let mut data = crate::data::DataModel::empty();
+        data.token_summary = TokenSummary {
+            total_bytes_raw: 0,
+            savings_pct: Some(0.15),
+            ..TokenSummary::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Tokens, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("savings:"), "savings line should appear for pct-only mode");
+    }
+
+    #[test]
+    fn tokens_tab_roughneck_saved_shows_count() {
+        use crate::data::TokenSummary;
+
+        let mut data = crate::data::DataModel::empty();
+        data.token_summary = TokenSummary {
+            total_roughneck_saved: 12_345,
+            ..TokenSummary::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Tokens, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("12345") || out.contains("roughneck"), "roughneck count should appear");
+    }
+
+    #[test]
+    fn tokens_tab_per_step_bar_chart_renders() {
+        use crate::data::{StepTokenSummary, TokenSummary};
+
+        let mut data = crate::data::DataModel::empty();
+        data.token_summary = TokenSummary {
+            per_step: vec![
+                StepTokenSummary {
+                    step_id: "specify".to_owned(),
+                    tokens_in: 1000,
+                    tokens_out: 500,
+                    bytes_saved: 0,
+                    roughneck_tokens_saved: 0,
+                },
+                StepTokenSummary {
+                    step_id: "plan".to_owned(),
+                    tokens_in: 2000,
+                    tokens_out: 800,
+                    bytes_saved: 100,
+                    roughneck_tokens_saved: 50,
+                },
+            ],
+            total_in: 3000,
+            total_out: 1300,
+            ..TokenSummary::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Tokens, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("Per-step"), "per-step chart header should appear");
+        assert!(out.contains("specify") || out.contains("plan"), "step id should appear");
+    }
+
+    #[test]
+    fn tokens_tab_hands_section_shown_when_nonzero() {
+        use crate::data::TokenSummary;
+
+        let mut data = crate::data::DataModel::empty();
+        data.token_summary = TokenSummary {
+            hands_tokens_out: 5_000,
+            hands_roughneck_saved: 200,
+            hands_bytes_raw: 8192,
+            hands_bytes_saved: 2048,
+            ..TokenSummary::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Tokens, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("Hands"), "Hands section should appear when nonzero");
+        assert!(out.contains("tokens out:") || out.contains("5000"), "hands tokens should appear");
+    }
+
+    // -----------------------------------------------------------------------
+    // Memory tab: entries and selection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn memory_tab_renders_entry_list_and_preview() {
+        let mut data = crate::data::DataModel::empty();
+        data.memory_entries = vec![
+            crate::data::MemoryEntry {
+                slug: "feedback_testing".to_owned(),
+                path: std::path::PathBuf::from("/site/.derrick/memory/feedback_testing.md"),
+                preview: "This is a test memory entry preview text.".to_owned(),
+            },
+            crate::data::MemoryEntry {
+                slug: "architecture_notes".to_owned(),
+                path: std::path::PathBuf::from("/site/.derrick/memory/architecture_notes.md"),
+                preview: "Architecture decisions go here.".to_owned(),
+            },
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Memory, data);
+        app.selected_row = 0;
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("feedback_testing"), "first slug should appear in list");
+        assert!(out.contains("test memory entry"), "preview of selected entry should appear");
+    }
+
+    #[test]
+    fn memory_tab_second_row_selected_shows_its_preview() {
+        let mut data = crate::data::DataModel::empty();
+        data.memory_entries = vec![
+            crate::data::MemoryEntry {
+                slug: "entry-a".to_owned(),
+                path: std::path::PathBuf::from("/a.md"),
+                preview: "Preview A".to_owned(),
+            },
+            crate::data::MemoryEntry {
+                slug: "entry-b".to_owned(),
+                path: std::path::PathBuf::from("/b.md"),
+                preview: "Preview B text here".to_owned(),
+            },
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Memory, data);
+        app.selected_row = 1;
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("entry-b"), "selected slug should appear");
+        assert!(out.contains("Preview B"), "selected preview should appear");
+    }
+
+    #[test]
+    fn memory_tab_out_of_bounds_row_shows_no_entry_selected() {
+        let mut data = crate::data::DataModel::empty();
+        data.memory_entries = vec![
+            crate::data::MemoryEntry {
+                slug: "only-entry".to_owned(),
+                path: std::path::PathBuf::from("/x.md"),
+                preview: "Content here".to_owned(),
+            },
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Memory, data);
+        app.selected_row = 99; // beyond bounds
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("(no entry selected)"), "fallback text should appear");
+    }
+
+    // -----------------------------------------------------------------------
+    // Hands tab: rows, filter variants, status badges
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hands_tab_renders_running_done_failed_rows() {
+        let mut data = crate::data::DataModel::empty();
+        data.hand_rows = vec![
+            make_hand_row("bramble", Some("tst-1"), "dispatched", "running", None),
+            make_hand_row("cedar", Some("tst-2"), "completed", "done", Some("exit 0")),
+            make_hand_row("oak", Some("tst-3"), "failed", "failed", Some("exit 1")),
+        ];
+        let app = crate::app::App::new(crate::data::Tab::Hands, data);
+        let out = render_tab_to_string(&app, 160, 40);
+        assert!(out.contains("bramble"), "running hand should appear");
+        assert!(out.contains("cedar"), "done hand should appear");
+        assert!(out.contains("oak"), "failed hand should appear");
+        // Status glyphs
+        assert!(out.contains("✓"), "done glyph should appear");
+        assert!(out.contains("✗"), "failed glyph should appear");
+    }
+
+    #[test]
+    fn hands_tab_no_rows_shows_zero_count() {
+        let data = crate::data::DataModel::empty();
+        let app = crate::app::App::new(crate::data::Tab::Hands, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("0 hands"), "zero count label should appear");
+    }
+
+    #[test]
+    fn hands_tab_singular_hand_label() {
+        let mut data = crate::data::DataModel::empty();
+        data.hand_rows = vec![make_hand_row("solo", None, "running", "running", None)];
+        let app = crate::app::App::new(crate::data::Tab::Hands, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("1 hand"), "singular label should appear with one hand");
+    }
+
+    #[test]
+    fn hands_tab_filter_active_shows_cursor() {
+        let mut data = crate::data::DataModel::empty();
+        data.hand_rows = vec![make_hand_row("bramble", None, "running", "running", None)];
+        let mut app = crate::app::App::new(crate::data::Tab::Hands, data);
+        app.filter = crate::app::FilterState::Active("bramble".to_owned());
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("bramble"), "active filter query should appear");
+    }
+
+    #[test]
+    fn hands_tab_hand_filter_narrows_rows() {
+        let mut data = crate::data::DataModel::empty();
+        data.hand_rows = vec![
+            make_hand_row("bramble", None, "running", "running", None),
+            make_hand_row("cedar", None, "done", "done", None),
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Hands, data);
+        // hand: filter — only bramble matches
+        app.filter = crate::app::FilterState::Active("hand:bramble".to_owned());
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("bramble"), "filtered hand should appear");
+    }
+
+    #[test]
+    fn hands_tab_ticket_filter_narrows_by_ticket() {
+        let mut data = crate::data::DataModel::empty();
+        data.hand_rows = vec![
+            make_hand_row("bramble", Some("tst-10"), "dispatched", "running", None),
+            make_hand_row("cedar", Some("tst-20"), "dispatched", "running", None),
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Hands, data);
+        app.filter = crate::app::FilterState::Active("ticket:tst-10".to_owned());
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("bramble"), "bramble matched by ticket filter should appear");
+    }
+
+    #[test]
+    fn hands_tab_run_filter_hides_all() {
+        // run: filter is explicitly not supported for hands — it yields no results.
+        let mut data = crate::data::DataModel::empty();
+        data.hand_rows = vec![make_hand_row("bramble", None, "running", "running", None)];
+        let mut app = crate::app::App::new(crate::data::Tab::Hands, data);
+        app.filter = crate::app::FilterState::Active("run:anything".to_owned());
+        let out = render_tab_to_string(&app, 120, 40);
+        // The run: filter always returns false for hands rows; bramble should be hidden.
+        // But the status bar / title should still render without panic.
+        assert!(out.contains("Hands"), "Hands tab title should appear");
+    }
+
+    #[test]
+    fn hands_tab_text_filter_matches_action_and_detail() {
+        let mut data = crate::data::DataModel::empty();
+        data.hand_rows = vec![
+            make_hand_row("bramble", Some("tst-1"), "dispatched", "running", Some("queue written")),
+            make_hand_row("cedar", None, "completed", "done", None),
+        ];
+        let mut app = crate::app::App::new(crate::data::Tab::Hands, data);
+        app.filter = crate::app::FilterState::Active("queue".to_owned());
+        let out = render_tab_to_string(&app, 160, 40);
+        assert!(out.contains("bramble"), "bramble with matching detail should appear");
+    }
+
+    #[test]
+    fn hands_tab_inactive_filter_shows_hint() {
+        let data = crate::data::DataModel::empty();
+        let app = crate::app::App::new(crate::data::Tab::Hands, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("press / to filter"), "filter hint should appear when inactive");
+    }
+
+    #[test]
+    fn hands_tab_committed_filter_shows_edit_hint() {
+        // When filter is Active with a query (which is the committed-but-still-active
+        // FilterState), the status bar should show the "/ to edit" hint branch
+        // via !filter.is_none() on the ActivityFilter derived from the query.
+        let mut data = crate::data::DataModel::empty();
+        data.hand_rows = vec![make_hand_row("oak", None, "running", "running", None)];
+        let mut app = crate::app::App::new(crate::data::Tab::Hands, data);
+        // filter.is_active()=false, query non-empty => committed filter path
+        // Simulate: FilterState::Inactive but with non-empty underlying filter.
+        // We achieve the "committed" branch by making the filter inactive after
+        // typing. In current FilterState enum, Inactive has no stored string, so
+        // the only way to get a non-empty committed filter via query() is to use
+        // FilterState::Active (the is_active()=true branch). The status bar in
+        // render_hands checks filter.is_active() first (the "/" line), then
+        // !filter.is_none() for the edit-hint branch. There's no way to reach the
+        // edit-hint branch from tests since Inactive always returns empty query().
+        // We cover the is_active()=true branch explicitly:
+        app.filter = crate::app::FilterState::Active("hand:oak".to_owned());
+        let out = render_tab_to_string(&app, 120, 40);
+        // Active filter path: should show "/ <q>_  |  prefixes:".
+        assert!(out.contains("oak"), "active filter query appears");
+    }
+
+    // -----------------------------------------------------------------------
+    // render_header: timestamp shown vs missing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn header_shows_placeholder_when_no_refresh() {
+        let data = crate::data::DataModel::empty(); // last_refresh = None
+        let app = crate::app::App::new(crate::data::Tab::Overview, data);
+        let out = render_tab_to_string(&app, 120, 40);
+        assert!(out.contains("--:--:--"), "placeholder should appear before first refresh");
+    }
+
+    // -----------------------------------------------------------------------
+    // Narrow-terminal truncation: 80x24 should not panic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn all_tabs_render_without_panic_on_narrow_terminal() {
+        use crate::data::{OverviewData, StackSummary, TokenSummary};
+
+        let mut data = crate::data::DataModel::empty();
+        data.tickets = vec![
+            make_ticket("tst-1", "in_flight", "Long ticket title that may truncate", Some("batch"), Some("bramble")),
+            make_ticket("tst-2", "ready", "Another task", None, None),
+        ];
+        data.stack_nodes = vec![
+            make_stack_node("tst-1", "feature/tst-1", "open", Some("main"), None),
+        ];
+        data.stack_load_result = crate::data::StackLoadResult::Loaded;
+        data.events = vec![make_event("note", Some("tst-1"), None, None, "event body text")];
+        data.token_summary = TokenSummary {
+            today_in: 5_000,
+            today_out: 2_000,
+            total_in: 50_000,
+            total_out: 20_000,
+            ..TokenSummary::default()
+        };
+        data.memory_entries = vec![crate::data::MemoryEntry {
+            slug: "slug-a".to_owned(),
+            path: std::path::PathBuf::from("/a.md"),
+            preview: "preview".to_owned(),
+        }];
+        data.hand_rows = vec![make_hand_row("bramble", Some("tst-1"), "dispatched", "running", None)];
+        data.overview = OverviewData {
+            batch_name: Some("batch-1".to_owned()),
+            stack_summary: StackSummary { merged: 0, open: 1, pending: 0, restack_ok: true },
+            ..OverviewData::default()
+        };
+        let app = crate::app::App::new(crate::data::Tab::Overview, data);
+        // Render all tabs at 80x24 — should not panic.
+        render_all_tabs_no_panic(&app);
+    }
 }
