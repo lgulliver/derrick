@@ -21,7 +21,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use tokio::sync::mpsc;
 
 use crate::app::App;
-use crate::data::{DataModel, MemoryEntry, StackNode};
+use crate::data::{DataModel, MemoryEntry, StackLoadResult, StackNode};
 use crate::tabs::{render_active_tab, render_footer, render_header, render_tabs_bar};
 
 /// Install a panic hook that restores the terminal before letting the
@@ -90,13 +90,14 @@ pub struct EventLoopPaths {
 
 /// Run the event loop until `app.quit` is set.
 ///
-/// `stack_nodes` and `memory_entries` are read each tick to pick up updates
-/// made by background tasks (stack adapter shell-out, future memory file
-/// changes).
+/// `stack_nodes`, `stack_load_result`, and `memory_entries` are read each
+/// tick to pick up updates made by background tasks (stack adapter shell-out,
+/// future memory file changes).
 pub async fn run_event_loop<B: Backend>(
     app: &mut App,
     substrate: Arc<dyn Substrate>,
     stack_nodes: Arc<std::sync::RwLock<Vec<StackNode>>>,
+    stack_load_result: Arc<std::sync::RwLock<StackLoadResult>>,
     memory_entries: Arc<std::sync::RwLock<Vec<MemoryEntry>>>,
     paths: EventLoopPaths,
     terminal: &mut Terminal<B>,
@@ -180,11 +181,15 @@ where
                 Ok(g) => g.clone(),
                 Err(p) => p.into_inner().clone(),
             };
+            let slr = match stack_load_result.read() {
+                Ok(g) => g.clone(),
+                Err(p) => p.into_inner().clone(),
+            };
             let me = match memory_entries.read() {
                 Ok(g) => g.clone(),
                 Err(p) => p.into_inner().clone(),
             };
-            match DataModel::refresh(&*substrate, &sn, &me, runs_dir.as_deref()).await {
+            match DataModel::refresh(&*substrate, &sn, slr, &me, runs_dir.as_deref()).await {
                 Ok(data) => app.set_data(data),
                 Err(e) => tracing::warn!("data refresh failed: {e}"),
             }

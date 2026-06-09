@@ -797,9 +797,12 @@ dependencies = [
  "chrono",
  "derrick-config",
  "derrick-substrate",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "which",
 ]
 
 [[package]]

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
 use derrick_stack::{
-    GraphiteStackBackend, NativeStackBackend, NoneStackBackend, OpenPrParams, RestackOutcome,
-    RestackParams, StackBackend,
+    GitSpiceStackBackend, GraphiteStackBackend, NativeStackBackend, NoneStackBackend, OpenPrParams,
+    RestackOutcome, RestackParams, StackBackend,
 };
 use derrick_substrate::{
     BatchName, BlockReason, EventKind, EventScope, Substrate, TicketFilter, TicketState,
@@ -38,16 +38,22 @@ pub(crate) async fn execute(args: StackArgs) -> Result<CliExitCode, crate::CliEr
     result
 }
 
-fn build_backend(repo_root: &Path, config: &Config) -> Arc<dyn StackBackend> {
+fn build_backend(repo_root: &Path, config: &Config) -> Result<Arc<dyn StackBackend>, crate::CliError> {
     let stack_cfg = config.tools().git().stacking();
-    match stack_cfg.backend() {
+    let backend: Arc<dyn StackBackend> = match stack_cfg.backend() {
         StackBackendKind::Native => Arc::new(NativeStackBackend::new(
             repo_root.to_path_buf(),
             stack_cfg.force_push(),
         )),
-        StackBackendKind::Graphite | StackBackendKind::GitSpice => Arc::new(GraphiteStackBackend),
+        StackBackendKind::Graphite => Arc::new(
+            GraphiteStackBackend::new().map_err(|error| message(format!("graphite: {error}")))?,
+        ),
+        StackBackendKind::GitSpice => Arc::new(
+            GitSpiceStackBackend::new().map_err(|error| message(format!("git-spice: {error}")))?,
+        ),
         StackBackendKind::None => Arc::new(NoneStackBackend),
-    }
+    };
+    Ok(backend)
 }
 
 async fn stack_show(substrate: &NativeSubstrate) -> Result<CliExitCode, crate::CliError> {
@@ -113,7 +119,7 @@ async fn stack_restack(
     repo_root: &Path,
     substrate: &NativeSubstrate,
 ) -> Result<CliExitCode, crate::CliError> {
-    let backend = build_backend(repo_root, config);
+    let backend = build_backend(repo_root, config)?;
     let target_branch = "main".to_owned();
     let tickets = substrate
         .list_tickets(TicketFilter::default())
@@ -203,7 +209,7 @@ async fn stack_submit(
     repo_root: &Path,
     substrate: &NativeSubstrate,
 ) -> Result<CliExitCode, crate::CliError> {
-    let backend = build_backend(repo_root, config);
+    let backend = build_backend(repo_root, config)?;
     let target_branch = "main".to_owned();
     let filter = TicketFilter {
         state: Some(TicketState::InReview),

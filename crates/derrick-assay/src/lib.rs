@@ -40,10 +40,63 @@ pub enum ReviewerRoundOutcome {
     Skipped,
 }
 
-const ASSAY_SYSTEM_BASE: &str = "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` followed by exactly one of: accept, revise, reject.";
+const ASSAY_SYSTEM_BASE: &str = "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` section. The final line of your response MUST be exactly `**Verdict:** accept`, `**Verdict:** revise`, or `**Verdict:** reject` (one verdict word only, on its own line). Do not wrap the verdict word in extra prose on that line.";
 
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_assay(
+    config: &Config,
+    hosts: Arc<HostRegistry>,
+    repo_root: &Path,
+    working_dir: &Path,
+    feature_dir: &Path,
+    state_prompt: &str,
+    run_id: &str,
+    step: &derrick_config::PipelineStep,
+    log_path: &Path,
+    state: &mut ExecutionState,
+) -> Result<StepExecution, RunError> {
+    // DESIGN §7 / D5: warn (do not block) when a reviewer shares the
+    // proposer's provider, which defeats adversarial cross-examination.
+    let reviewers_for_check: Vec<String> = config.tools().assay().reviewers().to_vec();
+    let family_warnings = same_family_warnings(config, &reviewers_for_check);
+
+    let mut exec = execute_assay_core(
+        config,
+        hosts,
+        repo_root,
+        working_dir,
+        feature_dir,
+        state_prompt,
+        run_id,
+        step,
+        log_path,
+        state,
+    )
+    .await?;
+
+    // Surface the same-family warnings in the step output text so they are
+    // visible to operators reading the run log, not just the tracing sink.
+    if !family_warnings.is_empty() {
+        let banner = family_warnings
+            .iter()
+            .map(|w| format!("\u{26a0} {w}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for w in &family_warnings {
+            eprintln!("  {} {}", "\u{26a0}".yellow(), w.yellow());
+        }
+        exec.message = if exec.message.is_empty() {
+            banner
+        } else {
+            format!("{}\n{banner}", exec.message)
+        };
+    }
+
+    Ok(exec)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_assay_core(
     config: &Config,
     hosts: Arc<HostRegistry>,
     repo_root: &Path,
@@ -191,27 +244,63 @@ pub async fn execute_assay(
         }));
     }
 
+    // Quorum (fail-closed): ALL configured reviewers must produce a parseable
+    // outcome. Handles were pushed in `reviewers` order, so we can name any
+    // reviewer that skips or errors. A reviewer error halts immediately. Skips
+    // are tracked by role so we can distinguish the legitimate *whole-step*
+    // skip (every reviewer skipped — e.g. unedited constitution placeholder)
+    // from a partial skip, which is a quorum failure.
     let mut outcomes: Vec<ReviewerOutcome> = Vec::with_capacity(reviewers.len());
-    let mut any_skipped = false;
-    for handle in handles {
+    let mut skipped_roles: Vec<String> = Vec::new();
+    for (reviewer_role, handle) in reviewers.iter().zip(handles) {
         match handle
             .await
             .map_err(|e| RunError::Config(format!("reviewer task join: {e}")))?
         {
             Ok(ReviewerRoundOutcome::Decided(outcome)) => outcomes.push(outcome),
-            Ok(ReviewerRoundOutcome::Skipped) => any_skipped = true,
+            Ok(ReviewerRoundOutcome::Skipped) => skipped_roles.push(reviewer_role.clone()),
             Err(e) => {
                 tracing::error!(
                     run_id = %run_id,
+                    reviewer = %reviewer_role,
                     error = %e,
                     "reviewer in multi-reviewer assay failed"
                 );
-                return Err(e);
+                return Err(RunError::StepFailed {
+                    id: step.id().to_owned(),
+                    message: format!(
+                        "assay quorum not met: reviewer '{reviewer_role}' failed: {e}"
+                    ),
+                });
             }
         }
     }
-    if any_skipped {
-        return Ok(StepExecution::skipped());
+
+    if !skipped_roles.is_empty() {
+        // Every reviewer skipped: this is the existing whole-step skip path
+        // (e.g. constitution is still an unedited placeholder). Preserve it.
+        if outcomes.is_empty() {
+            return Ok(StepExecution::skipped());
+        }
+        // Partial skip: some reviewers produced a verdict and some did not.
+        // The assay is the single gate before autonomous execution, so we must
+        // not reconcile on fewer outcomes than configured. Fail closed.
+        let names = skipped_roles.join(", ");
+        tracing::error!(
+            run_id = %run_id,
+            skipped = %names,
+            decided = outcomes.len(),
+            configured = reviewers.len(),
+            "assay quorum not met: some reviewers skipped"
+        );
+        return Err(RunError::StepFailed {
+            id: step.id().to_owned(),
+            message: format!(
+                "assay quorum not met: {} of {} reviewers did not produce a verdict (skipped: {names})",
+                skipped_roles.len(),
+                reviewers.len(),
+            ),
+        });
     }
 
     let combined_path = working_dir
@@ -340,14 +429,17 @@ pub async fn run_reviewer_rounds(
             let plan_delta =
                 last_delta_from_plan(&working_dir.join(feature_dir).join("plan.md"), prev)?;
             let prompt = format!(
-                "Task: {}\n\nPrevious objections (verify each is resolved):\n{prev}\n\nLatest plan changes:\n{plan_delta}\n\nEvaluate ONLY whether the latest changes adequately address the previous objections. Do NOT re-list previously resolved items. List ONLY remaining or new concerns.",
+                "Task: {}\n\nPrevious objections (verify each is resolved):\n{prev}\n\nLatest plan changes:\n{plan_delta}\n\nEvaluate ONLY whether the latest changes adequately address the previous objections. Do NOT re-list previously resolved items. List ONLY remaining or new concerns.\n\nEnd your response with a line that is exactly `**Verdict:** accept`, `**Verdict:** revise`, or `**Verdict:** reject`.",
                 state_prompt
             );
             let cached = format!("Constitution:\n{constitution}\n\nSpec:\n{spec}");
             (prompt, cached)
         } else {
             let plan = read_to_string(&working_dir.join(feature_dir).join("plan.md"))?;
-            let prompt = format!("Task: {}\n\nPlan:\n{plan}", state_prompt);
+            let prompt = format!(
+                "Task: {}\n\nPlan:\n{plan}\n\nEnd your response with a line that is exactly `**Verdict:** accept`, `**Verdict:** revise`, or `**Verdict:** reject`.",
+                state_prompt
+            );
             let cached = format!("Constitution:\n{constitution}\n\nSpec:\n{spec}");
             (prompt, cached)
         };
@@ -669,6 +761,64 @@ pub async fn run_reviewer_rounds(
     }))
 }
 
+/// The conventional role name for the plan proposer. DESIGN §7 / D5: assay's
+/// value is *different-family scrutiny*, so a reviewer must not share the
+/// proposer's provider.
+const PROPOSER_ROLE: &str = "proposer";
+
+/// Resolve the provider id bound to `role` via the config role bindings and
+/// model registry. Returns `None` if the role is unbound or the bound model is
+/// unknown. Read-only: consumes existing `derrick-config` APIs only.
+fn role_provider<'a>(config: &'a Config, role: &str) -> Option<&'a str> {
+    let model_name = config.roles().get(role)?;
+    config.models().get(model_name).map(|def| def.provider())
+}
+
+/// Build a same-family warning for one reviewer if it shares the proposer's
+/// provider. `effective_reviewer_provider` lets callers pass a substituted
+/// provider (e.g. the D37 codex→claude headless fallback resolves to the
+/// `claude` host's provider rather than the configured codex provider).
+fn same_family_warning(
+    proposer_provider: Option<&str>,
+    reviewer_role: &str,
+    effective_reviewer_provider: Option<&str>,
+) -> Option<String> {
+    let proposer = proposer_provider?;
+    let reviewer = effective_reviewer_provider?;
+    if proposer.eq_ignore_ascii_case(reviewer) {
+        Some(format!(
+            "reviewer '{reviewer_role}' uses the same provider as the proposer ('{proposer}') — adversarial value reduced"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Compute same-family warnings for every configured reviewer against the
+/// proposer, emitting a prominent `tracing::warn!` for each. Returns the
+/// warning lines so the caller can surface them in the assay step output.
+/// Does not block — a same-family pairing is a quality smell, not a hard error.
+fn same_family_warnings(config: &Config, reviewers: &[String]) -> Vec<String> {
+    let proposer_provider = role_provider(config, PROPOSER_ROLE);
+    let mut warnings = Vec::new();
+    for reviewer_role in reviewers {
+        let reviewer_provider = role_provider(config, reviewer_role);
+        if let Some(msg) =
+            same_family_warning(proposer_provider, reviewer_role, reviewer_provider)
+        {
+            tracing::warn!(
+                step = "assay",
+                proposer_role = PROPOSER_ROLE,
+                reviewer = %reviewer_role,
+                provider = reviewer_provider.unwrap_or(""),
+                "{msg}"
+            );
+            warnings.push(msg);
+        }
+    }
+    warnings
+}
+
 async fn detect_codex_fallback(config: &Config, reviewer_role: &str) -> Result<bool, RunError> {
     let Some(model_name) = config.roles().get(reviewer_role) else {
         return Ok(false);
@@ -733,6 +883,13 @@ pub fn reconcile_verdicts(
     combined_path: &Path,
     repo_root: &Path,
 ) -> Result<StepExecution, RunError> {
+    // Fail closed: never reconcile with no outcomes. The caller enforces the
+    // quorum, but reconciling an empty set would silently "accept" nothing.
+    if outcomes.is_empty() {
+        return Err(RunError::Config(
+            "assay reconciliation requires at least one reviewer outcome".to_owned(),
+        ));
+    }
     // A hard `reject` from any reviewer is a real blocker.
     // A `revise` (rounds exhausted) is treated as accept_with_conditions.
     let any_hard_reject = outcomes.iter().any(|o| o.verdict == "reject");
@@ -834,30 +991,93 @@ pub fn reconcile_verdicts(
     }
 }
 
-/// Parse the verdict from the reviewer's response text.
-/// Looks for `## Verdict` heading followed by accept/revise/reject.
-/// Handles common markdown formatting around the verdict word (`**revise**`, `*accept*`).
+/// Parse the verdict from the reviewer's response text — strict and fail-closed.
+///
+/// The verdict must appear as a *standalone token* in a recognised declaration
+/// form. Three shapes are accepted (all case-insensitive, with optional
+/// surrounding markdown bold/italic/inline-code wrappers):
+///
+///   1. A line that is exactly the verdict word — `accept`, `**revise**`,
+///      `` `reject` ``.
+///   2. A label line `Verdict: <word>` — e.g. `Verdict: accept`.
+///   3. A bolded label line `**Verdict:** <word>` — e.g. `**Verdict:** reject`.
+///
+/// Substring matches inside prose (`"reject (with caveats)"`,
+/// `"rejection would be inadvisable — accept"`, `"could reject"`, `"rejectX"`)
+/// are deliberately NOT recognised: they are not standalone declarations.
+///
+/// Returns `None` (fail closed) when no recognised declaration is found, or
+/// when two or more *distinct* verdict words are declared (ambiguous). The
+/// caller maps `None` to a `StepFailed` that halts the pipeline and surfaces
+/// the raw response.
 pub fn parse_verdict(text: &str) -> Option<&'static str> {
-    let mut in_verdict = false;
+    let mut found: Option<&'static str> = None;
+
     for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("## Verdict") {
-            in_verdict = true;
+        let Some(word) = parse_verdict_line(line) else {
             continue;
-        }
-        if in_verdict {
-            let cleaned = trimmed.trim_matches(|c: char| c == '*' || c == '_' || c == '`');
-            match cleaned.to_ascii_lowercase().as_str() {
-                "accept" => return Some("accept"),
-                "revise" => return Some("revise"),
-                "reject" => return Some("reject"),
-                "" => {}
-                _ if trimmed.starts_with("## ") => return None,
-                _ => {}
-            }
+        };
+        match found {
+            None => found = Some(word),
+            Some(prev) if prev == word => {}
+            // Two distinct verdict words declared — ambiguous, fail closed.
+            Some(_) => return None,
         }
     }
-    None
+
+    found
+}
+
+/// Recognise a single line as a standalone verdict declaration, returning the
+/// canonical verdict word if so. See [`parse_verdict`] for the accepted forms.
+fn parse_verdict_line(line: &str) -> Option<&'static str> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Label form: `Verdict: <word>` / `**Verdict:** <word>` / `Verdict <word>`.
+    // Strip a leading markdown-wrapped `Verdict` label and an optional colon.
+    if let Some(rest) = strip_verdict_label(trimmed) {
+        return verdict_word(rest);
+    }
+
+    // Bare-word form: the entire line is just the (optionally wrapped) word.
+    verdict_word(trimmed)
+}
+
+/// If `line` begins with a `Verdict` label (optionally markdown-wrapped, with an
+/// optional trailing colon), return the remainder after the label. Otherwise
+/// `None`.
+fn strip_verdict_label(line: &str) -> Option<&str> {
+    // Remove markdown emphasis/code wrappers around the whole `**Verdict:**`
+    // token first, then re-check. We handle the common `**Verdict:**` shape by
+    // stripping a leading run of `*`/`_`/`` ` `` characters.
+    let after_wrap = line.trim_start_matches(|c: char| c == '*' || c == '_' || c == '`');
+    let lower = after_wrap.to_ascii_lowercase();
+    let rest = lower.strip_prefix("verdict")?;
+    // Map the byte offset back into `after_wrap` (ASCII prefix, so offsets align).
+    let rest = &after_wrap[after_wrap.len() - rest.len()..];
+    // Allow `**` / `:` / whitespace between the label and the word.
+    let rest = rest.trim_start_matches(|c: char| {
+        c == '*' || c == '_' || c == '`' || c == ':' || c.is_whitespace()
+    });
+    Some(rest)
+}
+
+/// Return the canonical verdict word if `token` is exactly one verdict word
+/// (after stripping optional markdown wrappers). Anything else yields `None`.
+fn verdict_word(token: &str) -> Option<&'static str> {
+    let cleaned = token
+        .trim()
+        .trim_matches(|c: char| c == '*' || c == '_' || c == '`')
+        .trim();
+    match cleaned.to_ascii_lowercase().as_str() {
+        "accept" => Some("accept"),
+        "revise" => Some("revise"),
+        "reject" => Some("reject"),
+        _ => None,
+    }
 }
 
 /// Extract suggested revisions from the reviewer's response.
@@ -1405,6 +1625,68 @@ accept"#;
     }
 
     #[test]
+    fn parse_verdict_strict_table() {
+        // (input, expected) — the heart of the fail-closed contract.
+        let cases: &[(&str, Option<&'static str>)] = &[
+            // --- Bare-word declarations (a whole line is the verdict word) ---
+            ("accept", Some("accept")),
+            ("revise", Some("revise")),
+            ("reject", Some("reject")),
+            ("## Verdict\n\nACCEPT", Some("accept")),
+            ("## Verdict\n**reject**", Some("reject")),
+            ("## Verdict\n`revise`", Some("revise")),
+            ("## Verdict\n  __accept__  ", Some("accept")),
+            // --- Label declarations ---
+            ("Verdict: accept", Some("accept")),
+            ("**Verdict:** reject", Some("reject")),
+            ("**Verdict:** revise", Some("revise")),
+            ("verdict:reject", Some("reject")),
+            ("Verdict: **accept**", Some("accept")),
+            ("**Verdict:** `revise`", Some("revise")),
+            // The recommended end-of-response shape from the system prompt.
+            (
+                "Lots of analysis here.\n\nmore prose\n\n**Verdict:** accept",
+                Some("accept"),
+            ),
+            // --- Substring / prose noise must NOT be recognised ---
+            // The whole line is prose, not a standalone verdict token: fail
+            // closed rather than guess. Critically it must NEVER return reject.
+            ("Rejection would be inadvisable — accept", None),
+            ("reject (with caveats)", None),
+            ("could reject", None),
+            ("do not reject this", None),
+            ("rejectX", None),
+            ("X reject", None),
+            ("accept the plan", None),
+            ("I would reject the approach entirely.", None),
+            ("no verdict here", None),
+            ("## Verdict\ninvalid", None),
+            ("", None),
+            // A prose line plus a clean declaration: declaration wins, prose
+            // line is ignored (it is not a standalone token).
+            (
+                "I am tempted to reject but on balance:\n\n**Verdict:** revise",
+                Some("revise"),
+            ),
+            // --- Ambiguity: two DISTINCT declarations => fail closed (None) ---
+            ("accept\nreject", None),
+            ("**Verdict:** accept\n**Verdict:** reject", None),
+            ("Verdict: revise\n\naccept", None),
+            // --- Same verdict declared twice (e.g. metadata + body) is fine ---
+            ("verdict: revise\n\n## Verdict\n\nrevise", Some("revise")),
+            ("accept\n\n**Verdict:** accept", Some("accept")),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_verdict(input),
+                *expected,
+                "parse_verdict({input:?}) should be {expected:?}",
+            );
+        }
+    }
+
+    #[test]
     fn phase_names_are_correct() {
         assert_eq!(phase_name(1), "Cross-Examination");
         assert_eq!(phase_name(2), "Deliberation");
@@ -1565,7 +1847,7 @@ revise
         );
         assert_eq!(
             ASSAY_SYSTEM_BASE,
-            "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` followed by exactly one of: accept, revise, reject."
+            "Review the speckit plan. Identify the highest risks, missing edge cases, and constitution contradictions. End with an H2 `## Verdict` section. The final line of your response MUST be exactly `**Verdict:** accept`, `**Verdict:** revise`, or `**Verdict:** reject` (one verdict word only, on its own line). Do not wrap the verdict word in extra prose on that line."
         );
     }
 
@@ -1740,5 +2022,48 @@ Details"#;
     fn extract_first_objection_no_match_returns_none() {
         assert_eq!(extract_first_objection("## Verdict\naccept"), None);
         assert_eq!(extract_first_objection("No bold items here"), None);
+    }
+
+    fn outcome(role: &str, verdict: &str) -> ReviewerOutcome {
+        ReviewerOutcome {
+            role: role.to_owned(),
+            verdict: verdict.to_owned(),
+            verdict_path: PathBuf::from(format!("/tmp/{role}/verdict.md")),
+            tokens_in: 0,
+            tokens_out: 0,
+            constitution_violations: Vec::new(),
+            rounds_used: 1,
+        }
+    }
+
+    #[test]
+    fn reconcile_verdicts_empty_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let combined = tmp.path().join("verdict.md");
+        let result = reconcile_verdicts(&[], OnSplit::Reject, &combined, tmp.path());
+        match result {
+            Err(RunError::Config(msg)) => assert!(msg.contains("at least one reviewer outcome")),
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconcile_verdicts_all_accept_succeeds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let combined = tmp.path().join("verdict.md");
+        let outcomes = vec![outcome("reviewer", "accept"), outcome("reviewer-2", "accept")];
+        let exec = reconcile_verdicts(&outcomes, OnSplit::Reject, &combined, tmp.path())
+            .expect("reconcile");
+        assert_eq!(exec.status, crate::types::StepStatus::Success);
+    }
+
+    #[test]
+    fn reconcile_verdicts_hard_reject_halts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let combined = tmp.path().join("verdict.md");
+        let outcomes = vec![outcome("reviewer", "accept"), outcome("reviewer-2", "reject")];
+        let exec = reconcile_verdicts(&outcomes, OnSplit::Reject, &combined, tmp.path())
+            .expect("reconcile");
+        assert_eq!(exec.status, crate::types::StepStatus::Halted);
     }
 }

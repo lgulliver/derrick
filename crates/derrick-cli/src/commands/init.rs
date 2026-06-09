@@ -85,12 +85,13 @@ struct ResolvedInitOptions {
 }
 
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
-    if !args.dry_run {
-        check_prerequisites()?;
-    }
+    // DESIGN §5.2 step 1: prerequisites are always checked first, with no
+    // partial init. This runs even under --dry-run so a dry run reports
+    // missing tools and exits non-zero exactly as the real run would.
+    check_prerequisites()?;
     let (repo_root, fresh_git_init) = match current_repo_root() {
         Ok(root) => (root, false),
-        Err(_) => (ensure_git_repo(args.yes)?, true),
+        Err(_) => (ensure_git_repo(args.yes, args.dry_run)?, true),
     };
     let resolved = match resolve_options(&repo_root, args, fresh_git_init)? {
         Some(resolved) => resolved,
@@ -284,6 +285,14 @@ async fn greenfield_init(
             "{} already exists; rerun with --force to overwrite it",
             config_path.display()
         )));
+    }
+
+    // DESIGN §5.2: --dry-run opts out of all writes globally. Print the plan
+    // of what greenfield init WOULD write, then return success without
+    // touching the filesystem or opening the substrate.
+    if resolved.dry_run {
+        print_greenfield_plan(repo_root, resolved);
+        return Ok(CliExitCode::Success);
     }
 
     let rendered = render_init_template(
@@ -740,6 +749,54 @@ fn init_mode_to_substrate(mode: crate::commands::InitMode) -> derrick_config::Su
     }
 }
 
+/// Print the greenfield init plan under --dry-run. Mirrors `print_plan`'s
+/// layout: a `writes` block listing every path greenfield init would create,
+/// conditioned on the resolved flags. Nothing is written and the substrate is
+/// not opened.
+fn print_greenfield_plan(repo_root: &Path, resolved: &ResolvedInitOptions) {
+    const INDENT: &str = "             ";
+
+    // The state dir / db / constitution paths match the bundled template
+    // defaults (state.dir = .derrick, guardrails.constitution_path =
+    // .specify/memory/constitution.md).
+    let mut writes: Vec<String> = vec![
+        "derrick.yaml".to_owned(),
+        ".derrick/.gitignore".to_owned(),
+        ".derrick/derrick.db".to_owned(),
+    ];
+
+    if resolved.no_hooks {
+        writes.push(".claude/settings.json".to_owned());
+    } else {
+        writes.push(".codex/instructions.md".to_owned());
+        writes.push(".claude/settings.json".to_owned());
+        writes.push(".claude/commands/ (derrick command shims)".to_owned());
+    }
+    // Survey MCP server is registered regardless of --no-hooks.
+    writes.push(".mcp.json".to_owned());
+
+    if resolved.vscode {
+        writes.push(".vscode/tasks.json".to_owned());
+    }
+    if resolved.jetbrains {
+        writes.push(".idea/runConfigurations/ (derrick run configs)".to_owned());
+    }
+
+    // seed_constitution writes the constitution last.
+    writes.push(".specify/memory/constitution.md".to_owned());
+
+    println!("dry run — greenfield init plan for {}", repo_root.display());
+    let mut iter = writes.iter();
+    if let Some(first) = iter.next() {
+        println!("writes       {first}");
+        for path in iter {
+            println!("{INDENT}{path}");
+        }
+    }
+    println!();
+    println!("{}", ui::hint("re-run without --dry-run to apply"));
+}
+
 fn print_plan(plan: &derrick_adopt::AdoptionPlan) {
     const INDENT: &str = "             ";
     println!("adoption plan");
@@ -774,7 +831,7 @@ fn print_plan(plan: &derrick_adopt::AdoptionPlan) {
     }
 }
 
-fn ensure_git_repo(yes: bool) -> Result<std::path::PathBuf, crate::CliError> {
+fn ensure_git_repo(yes: bool, dry_run: bool) -> Result<std::path::PathBuf, crate::CliError> {
     let cwd = std::env::current_dir().map_err(|source| crate::CliError::Io {
         path: std::path::PathBuf::from("."),
         source,
@@ -784,6 +841,13 @@ fn ensure_git_repo(yes: bool) -> Result<std::path::PathBuf, crate::CliError> {
         "{}",
         ui::warn("No git repository found in this directory or any parent.")
     );
+
+    // DESIGN §5.2: --dry-run never mutates the filesystem. Report what would
+    // happen and return the cwd without running `git init`.
+    if dry_run {
+        println!("would run `git init` in {}", cwd.display());
+        return Ok(cwd);
+    }
 
     let confirmed = if yes {
         true

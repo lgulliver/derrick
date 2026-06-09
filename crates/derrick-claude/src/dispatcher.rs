@@ -297,7 +297,11 @@ impl PollTask {
         }
         cmd.stdin(Stdio::from(stdin_handle))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Fail closed: if the supervising foreman crashes or this task is
+            // cancelled, the `claude --print` child must not survive as an
+            // orphan. `kill_on_drop` ties the child's lifetime to `child`.
+            .kill_on_drop(true);
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -740,5 +744,52 @@ mod tests {
             }
         }
         assert!(released, "expected claude poll task to release the hand");
+    }
+
+    /// Regression guard for orphaned subprocesses: a `tokio::process::Command`
+    /// configured the way `PollTask::run` configures the `claude --print`
+    /// invocation (with `.kill_on_drop(true)`) must terminate its child when
+    /// the `Child` handle is dropped, rather than leaving it running.
+    #[tokio::test]
+    async fn kill_on_drop_terminates_orphaned_child() {
+        // A long-running child that would otherwise outlive the handle.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn sleep");
+        let pid = child.id().expect("child has a pid");
+
+        // Sanity: the process is alive immediately after spawn.
+        assert!(
+            process_is_alive(pid),
+            "child should be running right after spawn"
+        );
+
+        // Dropping the handle must reap/kill the child because of kill_on_drop.
+        drop(child);
+
+        // Give the runtime a moment to deliver the kill and reap the zombie.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut gone = false;
+        while std::time::Instant::now() < deadline {
+            if !process_is_alive(pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        assert!(
+            gone,
+            "child {pid} should be terminated after dropping the handle"
+        );
+    }
+
+    /// Returns true while `pid` refers to a live, non-reaped process.
+    /// Uses `kill(pid, 0)` semantics via `/proc` to avoid extra crates.
+    fn process_is_alive(pid: u32) -> bool {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
     }
 }

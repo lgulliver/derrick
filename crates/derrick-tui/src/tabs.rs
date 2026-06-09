@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{BarChart, Block, Borders, Cell, List, ListItem, Paragraph, Row, Table};
 
 use crate::app::{App, TicketSort};
-use crate::data::{ActivityFilter, HandRow, Tab, TicketRow};
+use crate::data::{ActivityFilter, HandRow, StackLoadResult, Tab, TicketRow};
 
 /// Format a duration in seconds as a compact human-readable string
 /// (`"14m"`, `"2h03m"`, `"5s"`).
@@ -374,8 +374,26 @@ fn render_tickets(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_stack(frame: &mut Frame, area: Rect, app: &App) {
+    // Show honest state before we attempt to render nodes.
+    match &app.data.stack_load_result {
+        StackLoadResult::Loading => {
+            let p = Paragraph::new("loading stack data…\n(waiting for gh pr list)")
+                .block(Block::default().title("Stack").borders(Borders::ALL));
+            frame.render_widget(p, area);
+            return;
+        }
+        StackLoadResult::Error(reason) => {
+            let msg = format!("stack data unavailable: {reason}");
+            let p =
+                Paragraph::new(msg).block(Block::default().title("Stack").borders(Borders::ALL));
+            frame.render_widget(p, area);
+            return;
+        }
+        StackLoadResult::Loaded => {}
+    }
+
     if app.data.stack_nodes.is_empty() {
-        let p = Paragraph::new("loading stack…\n(no stack data yet)")
+        let p = Paragraph::new("(no stack nodes — no open PRs found)")
             .block(Block::default().title("Stack").borders(Borders::ALL));
         frame.render_widget(p, area);
         return;

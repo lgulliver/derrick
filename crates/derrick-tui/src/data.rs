@@ -796,6 +796,24 @@ pub struct MemoryEntry {
     pub preview: String,
 }
 
+/// Load state for the Stack tab's background refresh.
+///
+/// Starts as [`StackLoadResult::Loading`] before the background task
+/// completes. Transitions to [`StackLoadResult::Loaded`] on success (even
+/// when `gh` returns zero nodes) or to [`StackLoadResult::Error`] when
+/// the shell-out fails or auth is unavailable.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StackLoadResult {
+    /// Background refresh has not yet completed.
+    #[default]
+    Loading,
+    /// Refresh completed — nodes are populated (or empty if there are none).
+    Loaded,
+    /// Refresh failed; the inner string is a short human-readable reason
+    /// suitable for display in the Stack tab.
+    Error(String),
+}
+
 /// Snapshot of every tab's data, produced by [`DataModel::refresh`].
 #[derive(Clone, Debug, Default)]
 pub struct DataModel {
@@ -805,6 +823,8 @@ pub struct DataModel {
     pub tickets: Vec<TicketRow>,
     /// PR stack nodes from the stack adapter.
     pub stack_nodes: Vec<StackNode>,
+    /// Load state for the stack adapter background refresh.
+    pub stack_load_result: StackLoadResult,
     /// Activity tail, newest first.
     pub events: Vec<EventRow>,
     /// Token spend summary.
@@ -829,12 +849,17 @@ impl DataModel {
     /// Pulls fresh data from `substrate` and merges the injected stack,
     /// memory, and run-manifest state.
     ///
+    /// `stack_load_result` reflects whether the background stack-adapter
+    /// refresh has completed, is still in progress, or failed. Pass
+    /// [`StackLoadResult::Loading`] until the background task has resolved.
+    ///
     /// `runs_dir` should point to the `.derrick/runs/` directory so that
     /// token counts can be aggregated from the per-run manifests. Pass
     /// `None` in tests or contexts where manifests are unavailable.
     pub async fn refresh(
         substrate: &dyn Substrate,
         stack_nodes: &[StackNode],
+        stack_load_result: StackLoadResult,
         memory_entries: &[MemoryEntry],
         runs_dir: Option<&Path>,
     ) -> Result<Self, SubstrateError> {
@@ -914,6 +939,7 @@ impl DataModel {
             overview,
             tickets: ticket_rows,
             stack_nodes: stack_nodes.to_vec(),
+            stack_load_result,
             events: event_rows,
             token_summary,
             memory_entries: memory_entries.to_vec(),

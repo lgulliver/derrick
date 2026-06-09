@@ -26,6 +26,47 @@ use derrick_assay::types::{
 
 const ADD_FEATURE_PIPELINE: &str = "add-feature";
 
+/// Maximum accepted length of a run id. Generated ids are 16 chars
+/// (`%Y%m%dT%H%M%SZ`); this leaves generous room for any future format
+/// while bounding attacker-supplied input.
+const MAX_RUN_ID_LEN: usize = 128;
+
+/// Validate that a run id is a single safe path component before it is used
+/// to build any filesystem path (run dir, manifest, worktree, resume scan).
+///
+/// A run id must match `[A-Za-z0-9][A-Za-z0-9._-]*`: it begins with an
+/// alphanumeric (so no leading `.` or `-`) and otherwise contains only
+/// alphanumerics, `.`, `_`, and `-`. This rejects path separators (`/`,
+/// `\`), `..` traversal, absolute paths, and empty ids. Generated ids of the
+/// form `20250101T000000Z` pass.
+fn validate_run_id(run_id: &str) -> Result<(), RunError> {
+    let invalid = |reason: &str| {
+        RunError::Config(format!(
+            "invalid run id `{run_id}`: {reason}; run ids must match [A-Za-z0-9][A-Za-z0-9._-]* (a single path component, e.g. 20250101T000000Z)"
+        ))
+    };
+
+    if run_id.is_empty() {
+        return Err(invalid("run id is empty"));
+    }
+    if run_id.len() > MAX_RUN_ID_LEN {
+        return Err(invalid("run id is too long"));
+    }
+    let mut chars = run_id.chars();
+    let first = chars.next().expect("non-empty checked above");
+    if !first.is_ascii_alphanumeric() {
+        return Err(invalid("must start with a letter or digit"));
+    }
+    for ch in run_id.chars() {
+        if !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-') {
+            return Err(invalid(
+                "contains a disallowed character (path separators are not allowed)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Executes derrick pipelines against a repository.
 ///
 /// Clone is O(1) — all shared state is behind `Arc`. Clones share the
@@ -117,6 +158,9 @@ impl Runner {
             Some(run_id) => run_id.to_owned(),
             None => self.latest_run_id()?,
         };
+        // Reject path-traversal / separator-laden ids before any filesystem
+        // path is built from them.
+        validate_run_id(&run_id)?;
         let manifest_path = self.manifest_path(&run_id);
         let manifest = crate::manifest::read_manifest(&manifest_path)?;
         let current_hash = self.config_hash()?;
@@ -168,6 +212,11 @@ impl Runner {
         let _site = self.substrate.site().await?;
 
         let run_id = input.run_id.clone().unwrap_or_else(default_run_id);
+        // Universal chokepoint: every run (fresh or resumed) flows through
+        // here before run_dir / manifest_path / worktree_path build any
+        // filesystem path. Generated ids always pass; CLI-supplied ones are
+        // validated against traversal.
+        validate_run_id(&run_id)?;
         let run_dir = self.run_dir(&run_id);
         let config_hash = self.config_hash()?;
         let started_at = Utc::now();
@@ -1254,6 +1303,43 @@ mod tests {
     fn parse_rounds_used_supports_single_and_multi_reviewer_verdicts() {
         assert_eq!(super::parse_rounds_used("round: 3"), Some(3));
         assert_eq!(super::parse_rounds_used("rounds_used: 7"), Some(7));
+    }
+
+    #[test]
+    fn validate_run_id_accepts_generated_id() {
+        // Matches default_run_id()'s `%Y%m%dT%H%M%SZ` format.
+        let id = derrick_assay::io::default_run_id();
+        assert!(super::validate_run_id(&id).is_ok(), "generated id: {id}");
+        assert!(super::validate_run_id("20250101T000000Z").is_ok());
+        assert!(super::validate_run_id("run-1").is_ok());
+        assert!(super::validate_run_id("a.b_c-1").is_ok());
+    }
+
+    #[test]
+    fn validate_run_id_rejects_traversal_and_separators() {
+        for bad in [
+            "",
+            "..",
+            "../../x",
+            "a/b",
+            "a\\b",
+            "/abs/path",
+            ".hidden",
+            "-leading-dash",
+            "with space",
+            "semi;colon",
+        ] {
+            assert!(
+                super::validate_run_id(bad).is_err(),
+                "expected rejection for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_run_id_rejects_overlong() {
+        let long = "a".repeat(super::MAX_RUN_ID_LEN + 1);
+        assert!(super::validate_run_id(&long).is_err());
     }
 
     #[test]
