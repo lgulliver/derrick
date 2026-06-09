@@ -799,6 +799,44 @@ fn render_help_overlay(frame: &mut Frame, area: Rect) {
     frame.render_widget(p, area);
 }
 
+// ---------------------------------------------------------------------------
+// Render-safety helpers (used only in tests)
+// ---------------------------------------------------------------------------
+
+/// Render every tab once using the given app state and a
+/// `TestBackend`. Panics in the render path become test failures.
+#[cfg(test)]
+fn render_all_tabs_no_panic(app: &crate::app::App) {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::{Constraint, Direction, Layout};
+
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+
+    for tab in crate::data::Tab::all() {
+        let mut test_app = app.clone();
+        test_app.active_tab = tab;
+        terminal
+            .draw(|frame| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(2),
+                        Constraint::Length(3),
+                        Constraint::Min(5),
+                        Constraint::Length(2),
+                    ])
+                    .split(frame.area());
+                render_header(frame, chunks[0], &test_app);
+                render_tabs_bar(frame, chunks[1], &test_app);
+                render_active_tab(frame, chunks[2], &test_app);
+                render_footer(frame, chunks[3]);
+            })
+            .expect("draw should not fail");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -880,5 +918,69 @@ mod tests {
         assert_eq!(compare_ticket_id("tst-2", "tst-10"), Ordering::Less);
         assert_eq!(compare_ticket_id("tst-10", "tst-2"), Ordering::Greater);
         assert_eq!(compare_ticket_id("tst-5", "tst-5"), Ordering::Equal);
+    }
+
+    // -----------------------------------------------------------------------
+    // Render-safety: every tab must render without panic on empty / mid-refresh
+    // data. These use ratatui TestBackend so they don't need a real terminal.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn all_tabs_render_without_panic_on_empty_data() {
+        let app = crate::app::App::new(
+            crate::data::Tab::Overview,
+            crate::data::DataModel::empty(),
+        );
+        // Renders all seven tabs; any panic is a test failure.
+        render_all_tabs_no_panic(&app);
+    }
+
+    #[test]
+    fn all_tabs_render_without_panic_when_stack_is_loading() {
+        let mut data = crate::data::DataModel::empty();
+        data.stack_load_result = crate::data::StackLoadResult::Loading;
+        let app = crate::app::App::new(crate::data::Tab::Stack, data);
+        render_all_tabs_no_panic(&app);
+    }
+
+    #[test]
+    fn all_tabs_render_without_panic_when_stack_has_error() {
+        let mut data = crate::data::DataModel::empty();
+        data.stack_load_result =
+            crate::data::StackLoadResult::Error("gh not found".to_owned());
+        let app = crate::app::App::new(crate::data::Tab::Stack, data);
+        render_all_tabs_no_panic(&app);
+    }
+
+    #[test]
+    fn all_tabs_render_without_panic_when_stack_loaded_empty() {
+        let mut data = crate::data::DataModel::empty();
+        data.stack_load_result = crate::data::StackLoadResult::Loaded;
+        // stack_nodes is empty — should show "no open PRs found"
+        let app = crate::app::App::new(crate::data::Tab::Stack, data);
+        render_all_tabs_no_panic(&app);
+    }
+
+    #[test]
+    fn all_tabs_render_without_panic_when_selected_row_out_of_bounds() {
+        // Simulate a stale selected_row after data shrinks (e.g. tickets cleared
+        // between refreshes).
+        let mut app = crate::app::App::new(
+            crate::data::Tab::Tickets,
+            crate::data::DataModel::empty(),
+        );
+        // Force selected_row well past the end of all empty vecs.
+        app.selected_row = 999;
+        render_all_tabs_no_panic(&app);
+    }
+
+    #[test]
+    fn all_tabs_render_without_panic_with_help_overlay() {
+        let mut app = crate::app::App::new(
+            crate::data::Tab::Overview,
+            crate::data::DataModel::empty(),
+        );
+        app.show_help = true;
+        render_all_tabs_no_panic(&app);
     }
 }

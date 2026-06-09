@@ -954,6 +954,83 @@ impl DataModel {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // DataModel::refresh from a real empty NativeSubstrate (per house rules:
+    // real SQLite via tempfile, not mocks).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn data_model_refresh_on_empty_substrate_succeeds() {
+        use derrick_config::Config;
+        use derrick_substrate_native::{NativeConfig, NativeSubstrate};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let cfg = Config::defaults();
+        let native_cfg = NativeConfig {
+            db_path: tmp.path().join("derrick.db"),
+            worktree_root: tmp.path().join("worktrees"),
+        };
+        let substrate = NativeSubstrate::open(native_cfg, cfg.site().clone())
+            .await
+            .expect("open substrate");
+
+        // Use a non-existent runs_dir to simulate absent `.derrick/runs/`.
+        let absent_runs = tmp.path().join("runs-does-not-exist");
+
+        let result = DataModel::refresh(
+            &substrate,
+            &[],
+            StackLoadResult::Loading,
+            &[],
+            Some(absent_runs.as_path()),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "refresh on empty substrate should succeed, got: {:?}",
+            result.err()
+        );
+        let model = result.expect("model");
+        assert!(model.tickets.is_empty());
+        assert!(model.events.is_empty());
+        assert!(model.stack_nodes.is_empty());
+        assert_eq!(model.stack_load_result, StackLoadResult::Loading);
+        assert_eq!(model.token_summary.total_in, 0);
+        assert_eq!(model.token_summary.total_out, 0);
+    }
+
+    #[tokio::test]
+    async fn data_model_refresh_propagates_stack_error_state() {
+        use derrick_config::Config;
+        use derrick_substrate_native::{NativeConfig, NativeSubstrate};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let cfg = Config::defaults();
+        let native_cfg = NativeConfig {
+            db_path: tmp.path().join("derrick.db"),
+            worktree_root: tmp.path().join("worktrees"),
+        };
+        let substrate = NativeSubstrate::open(native_cfg, cfg.site().clone())
+            .await
+            .expect("open substrate");
+
+        let error_state =
+            StackLoadResult::Error("gh exited non-zero: auth required".to_owned());
+
+        let model = DataModel::refresh(&substrate, &[], error_state.clone(), &[], None)
+            .await
+            .expect("refresh");
+
+        assert_eq!(
+            model.stack_load_result,
+            error_state,
+            "stack_load_result should be forwarded unchanged"
+        );
+    }
+
     #[test]
     fn tab_from_str_accepts_known_names() {
         assert_eq!("overview".parse::<Tab>().ok(), Some(Tab::Overview));
