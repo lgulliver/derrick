@@ -297,30 +297,54 @@ fn error_end(input: &str, pos: usize) -> usize {
     };
 
     // Detect whether this is the start of a compiler diagnostic block.
-    // Rustc format:  error[E0308]: ...   or   error: ...
+    //
+    // Rustc format:  error[E0308]: ...
     //                  --> src/...
     //                   |
     //                nn | code
     //                   | ^^^^
-    //                   |
     //                   = note: ...
     //                   = help: ...
-    // Generic:       Error: ...  followed by  at file:line  or  File "..." line N
     //
-    // We protect the entire block: run line-by-line until we hit a line that
-    // is neither a diagnostic continuation nor a blank separator inside the
-    // block. A blank line followed by a non-continuation line ends the block.
+    // Generic runtime error (Node/Python):
+    //   Error: Cannot find module './missing'
+    //       at Function.Module._resolveFilename ...
+    //
+    // We only trigger full-block protection when the pattern is unambiguously
+    // a structured diagnostic:
+    //   1. `error[E...]` — rustc error with code (unambiguous)
+    //   2. `error:` or `Error:` on a line whose NEXT line looks like a
+    //      diagnostic continuation (starts with `  -->`, `    at `, etc.)
+    //
+    // Plain inline `error:` phrases like "error: failed to parse. The ..."
+    // fall back to the original first-sentence heuristic so existing corpus
+    // behaviour is preserved.
 
-    let is_compiler_error = rest.starts_with("error[")
-        || (rest.starts_with("error:") && !rest.starts_with("error: ["))
-        || rest.starts_with("Error:");
-
-    if is_compiler_error {
+    if rest.starts_with("error[") {
         return diagnostic_block_end(input, pos);
     }
 
+    if rest.starts_with("error:") || rest.starts_with("Error:") {
+        // Peek at the next line to see if it looks like a diagnostic gutter.
+        let next_line_is_diag = rest
+            .find('\n')
+            .and_then(|nl| rest.get(nl + 1..))
+            .map(|next| {
+                let t = next.trim_start();
+                t.starts_with("-->")
+                    || t.starts_with("at ")
+                    || t.starts_with("File \"")
+                    || t.starts_with("Traceback")
+            })
+            .unwrap_or(false);
+
+        if next_line_is_diag {
+            return diagnostic_block_end(input, pos);
+        }
+    }
+
     // Fall back to the original first-sentence / first-paragraph heuristic
-    // for generic inline error phrases (e.g. "returns error: foo.").
+    // for generic inline error phrases (e.g. "returns error: foo. More prose.").
     let paragraph = rest.find("\n\n").unwrap_or(rest.len());
     let sentence = rest
         .char_indices()
@@ -370,7 +394,13 @@ fn diagnostic_block_end(input: &str, pos: usize) -> usize {
 
         blank_run = 0;
 
-        let is_continuation = trimmed.starts_with("-->")
+        // Count leading spaces: lines indented ≥ 3 spaces inside a diagnostic
+        // block are always continuations (rustc aligns multi-line note text,
+        // stack traces indent with 4 spaces, etc.).
+        let leading_spaces = line.len() - line.trim_start_matches(' ').len();
+
+        let is_continuation = leading_spaces >= 3
+            || trimmed.starts_with("-->")
             || trimmed.starts_with("| ")
             || trimmed == "|"
             || trimmed.starts_with("= note:")

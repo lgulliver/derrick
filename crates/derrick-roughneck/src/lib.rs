@@ -171,15 +171,14 @@ pub fn inject_prompt(prompt: &str, level: &str) -> String {
 /// ```
 /// # use derrick_roughneck::{estimate_savings, Compliance};
 /// // A tight, bullet-style response → Full compliance.
-/// let verbose = "Certainly! I would like to help you. Let me explain the details.\n\
-///                The system has many components that work together seamlessly.\n\
-///                I hope this comprehensive overview was very helpful to you!";
-/// let s = estimate_savings(verbose, "full");
-/// assert_eq!(s.compliance, Compliance::None);
-///
 /// let terse = "- parse: reads input\n- validate: checks schema\n- emit: writes output";
 /// let s = estimate_savings(terse, "full");
 /// assert_eq!(s.compliance, Compliance::Full);
+///
+/// // Disabled level → no savings attributed.
+/// let s = estimate_savings("any text", "off");
+/// assert_eq!(s.compliance, Compliance::None);
+/// assert_eq!(s.tokens_saved, 0);
 /// ```
 pub fn estimate_savings(output: &str, level: &str) -> RoughneckSavings {
     let rate: f64 = match level {
@@ -279,7 +278,7 @@ fn score_no_preamble(output: &str) -> u32 {
 ///
 /// Threshold: lite ≤ 6%, full/ultra ≤ 3%.
 fn score_low_filler_density(output: &str) -> u32 {
-    let words: Vec<&str> = prose_words(output);
+    let words: Vec<String> = prose_words(output);
     if words.is_empty() {
         return 1; // empty/code-only output is fine
     }
@@ -310,7 +309,7 @@ fn score_fragment_fraction(output: &str, lite: bool) -> u32 {
 }
 
 /// Tokenise prose words from `output`, skipping code spans and fenced blocks.
-fn prose_words(output: &str) -> Vec<&str> {
+fn prose_words(output: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut in_fence = false;
 
@@ -326,11 +325,9 @@ fn prose_words(output: &str) -> Vec<&str> {
         let stripped = strip_inline_code(line);
         for word in stripped.split_whitespace() {
             // Keep only alphabetic tokens (no numbers, no punctuation tokens).
-            let clean: &str = word.trim_matches(|c: char| !c.is_alphabetic());
+            let clean = word.trim_matches(|c: char| !c.is_alphabetic());
             if !clean.is_empty() && clean.chars().all(|c| c.is_alphabetic()) {
-                // SAFETY: clean is a sub-slice of stripped which we own; we
-                // return lifetime-tied to `output` so just collect as owned.
-                words.push(clean);
+                words.push(clean.to_owned());
             }
         }
     }
@@ -341,8 +338,7 @@ fn prose_words(output: &str) -> Vec<&str> {
 fn strip_inline_code(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut in_code = false;
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
+    for ch in line.chars() {
         if ch == '`' {
             in_code = !in_code;
             out.push(' ');

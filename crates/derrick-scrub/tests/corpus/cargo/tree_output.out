@@ -1,0 +1,8 @@
+derrick-cli v0.1.0 (/home/user/derrick/crates/derrick-cli)
+├── derrick-caveman v0.1.0 (/home/user/derrick/crates/derrick-caveman)
+│   └── regex v1.11.1
+│       ├── regex-automata v0.4.9
+│       └── regex-syntax v0.8.5
+├── derrick-roughneck v0.1.0 (/home/user/derrick/crates/derrick-roughneck)
+└── derrick-scrub v0.1.0 (/home/user/derrick/crates/derrick-scrub)
+    └── regex v1.11.1 (*)
