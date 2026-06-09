@@ -759,7 +759,7 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().expect("spawn sleep");
+        let child = cmd.spawn().expect("spawn sleep");
         let pid = child.id().expect("child has a pid");
 
         // Sanity: the process is alive immediately after spawn.

@@ -407,6 +407,22 @@ pub async fn run_reviewer_rounds(
             reviewer = reviewer_role,
             reason = "codex requires TTY; falling back to claude reviewer"
         );
+        // D37: the headless fallback substitutes the `claude` host for the
+        // configured codex reviewer. If the proposer is also a claude-family
+        // provider, the substitution silently collapses assay into same-family
+        // review — emit the same same-family warning as the config-time check
+        // (DESIGN §7 / D5). Do not block.
+        if let Some(msg) =
+            same_family_warning(role_provider(config, PROPOSER_ROLE), reviewer_role, Some("claude"))
+        {
+            tracing::warn!(
+                step = "assay",
+                reviewer = %reviewer_role,
+                fallback = "claude",
+                "{msg} (headless codex fallback)"
+            );
+            eprintln!("  {} {}", "\u{26a0}".yellow(), msg.yellow());
+        }
     }
 
     let verdict_path = reviewer_dir.join("verdict.md");
@@ -1053,7 +1069,7 @@ fn strip_verdict_label(line: &str) -> Option<&str> {
     // Remove markdown emphasis/code wrappers around the whole `**Verdict:**`
     // token first, then re-check. We handle the common `**Verdict:**` shape by
     // stripping a leading run of `*`/`_`/`` ` `` characters.
-    let after_wrap = line.trim_start_matches(|c: char| c == '*' || c == '_' || c == '`');
+    let after_wrap = line.trim_start_matches(['*', '_', '`']);
     let lower = after_wrap.to_ascii_lowercase();
     let rest = lower.strip_prefix("verdict")?;
     // Map the byte offset back into `after_wrap` (ASCII prefix, so offsets align).
@@ -1068,10 +1084,7 @@ fn strip_verdict_label(line: &str) -> Option<&str> {
 /// Return the canonical verdict word if `token` is exactly one verdict word
 /// (after stripping optional markdown wrappers). Anything else yields `None`.
 fn verdict_word(token: &str) -> Option<&'static str> {
-    let cleaned = token
-        .trim()
-        .trim_matches(|c: char| c == '*' || c == '_' || c == '`')
-        .trim();
+    let cleaned = token.trim().trim_matches(['*', '_', '`']).trim();
     match cleaned.to_ascii_lowercase().as_str() {
         "accept" => Some("accept"),
         "revise" => Some("revise"),
@@ -2037,13 +2050,67 @@ Details"#;
     }
 
     #[test]
+    fn same_family_warning_flags_matching_provider() {
+        // Same provider (case-insensitive) => warning.
+        let w = same_family_warning(Some("anthropic"), "reviewer", Some("Anthropic"));
+        assert!(w.is_some(), "matching provider should warn");
+        let msg = w.unwrap();
+        assert!(msg.contains("reviewer"));
+        assert!(msg.contains("anthropic"));
+        assert!(msg.contains("adversarial value reduced"));
+    }
+
+    #[test]
+    fn same_family_warning_silent_on_different_provider() {
+        assert_eq!(
+            same_family_warning(Some("anthropic"), "reviewer", Some("openai")),
+            None
+        );
+        // Unknown provider on either side => cannot assert same-family => silent.
+        assert_eq!(same_family_warning(None, "reviewer", Some("openai")), None);
+        assert_eq!(same_family_warning(Some("anthropic"), "reviewer", None), None);
+    }
+
+    #[test]
+    fn same_family_warnings_resolves_from_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // proposer and reviewer both bound to anthropic-provider models.
+        std::fs::write(
+            tmp.path().join("derrick.yaml"),
+            "version: 1\n\
+             site:\n  name: test\n  prefix: tst\n\
+             models:\n\
+             \x20 opus:\n    provider: anthropic\n    model: claude-opus-4-8\n\
+             \x20 gpt5:\n    provider: openai\n    model: gpt-5\n\
+             roles:\n  proposer: opus\n  reviewer: opus\n  reviewer-x: gpt5\n",
+        )
+        .expect("write config");
+        let config = Config::load_layered(tmp.path()).expect("load config");
+
+        // Same-family reviewer => warning.
+        let warnings = same_family_warnings(&config, &["reviewer".to_owned()]);
+        assert_eq!(warnings.len(), 1, "same-family reviewer should warn");
+        assert!(warnings[0].contains("reviewer"));
+
+        // Different-family reviewer => no warning.
+        let warnings = same_family_warnings(&config, &["reviewer-x".to_owned()]);
+        assert!(warnings.is_empty(), "different-family reviewer must not warn");
+
+        // Mixed list => only the same-family one warns.
+        let warnings =
+            same_family_warnings(&config, &["reviewer".to_owned(), "reviewer-x".to_owned()]);
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
     fn reconcile_verdicts_empty_fails_closed() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let combined = tmp.path().join("verdict.md");
         let result = reconcile_verdicts(&[], OnSplit::Reject, &combined, tmp.path());
         match result {
             Err(RunError::Config(msg)) => assert!(msg.contains("at least one reviewer outcome")),
-            other => panic!("expected Config error, got {other:?}"),
+            Err(other) => panic!("expected Config error, got {other:?}"),
+            Ok(_) => panic!("expected Config error, got Ok"),
         }
     }
 
