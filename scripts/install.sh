@@ -56,7 +56,16 @@ need() {
 }
 
 need curl
-need shasum
+
+# Prefer shasum (macOS, perl) and fall back to sha256sum (coreutils, the
+# common tool on minimal Linux images). Die only if neither exists.
+if command -v shasum >/dev/null 2>&1; then
+  sha256_verify() { shasum -a 256 -c "$1"; }
+elif command -v sha256sum >/dev/null 2>&1; then
+  sha256_verify() { sha256sum -c "$1"; }
+else
+  die "'shasum' or 'sha256sum' is required but neither is installed."
+fi
 
 # ── resolve latest stable version ─────────────────────────────────────────────
 resolve_stable() {
@@ -101,18 +110,23 @@ main() {
   artifact="${BIN}-${platform}"
   base_url="https://github.com/${REPO}/releases/download/${version}"
   tmp_dir=$(mktemp -d)
+  trap 'rm -rf "${tmp_dir}"' EXIT
 
   info "Installing ${BOLD}derrick ${version}${RESET} (${channel}) for ${platform}…"
 
   # Download binary + checksum
   info "Downloading ${artifact}…"
-  curl -fsSL "${base_url}/${artifact}"        -o "${tmp_dir}/${artifact}"
-  curl -fsSL "${base_url}/${artifact}.sha256" -o "${tmp_dir}/${artifact}.sha256"
+  curl -fsSL "${base_url}/${artifact}" -o "${tmp_dir}/${artifact}" \
+    || die "Failed to download ${base_url}/${artifact}"
+  curl -fsSL "${base_url}/${artifact}.sha256" -o "${tmp_dir}/${artifact}.sha256" \
+    || die "Failed to download checksum ${base_url}/${artifact}.sha256 — refusing to install an unverified binary."
+  [ -s "${tmp_dir}/${artifact}.sha256" ] \
+    || die "Checksum file is empty — refusing to install an unverified binary."
 
   # Verify checksum
   info "Verifying checksum…"
   pushd "${tmp_dir}" >/dev/null
-  shasum -a 256 -c "${artifact}.sha256" >/dev/null || die "Checksum verification failed."
+  sha256_verify "${artifact}.sha256" >/dev/null || die "Checksum verification failed."
   popd >/dev/null
 
   # Install
@@ -124,8 +138,6 @@ main() {
     info "Installing to ${INSTALL_DIR} (may prompt for password)…"
     sudo mv "${tmp_dir}/${artifact}" "${INSTALL_DIR}/${BIN}"
   fi
-
-  rm -rf "${tmp_dir}"
 
   # Verify
   if command -v derrick >/dev/null 2>&1; then

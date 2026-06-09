@@ -738,6 +738,9 @@ mod tests {
         run(&["init", "-q", "-b", "main"]);
         run(&["config", "user.email", "test@example.invalid"]);
         run(&["config", "user.name", "Test"]);
+        // Host environments may enforce commit signing globally; tests must
+        // not depend on a signing key being available.
+        run(&["config", "commit.gpgsign", "false"]);
         run(&["commit", "--allow-empty", "-q", "-m", "init"]);
     }
 
