@@ -338,18 +338,39 @@ models:
     model: claude-sonnet-4-6
 roles:
   drafter: claude-sonnet
+  proposer: claude-sonnet
+  reviewer: claude-sonnet
 tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: 1
   substrate:
     backend: native
     mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
   git:
     stacking:
       backend: {backend}
 pipeline: []
 guardrails:
   constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
 state:
   dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
 "#
         );
         let dir = tempfile::tempdir().expect("tempdir");
