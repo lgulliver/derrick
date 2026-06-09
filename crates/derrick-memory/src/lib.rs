@@ -683,6 +683,58 @@ fn invalid_error(field: impl Into<String>, message: impl Into<String>) -> Memory
 }
 
 // ---------------------------------------------------------------------------
+// Retrieval helpers
+// ---------------------------------------------------------------------------
+
+/// Maximum number of lessons injected into a ticket prompt.
+pub const LESSON_RETRIEVAL_LIMIT: usize = 5;
+
+/// Render up to `limit` lessons relevant to `query` as a clearly-delimited
+/// Markdown block for injection into a ticket prompt.
+///
+/// Returns `None` when the index is empty or no lessons are retrieved so the
+/// caller adds zero tokens to the prompt in that case (D9 / §9.A.4).
+///
+/// The block is intentionally compact (one line per lesson body) to keep
+/// prompt overhead small without requiring a full caveman pass.
+pub fn render_lessons_block(index: &LessonIndex, query: &str, limit: usize) -> Option<String> {
+    if index.is_empty() {
+        return None;
+    }
+    let tags = extract_query_tags(query);
+    let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+    let lessons = index.relevant(&tag_refs, limit);
+    if lessons.is_empty() {
+        return None;
+    }
+    let mut block = String::new();
+    block.push_str("\n---\n## Lessons from previous work in this repo\n");
+    for lesson in &lessons {
+        // Each lesson body is already a single trimmed line by construction.
+        block.push_str("- ");
+        block.push_str(lesson.body.trim());
+        block.push('\n');
+    }
+    block.push_str("---\n");
+    Some(block)
+}
+
+/// Append a lessons block to `prompt` when the index is non-empty.
+///
+/// This is the one-stop injection helper all dispatchers call. It is a
+/// pure function — no I/O, no side effects — so it is trivially testable.
+///
+/// Returns the original prompt unchanged when the index is empty, keeping the
+/// zero-token contract for repos that have not yet accumulated any lessons.
+#[must_use]
+pub fn inject_lessons_into_prompt(prompt: &str, index: &LessonIndex, query: &str) -> String {
+    match render_lessons_block(index, query, LESSON_RETRIEVAL_LIMIT) {
+        Some(block) => format!("{prompt}{block}"),
+        None => prompt.to_owned(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LessonIndex
 // ---------------------------------------------------------------------------
 
@@ -1790,5 +1842,71 @@ state:
             store.lessons(None),
             Err(MemoryError::Invalid { .. })
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Retrieval helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_lessons_block_empty_index_returns_none() {
+        let (_dir, store) = store_with_host();
+        let index = store.load_lesson_index().unwrap();
+        assert!(render_lessons_block(&index, "drk-1 implement widget", 5).is_none());
+    }
+
+    #[test]
+    fn render_lessons_block_contains_delimiter_and_body() {
+        let (_dir, store) = store_with_host();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 1), "drk-1 retry logic needed"))
+            .unwrap();
+        let index = store.load_lesson_index().unwrap();
+        let block = render_lessons_block(&index, "drk-1 implement retry", 5)
+            .unwrap_or_else(|| panic!("block should render"));
+        assert!(block.contains("## Lessons from previous work in this repo"));
+        assert!(block.contains("drk-1 retry logic needed"));
+        assert!(block.contains("---"));
+    }
+
+    #[test]
+    fn inject_lessons_into_prompt_appends_block() {
+        let (_dir, store) = store_with_host();
+        store
+            .append_lesson(&lesson(utc(2026, 5, 1), "drk-2 handle timeout in #9.A"))
+            .unwrap();
+        let index = store.load_lesson_index().unwrap();
+        let out = inject_lessons_into_prompt("do the thing", &index, "drk-2 something");
+        assert!(out.starts_with("do the thing"));
+        assert!(out.contains("drk-2 handle timeout in #9.A"));
+    }
+
+    #[test]
+    fn inject_lessons_into_prompt_noop_when_empty() {
+        let (_dir, store) = store_with_host();
+        let index = store.load_lesson_index().unwrap();
+        let out = inject_lessons_into_prompt("prompt body", &index, "drk-99 query");
+        assert_eq!(out, "prompt body");
+    }
+
+    #[test]
+    fn render_lessons_block_respects_limit() {
+        let (_dir, store) = store_with_host();
+        for i in 1..=8u32 {
+            store
+                .append_lesson(&lesson(
+                    utc(2026, 5, i as i32),
+                    &format!("drk-{i} lesson number {i}"),
+                ))
+                .unwrap();
+        }
+        let index = store.load_lesson_index().unwrap();
+        let block = render_lessons_block(&index, "drk-1 query", 3)
+            .unwrap_or_else(|| panic!("block should render"));
+        let bullet_count = block.lines().filter(|l| l.starts_with("- ")).count();
+        assert!(
+            bullet_count <= 3,
+            "expected <= 3 bullets, got {bullet_count}"
+        );
     }
 }

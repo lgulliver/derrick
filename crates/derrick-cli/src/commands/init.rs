@@ -4,6 +4,7 @@ use std::path::Path;
 
 use derrick_adopt::{AdoptOptions, Adopter, ConstitutionMode};
 use derrick_config::{Config, InitTemplateVars, render_init_template};
+use derrick_memory::{MemoryPaths, MemoryStore, Seeds};
 use derrick_substrate_native::NativeSubstrate;
 
 use crate::commands::InitArgs;
@@ -217,6 +218,108 @@ fn likely_existing_project(repo_root: &Path) -> bool {
     repo_root.join("README.md").exists()
         || repo_root.join("Cargo.toml").exists()
         || repo_root.join("package.json").exists()
+}
+
+/// Detect the Claude Code auto-memory root (`~/.claude/projects/.../memory/`).
+///
+/// Returns `None` when the home directory cannot be determined or the `claude`
+/// binary is not on PATH — seeding is best-effort and silently skipped in
+/// those cases so `derrick init` does not fail in CI or non-Claude environments.
+fn host_memory_root() -> Option<std::path::PathBuf> {
+    // Claude Code writes its per-project memory under
+    // `~/.claude/projects/<encoded-cwd>/memory/`. We only need the parent of
+    // that namespace (`~/.claude/projects/<encoded-cwd>/`) here; the
+    // MemoryStore appends `derrick/<site>/` itself.
+    //
+    // For v1 we use the flatter `~/.claude/memory/` path as the root since
+    // the per-project path requires the project to already be open in Claude.
+    // This is additive and can be refined later once the exact Claude Code
+    // path is stable.
+    dirs::home_dir().map(|home| home.join(".claude").join("memory"))
+}
+
+/// Build the init-time memory seeds from a loaded config.
+///
+/// Per D55 and §9.A.1 the seeds include project facts (site name, prefix,
+/// mode, primary constitution path) and a reference entry pointing at the
+/// survey index location so the assistant always knows where to look.
+fn build_seeds(repo_root: &Path, config: &Config) -> Seeds {
+    let site = config.site();
+    let mode = match config.tools().substrate().mode() {
+        derrick_config::SubstrateMode::Solo => "solo",
+        derrick_config::SubstrateMode::Copilot => "copilot",
+        derrick_config::SubstrateMode::Crew => "crew",
+    };
+    let constitution_rel = config.guardrails().constitution_path();
+
+    Seeds {
+        project: vec![
+            ("site-name".to_owned(), site.name().to_owned()),
+            ("ticket-prefix".to_owned(), site.prefix().to_owned()),
+            ("mode".to_owned(), mode.to_owned()),
+            (
+                "constitution-path".to_owned(),
+                constitution_rel.display().to_string(),
+            ),
+        ],
+        reference: vec![(
+            "survey-index".to_owned(),
+            format!(
+                "Survey artifacts live under {}. Run `derrick survey` to inspect.",
+                repo_root
+                    .join(config.state().dir())
+                    .join("survey")
+                    .display()
+            ),
+        )],
+        feedback: vec![
+            (
+                "guardrails".to_owned(),
+                "Assay verdict is binding unless --no-assay is passed. \
+                 Batches must never be re-ordered after creation. \
+                 Do not mutate the substrate DB directly."
+                    .to_owned(),
+            ),
+        ],
+    }
+}
+
+/// Apply memory seeding for a completed init. Best-effort: logs a warning
+/// on failure but does not abort the init.
+fn seed_memory(repo_root: &Path, config: &Config, dry_run: bool) {
+    let seeds = build_seeds(repo_root, config);
+    let state_dir = repo_root.join(config.state().dir());
+
+    if dry_run {
+        // Dry-run: report what would be seeded without writing anything.
+        println!(
+            "memory-seed   {} project facts, {} reference, {} feedback (host auto-memory)",
+            seeds.project.len(),
+            seeds.reference.len(),
+            seeds.feedback.len(),
+        );
+        return;
+    }
+
+    let paths = MemoryPaths {
+        host_memory_root: host_memory_root(),
+        repo_state: state_dir,
+    };
+    match MemoryStore::open(paths, config.site()) {
+        Ok(store) => match store.seed(&seeds) {
+            Ok(written) => {
+                for path in &written {
+                    print_written(&path.display().to_string());
+                }
+            }
+            Err(err) => {
+                tracing::warn!(?err, "memory seeding failed — skipping");
+            }
+        },
+        Err(err) => {
+            tracing::warn!(?err, "failed to open memory store — skipping seed");
+        }
+    }
 }
 
 async fn brownfield_init(
