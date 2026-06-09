@@ -342,7 +342,7 @@ What's landed and tested:
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 - 🔜 Homebrew tap (v1.1)
 
-650 tests passing across 19 crates.
+801 tests passing across 20 crates.
 
 ## Coverage
 

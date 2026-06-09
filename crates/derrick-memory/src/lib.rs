@@ -748,6 +748,7 @@ pub fn inject_lessons_into_prompt(prompt: &str, index: &LessonIndex, query: &str
 ///
 /// [`relevant`]: LessonIndex::relevant
 /// [`recent`]: LessonIndex::recent
+#[derive(Debug)]
 pub struct LessonIndex {
     lessons: Vec<Lesson>,
     /// tag (ticket id or section anchor) → indices into `lessons`
@@ -1895,7 +1896,7 @@ state:
         for i in 1..=8u32 {
             store
                 .append_lesson(&lesson(
-                    utc(2026, 5, i as i32),
+                    utc(2026, 5, i),
                     &format!("drk-{i} lesson number {i}"),
                 ))
                 .unwrap();

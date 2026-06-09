@@ -285,10 +285,11 @@ async fn execute_role_step(
             })?;
         }
         let roughneck_saved = if config.tools().roughneck().enabled() {
-            derrick_roughneck::estimate_tokens_saved(
-                step_tokens_out,
+            derrick_roughneck::estimate_savings(
+                &response.stdout,
                 config.tools().roughneck().level(),
             )
+            .tokens_saved
         } else {
             0
         };
@@ -327,10 +328,8 @@ async fn execute_role_step(
             .max((prompt_len as u32).saturating_div(4));
         write_log(log_path, &response.text, "")?;
         let roughneck_saved = if config.tools().roughneck().enabled() {
-            derrick_roughneck::estimate_tokens_saved(
-                response.tokens_out,
-                config.tools().roughneck().level(),
-            )
+            derrick_roughneck::estimate_savings(&response.text, config.tools().roughneck().level())
+                .tokens_saved
         } else {
             0
         };

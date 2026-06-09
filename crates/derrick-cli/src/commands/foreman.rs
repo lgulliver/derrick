@@ -226,6 +226,7 @@ fn build_dispatcher(
             roughneck_enabled: config.tools().roughneck().enabled(),
             roughneck_level: config.tools().roughneck().level().to_owned(),
             stack_draft: config.tools().git().stacking().draft(),
+            lesson_index: None,
         };
         multi = multi.register(Box::new(
             LocalCopilotHandDispatcher::new(Arc::clone(substrate), copilot_config)
@@ -246,6 +247,7 @@ fn build_dispatcher(
             base_branch: "main".to_owned(),
             roughneck_enabled: config.tools().roughneck().enabled(),
             roughneck_level: config.tools().roughneck().level().to_owned(),
+            lesson_index: None,
         };
         multi = multi.register(Box::new(
             ClaudeHandDispatcher::new(Arc::clone(substrate), dispatcher_config)

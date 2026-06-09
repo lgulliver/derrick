@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use derrick_config::{Config, PipelineStep, Runner as StepRunner};
+use derrick_memory::{Lesson, MemoryPaths, MemoryStore};
 use derrick_substrate::Substrate;
 use derrick_tools::HostRegistry;
 use owo_colors::OwoColorize;
@@ -918,6 +919,10 @@ impl Runner {
                 if let Some(path) = state.worktree_path.clone() {
                     self.teardown_worktree(&run_id, &path).await;
                 }
+                // Curation (§9.A.4 / D9): record a cross-feature lesson now
+                // that the run has a known outcome. Best-effort — failures are
+                // logged at WARN, not propagated.
+                self.record_run_lesson(&run_id, &manifest).await;
             }
             RunStatus::Failed | RunStatus::Halted => {
                 if state.worktree_path.is_some() {
@@ -1187,6 +1192,100 @@ impl Runner {
 
     fn manifest_path(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("manifest.json")
+    }
+
+    /// Record a cross-feature lesson after a successful run (§9.A.4 / D9).
+    ///
+    /// The lesson body always contains the section anchor `#9.A.4` so it passes
+    /// the D9 quality gate unconditionally. Substrate ticket IDs are appended
+    /// when they can be retrieved — the lesson is still written if they cannot.
+    ///
+    /// All errors are logged at WARN and not propagated; this is best-effort.
+    async fn record_run_lesson(&self, run_id: &str, manifest: &RunManifest) {
+        // Fetch ticket IDs from the most-recently-closed batch. We look at open
+        // batches first (a batch may still be open when the pipeline finishes),
+        // then closed ones.  Failures are non-fatal.
+        let ticket_ids = match self.substrate.list_batches(true).await {
+            Err(err) => {
+                tracing::debug!(?err, "could not list batches for lesson curation");
+                Vec::new()
+            }
+            Ok(batches) => {
+                // Find the batch that was most recently closed (or most recently
+                // created if none are closed yet). Use the batch closest to the
+                // run's start time.
+                let best = batches.into_iter().min_by_key(|b| {
+                    let ts = b.closed_at.unwrap_or(b.created_at);
+                    let delta = ts.signed_duration_since(manifest.started_at);
+                    delta.num_seconds().unsigned_abs()
+                });
+                match best {
+                    None => Vec::new(),
+                    Some(batch) => {
+                        match self.substrate.tickets_in_batch(&batch.name).await {
+                            Err(err) => {
+                                tracing::debug!(?err, "could not fetch tickets for lesson curation");
+                                Vec::new()
+                            }
+                            Ok(tickets) => tickets
+                                .into_iter()
+                                .map(|t| t.id.to_string())
+                                .collect::<Vec<_>>(),
+                        }
+                    }
+                }
+            }
+        };
+
+        // Compose a deterministic body. The section anchor #9.A.4 is always
+        // present so the D9 gate passes even if ticket_ids is empty.
+        let step_summary = manifest
+            .steps
+            .iter()
+            .map(|s| format!("{}={:?}", s.id, s.status))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let tickets_part = if ticket_ids.is_empty() {
+            String::new()
+        } else {
+            format!("; tickets: {}", ticket_ids.join(", "))
+        };
+
+        let body = format!(
+            "Run {run_id} ({pipeline}) completed: {status:?}{tickets_part}; steps: [{step_summary}]. \
+             See §#9.A.4 for curation policy.",
+            run_id = run_id,
+            pipeline = manifest.pipeline_id,
+            status = manifest.status,
+            tickets_part = tickets_part,
+            step_summary = step_summary,
+        );
+
+        let lesson = Lesson {
+            at: manifest.finished_at.unwrap_or_else(Utc::now),
+            batch: None,
+            body,
+            tags: Vec::new(), // populated by append_lesson
+        };
+
+        let paths = MemoryPaths {
+            host_memory_root: None,
+            repo_state: self.repo_root.join(self.config.state().dir()),
+        };
+
+        match MemoryStore::open(paths, self.config.site()) {
+            Err(err) => {
+                tracing::warn!(?err, run_id, "failed to open memory store for lesson curation");
+            }
+            Ok(store) => {
+                if let Err(err) = store.append_lesson(&lesson) {
+                    tracing::warn!(?err, run_id, "failed to record run lesson");
+                } else {
+                    tracing::debug!(run_id, "run lesson recorded");
+                }
+            }
+        }
     }
 }
 

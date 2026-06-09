@@ -220,22 +220,19 @@ fn likely_existing_project(repo_root: &Path) -> bool {
         || repo_root.join("package.json").exists()
 }
 
-/// Detect the Claude Code auto-memory root (`~/.claude/projects/.../memory/`).
+/// Detect the Claude Code auto-memory root (`~/.claude/memory/`).
 ///
-/// Returns `None` when the home directory cannot be determined or the `claude`
-/// binary is not on PATH — seeding is best-effort and silently skipped in
-/// those cases so `derrick init` does not fail in CI or non-Claude environments.
+/// Returns `None` when the home directory cannot be determined — seeding is
+/// best-effort and silently skipped in those cases so `derrick init` does not
+/// fail in CI or non-Claude environments.
 fn host_memory_root() -> Option<std::path::PathBuf> {
-    // Claude Code writes its per-project memory under
-    // `~/.claude/projects/<encoded-cwd>/memory/`. We only need the parent of
-    // that namespace (`~/.claude/projects/<encoded-cwd>/`) here; the
-    // MemoryStore appends `derrick/<site>/` itself.
-    //
-    // For v1 we use the flatter `~/.claude/memory/` path as the root since
-    // the per-project path requires the project to already be open in Claude.
-    // This is additive and can be refined later once the exact Claude Code
-    // path is stable.
-    dirs::home_dir().map(|home| home.join(".claude").join("memory"))
+    // Claude Code's auto-memory convention: `~/.claude/memory/`. The
+    // MemoryStore appends `derrick/<site>/` itself so we only supply the
+    // root here. This matches the §9.A.1 description and is additive —
+    // refinements to the exact path can be patched without touching callers.
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".claude").join("memory"))
 }
 
 /// Build the init-time memory seeds from a loaded config.
@@ -370,6 +367,10 @@ async fn brownfield_init(
     if resolved.jetbrains {
         write_jetbrains_configs(repo_root)?;
     }
+    // Seed memory after apply so the config and state dir are present.
+    if let Ok(config) = read_config(repo_root) {
+        seed_memory(repo_root, &config, resolved.dry_run);
+    }
     if !resolved.yes {
         println!();
         println!("{}", ui::hint("review `git status` before committing"));
@@ -458,6 +459,10 @@ async fn greenfield_init(
     // Make an initial commit so `git worktree add ... HEAD` succeeds on the
     // first `derrick add`. Only runs when the repo has no commits yet.
     maybe_initial_commit(repo_root)?;
+
+    // Seed the memory store now that the config and state dir exist (§9.A.1 /
+    // D55). Best-effort — failures are logged, not propagated.
+    seed_memory(repo_root, &config, false);
 
     print_summary(&config, resolved.ai_style);
     Ok(CliExitCode::Success)
@@ -888,6 +893,10 @@ fn print_greenfield_plan(repo_root: &Path, resolved: &ResolvedInitOptions) {
     // seed_constitution writes the constitution last.
     writes.push(".specify/memory/constitution.md".to_owned());
 
+    // Memory seeding is reported separately (it writes to the host memory
+    // dir, not the repo, so it does not fit the `writes` list).
+    let memory_note = "memory seeds (project/reference/feedback) → ~/.claude/memory/derrick/<site>/";
+
     println!("dry run — greenfield init plan for {}", repo_root.display());
     let mut iter = writes.iter();
     if let Some(first) = iter.next() {
@@ -896,6 +905,7 @@ fn print_greenfield_plan(repo_root: &Path, resolved: &ResolvedInitOptions) {
             println!("{INDENT}{path}");
         }
     }
+    println!("seeds        {memory_note}");
     println!();
     println!("{}", ui::hint("re-run without --dry-run to apply"));
 }

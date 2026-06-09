@@ -13,6 +13,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use derrick_memory::LessonIndex;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use derrick_stack::{OpenPrParams, StackBackend};
@@ -61,6 +63,11 @@ pub struct LocalCopilotHandDispatcherConfig {
     pub roughneck_level: String,
     /// Open the PR as a draft when the post-dispatch stack hook fires.
     pub stack_draft: bool,
+    /// Pre-loaded lesson index for retrieval injection (§9.A.4). When
+    /// present, up to [`derrick_memory::LESSON_RETRIEVAL_LIMIT`] relevant
+    /// lessons are appended to the queue file prompt. `None` skips injection
+    /// and adds zero tokens.
+    pub lesson_index: Option<Arc<LessonIndex>>,
 }
 
 impl Default for LocalCopilotHandDispatcherConfig {
@@ -79,6 +86,7 @@ impl Default for LocalCopilotHandDispatcherConfig {
             roughneck_enabled: true,
             roughneck_level: "full".to_owned(),
             stack_draft: false,
+            lesson_index: None,
         }
     }
 }
@@ -366,7 +374,7 @@ impl LocalCopilotHandDispatcher {
             .batch
             .as_ref()
             .map(derrick_substrate::BatchName::as_str);
-        let queue_body = render_queue_file(
+        let raw_body = render_queue_file(
             ticket.id.as_str(),
             batch,
             &ticket.title,
@@ -377,6 +385,13 @@ impl LocalCopilotHandDispatcher {
             self.config.roughneck_enabled,
             &self.config.roughneck_level,
         );
+        // Inject relevant lessons (§9.A.4). Query uses the ticket id + title.
+        let query = format!("{} {}", ticket.id, ticket.title);
+        let queue_body = if let Some(index) = &self.config.lesson_index {
+            derrick_memory::inject_lessons_into_prompt(&raw_body, index, &query)
+        } else {
+            raw_body
+        };
         let queue_file = self
             .config
             .queue_dir
@@ -609,10 +624,12 @@ impl PollTask {
         let tokens_in: u32 = 0;
         let tokens_out: u32 = 0;
         let roughneck_saved = if self.roughneck_enabled {
-            derrick_roughneck::estimate_tokens_saved(tokens_out, &self.roughneck_level)
+            let text = std::str::from_utf8(stdout_bytes).unwrap_or("");
+            derrick_roughneck::estimate_savings(text, &self.roughneck_level).tokens_saved
         } else {
             0
         };
+        let _ = tokens_out; // copilot stdout has no token count; suppress unused warning
 
         let body = format!(
             "hand stats: tokens_in={tokens_in} tokens_out={tokens_out} \
@@ -918,6 +935,7 @@ mod tests {
             roughneck_enabled: false,
             roughneck_level: "full".to_owned(),
             stack_draft: false,
+            lesson_index: None,
         }
     }
 
