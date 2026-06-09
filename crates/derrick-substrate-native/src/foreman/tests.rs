@@ -2171,7 +2171,7 @@ async fn unblock_skips_when_predecessor_ticket_row_missing() {
     let substrate = open_substrate(&tempdir).await;
 
     // Create and immediately delete the predecessor ticket row via SQL.
-    let pred_id = TicketId::new("drk-ghost").unwrap();
+    let pred_id = TicketId::new("drk-99").unwrap();
     let pred = NewTicket::new(pred_id.clone(), None, None, "t", "b", vec![]).unwrap();
     substrate.create_ticket(pred).await.unwrap();
 
@@ -2256,7 +2256,7 @@ async fn dispatch_skips_when_inflight_equals_batch_max() {
     let hand = register_hand_simple(&substrate, "h1").await;
 
     // Pre-occupy the hand with a ticket so count_inflight = 1.
-    let occupied = new_ticket(&substrate, "drk-occupied").await;
+    let occupied = new_ticket(&substrate, "drk-1").await;
     substrate.assign_to_hand(&occupied.id, &hand).await.unwrap();
 
     // One more ready ticket.
