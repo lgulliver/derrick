@@ -491,6 +491,60 @@ async fn assign_to_hand_refuses_when_not_ready() -> Result<(), SubstrateError> {
     Ok(())
 }
 
+/// BUG 2 regression: two independent `NativeSubstrate` instances opened on the
+/// same DB file (the foreman-daemon + CLI, or two foremen in crew mode) must
+/// not both claim the same `Ready` ticket. The in-process writer mutex does
+/// not span instances, so the atomic `state = 'ready'` UPDATE predicate is the
+/// only thing preventing a lost-update overwrite.
+#[tokio::test]
+async fn assign_to_hand_rejects_cross_instance_double_claim() -> Result<(), SubstrateError> {
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    // Two separate instances on the same DB file → separate writer mutexes,
+    // exactly the cross-process scenario.
+    let first = open_substrate(&tempdir).await?;
+    let second = open_substrate(&tempdir).await?;
+
+    let h1 = register_hand_fixture(&first, "h1").await?;
+    let h2 = register_hand_fixture(&second, "h2").await?;
+    first.create_ticket(new_ticket("drk-1")?).await?;
+
+    // First instance claims the ticket.
+    let claimed = first.assign_to_hand(&ticket_id("drk-1")?, &h1).await?;
+    assert_eq!(claimed.state, TicketState::InFlight);
+    assert_eq!(claimed.owner.as_ref(), Some(&h1));
+
+    // Second instance tries to claim the same ticket. It must fail cleanly
+    // with a conflict rather than silently overwriting the owner.
+    let result = second.assign_to_hand(&ticket_id("drk-1")?, &h2).await;
+    assert!(
+        matches!(result, Err(SubstrateError::Conflict { .. })),
+        "second claim should conflict, got {result:?}"
+    );
+
+    // The ticket must still be owned by the first hand — no lost update.
+    let after = second
+        .list_tickets(TicketFilter::default())
+        .await?
+        .into_iter()
+        .find(|t| t.id == ticket_id("drk-1").unwrap())
+        .expect("ticket present");
+    assert_eq!(after.state, TicketState::InFlight);
+    assert_eq!(after.owner.as_ref(), Some(&h1));
+
+    // The failed claim must not have written assignment events for h2. Exactly
+    // one TicketAssigned event should exist, naming h1.
+    let events = second.tail_typed_events(None, 100).await?;
+    let assigned: Vec<&HandId> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::TicketAssigned { hand } => Some(hand),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assigned, vec![&h1], "only the winning claim writes events");
+    Ok(())
+}
+
 #[tokio::test]
 async fn release_from_hand_is_atomic_state_and_owner() -> Result<(), SubstrateError> {
     let tempdir = tempfile::tempdir().map_err(io_error)?;
@@ -587,6 +641,40 @@ async fn tail_typed_events_returns_deserialised_kinds() -> Result<(), SubstrateE
             .iter()
             .any(|e| matches!(&e.kind, EventKind::Note { body } if body == "ping"))
     );
+    Ok(())
+}
+
+/// BUG 1 regression: the `Substrate` trait documents `tail_typed_events` as
+/// returning events newest-first (mirroring the legacy `tail_events`). A prior
+/// `ORDER BY rowid ASC` returned them oldest-first, breaking the TUI activity
+/// feed and the assay-step scan that relies on the first match being the most
+/// recent.
+#[tokio::test]
+async fn tail_typed_events_returns_newest_first() -> Result<(), SubstrateError> {
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+    for n in 0..5 {
+        substrate
+            .record_typed_event(
+                EventScope::Site,
+                EventKind::Note {
+                    body: format!("note-{n}"),
+                },
+            )
+            .await?;
+    }
+    let events = substrate.tail_typed_events(None, 50).await?;
+    let ids: Vec<i64> = events.iter().map(|e| e.id.0).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_by(|a, b| b.cmp(a));
+    assert_eq!(ids, sorted, "tail_typed_events must be newest-first");
+
+    // The most recently recorded note must be the first element.
+    let first_note = events.iter().find_map(|e| match &e.kind {
+        EventKind::Note { body } => Some(body.as_str()),
+        _ => None,
+    });
+    assert_eq!(first_note, Some("note-4"));
     Ok(())
 }
 
