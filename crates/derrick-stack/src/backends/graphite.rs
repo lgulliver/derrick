@@ -23,8 +23,7 @@ use crate::{OpenPrParams, PrInfo, RestackOutcome, RestackParams, StackBackend, S
 
 const BACKEND: &str = "graphite";
 const BINARY: &str = "gt";
-const INSTALL_HINT: &str =
-    "gt not found on PATH — install Graphite via `npm install -g @withgraphite/graphite-cli` \
+const INSTALL_HINT: &str = "gt not found on PATH — install Graphite via `npm install -g @withgraphite/graphite-cli` \
      (or https://graphite.dev/docs/install-the-cli) and run `gt auth`";
 
 /// Graphite stack backend. Delegates rebase/submit to the `gt` CLI.
@@ -128,7 +127,10 @@ impl StackBackend for GraphiteStackBackend {
     async fn force_push(&self, branch: &str, _repo_root: &Path) -> Result<(), StackError> {
         // Graphite force-pushes (with lease) as part of `gt submit`/`gt restack`.
         // Exposing a no-op keeps the trait uniform for mixed-mode callers.
-        info!(branch, "force_push is a no-op for graphite; gt submit handles it");
+        info!(
+            branch,
+            "force_push is a no-op for graphite; gt submit handles it"
+        );
         Ok(())
     }
 }

@@ -454,11 +454,8 @@ impl HostCliHandDispatcher {
             .saturating_add(err_stats.bytes_in.saturating_sub(err_stats.bytes_out))
             .min(u64::from(u32::MAX)) as u32;
         let roughneck_saved = if self.config.roughneck_enabled {
-            derrick_roughneck::estimate_savings(
-                &response.stdout,
-                &self.config.roughneck_level,
-            )
-            .tokens_saved
+            derrick_roughneck::estimate_savings(&response.stdout, &self.config.roughneck_level)
+                .tokens_saved
         } else {
             0
         };

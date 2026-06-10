@@ -58,11 +58,7 @@ pub(crate) fn ensure_binary(
 
 /// Run `binary` with `args` in `repo_root`, capturing output. stdin is closed
 /// so the external tool never blocks waiting on an interactive prompt.
-pub(crate) async fn run<I, S>(
-    binary: &str,
-    args: I,
-    repo_root: &Path,
-) -> Result<CliRun, StackError>
+pub(crate) async fn run<I, S>(binary: &str, args: I, repo_root: &Path) -> Result<CliRun, StackError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

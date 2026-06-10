@@ -1221,18 +1221,16 @@ impl Runner {
                 });
                 match best {
                     None => Vec::new(),
-                    Some(batch) => {
-                        match self.substrate.tickets_in_batch(&batch.name).await {
-                            Err(err) => {
-                                tracing::debug!(?err, "could not fetch tickets for lesson curation");
-                                Vec::new()
-                            }
-                            Ok(tickets) => tickets
-                                .into_iter()
-                                .map(|t| t.id.to_string())
-                                .collect::<Vec<_>>(),
+                    Some(batch) => match self.substrate.tickets_in_batch(&batch.name).await {
+                        Err(err) => {
+                            tracing::debug!(?err, "could not fetch tickets for lesson curation");
+                            Vec::new()
                         }
-                    }
+                        Ok(tickets) => tickets
+                            .into_iter()
+                            .map(|t| t.id.to_string())
+                            .collect::<Vec<_>>(),
+                    },
                 }
             }
         };
@@ -1276,7 +1274,11 @@ impl Runner {
 
         match MemoryStore::open(paths, self.config.site()) {
             Err(err) => {
-                tracing::warn!(?err, run_id, "failed to open memory store for lesson curation");
+                tracing::warn!(
+                    ?err,
+                    run_id,
+                    "failed to open memory store for lesson curation"
+                );
             }
             Ok(store) => {
                 if let Err(err) = store.append_lesson(&lesson) {

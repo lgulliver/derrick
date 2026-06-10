@@ -952,6 +952,10 @@ impl DataModel {
 
 #[cfg(test)]
 mod tests {
+    // Test fixtures may panic on setup failure; the crate-level
+    // expect/unwrap deny is for production render paths.
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
     use super::*;
 
     // -----------------------------------------------------------------------
@@ -1017,16 +1021,14 @@ mod tests {
             .await
             .expect("open substrate");
 
-        let error_state =
-            StackLoadResult::Error("gh exited non-zero: auth required".to_owned());
+        let error_state = StackLoadResult::Error("gh exited non-zero: auth required".to_owned());
 
         let model = DataModel::refresh(&substrate, &[], error_state.clone(), &[], None)
             .await
             .expect("refresh");
 
         assert_eq!(
-            model.stack_load_result,
-            error_state,
+            model.stack_load_result, error_state,
             "stack_load_result should be forwarded unchanged"
         );
     }

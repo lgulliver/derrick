@@ -807,8 +807,14 @@ mod tests {
     }
 
     /// Returns true while `pid` refers to a live, non-reaped process.
-    /// Uses `kill(pid, 0)` semantics via `/proc` to avoid extra crates.
+    /// Uses `kill(pid, 0)` probe semantics so the check works on both Linux
+    /// and macOS (which has no `/proc`).
     fn process_is_alive(pid: u32) -> bool {
-        std::path::Path::new(&format!("/proc/{pid}")).exists()
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 }

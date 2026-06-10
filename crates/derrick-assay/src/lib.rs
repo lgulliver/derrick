@@ -412,9 +412,11 @@ pub async fn run_reviewer_rounds(
         // provider, the substitution silently collapses assay into same-family
         // review — emit the same same-family warning as the config-time check
         // (DESIGN §7 / D5). Do not block.
-        if let Some(msg) =
-            same_family_warning(role_provider(config, PROPOSER_ROLE), reviewer_role, Some("claude"))
-        {
+        if let Some(msg) = same_family_warning(
+            role_provider(config, PROPOSER_ROLE),
+            reviewer_role,
+            Some("claude"),
+        ) {
             tracing::warn!(
                 step = "assay",
                 reviewer = %reviewer_role,
@@ -819,8 +821,7 @@ fn same_family_warnings(config: &Config, reviewers: &[String]) -> Vec<String> {
     let mut warnings = Vec::new();
     for reviewer_role in reviewers {
         let reviewer_provider = role_provider(config, reviewer_role);
-        if let Some(msg) =
-            same_family_warning(proposer_provider, reviewer_role, reviewer_provider)
+        if let Some(msg) = same_family_warning(proposer_provider, reviewer_role, reviewer_provider)
         {
             tracing::warn!(
                 step = "assay",
@@ -2068,7 +2069,10 @@ Details"#;
         );
         // Unknown provider on either side => cannot assert same-family => silent.
         assert_eq!(same_family_warning(None, "reviewer", Some("openai")), None);
-        assert_eq!(same_family_warning(Some("anthropic"), "reviewer", None), None);
+        assert_eq!(
+            same_family_warning(Some("anthropic"), "reviewer", None),
+            None
+        );
     }
 
     #[test]
@@ -2094,7 +2098,10 @@ Details"#;
 
         // Different-family reviewer => no warning.
         let warnings = same_family_warnings(&config, &["reviewer-x".to_owned()]);
-        assert!(warnings.is_empty(), "different-family reviewer must not warn");
+        assert!(
+            warnings.is_empty(),
+            "different-family reviewer must not warn"
+        );
 
         // Mixed list => only the same-family one warns.
         let warnings =
@@ -2118,7 +2125,10 @@ Details"#;
     fn reconcile_verdicts_all_accept_succeeds() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let combined = tmp.path().join("verdict.md");
-        let outcomes = vec![outcome("reviewer", "accept"), outcome("reviewer-2", "accept")];
+        let outcomes = vec![
+            outcome("reviewer", "accept"),
+            outcome("reviewer-2", "accept"),
+        ];
         let exec = reconcile_verdicts(&outcomes, OnSplit::Reject, &combined, tmp.path())
             .expect("reconcile");
         assert_eq!(exec.status, crate::types::StepStatus::Success);
@@ -2128,7 +2138,10 @@ Details"#;
     fn reconcile_verdicts_hard_reject_halts() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let combined = tmp.path().join("verdict.md");
-        let outcomes = vec![outcome("reviewer", "accept"), outcome("reviewer-2", "reject")];
+        let outcomes = vec![
+            outcome("reviewer", "accept"),
+            outcome("reviewer-2", "reject"),
+        ];
         let exec = reconcile_verdicts(&outcomes, OnSplit::Reject, &combined, tmp.path())
             .expect("reconcile");
         assert_eq!(exec.status, crate::types::StepStatus::Halted);

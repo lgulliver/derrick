@@ -1759,7 +1759,10 @@ async fn cleanup_adopt_stage_removes_stale_dirs() {
     let report = foreman.tick().await.expect("tick");
 
     // Dir must be gone.
-    assert!(!stage_dir.exists(), "stale adopt-stage dir should be pruned");
+    assert!(
+        !stage_dir.exists(),
+        "stale adopt-stage dir should be pruned"
+    );
 
     // A Note event must have been recorded.
     let events = substrate.tail_typed_events(None, 50).await.unwrap();
@@ -1767,7 +1770,10 @@ async fn cleanup_adopt_stage_removes_stale_dirs() {
         EventKind::Note { body } => body.contains(".adopt-stage-abc123"),
         _ => false,
     });
-    assert!(found, "expected stale adopt-stage Note event; report: {report:?}");
+    assert!(
+        found,
+        "expected stale adopt-stage Note event; report: {report:?}"
+    );
 }
 
 #[tokio::test]
@@ -1841,7 +1847,10 @@ async fn cleanup_adopt_stage_skips_recent_dirs() {
     });
 
     foreman.tick().await.expect("tick");
-    assert!(stage_dir.exists(), "recent adopt-stage dir should not be pruned");
+    assert!(
+        stage_dir.exists(),
+        "recent adopt-stage dir should not be pruned"
+    );
 }
 
 #[tokio::test]
@@ -1870,7 +1879,10 @@ async fn cleanup_adopt_stage_skips_non_directory_entries() {
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     foreman.tick().await.expect("tick");
     // The file should still exist (not treated as a dir to remove).
-    assert!(stage_file.exists(), "non-directory .adopt-stage file should be untouched");
+    assert!(
+        stage_file.exists(),
+        "non-directory .adopt-stage file should be untouched"
+    );
 }
 
 // ---- verify_in_review_ticket: merged-PR path where pr_merge_sha is None --
@@ -1914,7 +1926,11 @@ async fn verifier_squash_merge_path_no_merge_sha_escalates() {
         "expected StuckEscalated when merge SHA is None"
     );
     let after = substrate.get_ticket(&ticket.id).await.unwrap().unwrap();
-    assert_eq!(after.state, TicketState::InReview, "ticket must stay InReview");
+    assert_eq!(
+        after.state,
+        TicketState::InReview,
+        "ticket must stay InReview"
+    );
 }
 
 #[tokio::test]
@@ -2064,7 +2080,8 @@ async fn reconcile_skips_when_pr_merged_sha_not_on_target() {
     let repo = MockRepoState::new();
     repo.set_contains("main", "head", false).await;
     repo.set_pr_status("feature", PrStatus::Merged).await;
-    repo.set_pr_merge_sha("feature", Some("squash-sha".to_owned())).await;
+    repo.set_pr_merge_sha("feature", Some("squash-sha".to_owned()))
+        .await;
     // squash-sha is NOT on main
     repo.set_contains("main", "squash-sha", false).await;
 
@@ -2079,7 +2096,10 @@ async fn reconcile_skips_when_pr_merged_sha_not_on_target() {
         .verifier_actions
         .iter()
         .any(|a| matches!(a, VerifierAction::ReconciledFromGit { .. }));
-    assert!(!reconciled, "should not reconcile when squash sha not on target");
+    assert!(
+        !reconciled,
+        "should not reconcile when squash sha not on target"
+    );
 }
 
 #[tokio::test]
@@ -2113,9 +2133,10 @@ async fn reconcile_handles_ready_ticket_with_no_pr_url() {
         .verifier_actions
         .iter()
         .find_map(|a| match a {
-            VerifierAction::ReconciledFromGit { ticket: t, merge_sha } => {
-                Some((t.clone(), merge_sha.clone()))
-            }
+            VerifierAction::ReconciledFromGit {
+                ticket: t,
+                merge_sha,
+            } => Some((t.clone(), merge_sha.clone())),
             _ => None,
         })
         .expect("expected ReconciledFromGit");
@@ -2158,7 +2179,10 @@ async fn unblock_skips_dependency_blocked_with_non_terminal_predecessor() {
         tempdir.path().to_path_buf(),
     );
     let report = foreman.tick().await.expect("tick");
-    assert!(report.unblocked.is_empty(), "must not unblock when predecessor is Ready");
+    assert!(
+        report.unblocked.is_empty(),
+        "must not unblock when predecessor is Ready"
+    );
     let after = substrate.get_ticket(&dep.id).await.unwrap().unwrap();
     assert_eq!(after.state, TicketState::Blocked);
 }
@@ -2222,7 +2246,9 @@ impl HandDispatcher for IoErrorDispatcher {
     }
 
     async fn dispatch(&self, _ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
-        Err(DispatchError::Io(std::io::Error::other("injected I/O failure")))
+        Err(DispatchError::Io(std::io::Error::other(
+            "injected I/O failure",
+        )))
     }
 }
 
@@ -2457,7 +2483,10 @@ async fn restack_force_push_failure_records_note_and_continues() {
     .with_stack_backend(Arc::new(backend.clone()), stacking_cfg);
 
     // Must not return an error.
-    let report = foreman.tick().await.expect("tick must succeed despite force-push failure");
+    let report = foreman
+        .tick()
+        .await
+        .expect("tick must succeed despite force-push failure");
 
     // A Note event about the failure must have been written.
     let events = substrate.ticket_events(&b.id, 20).await.unwrap();
@@ -2465,7 +2494,10 @@ async fn restack_force_push_failure_records_note_and_continues() {
         EventKind::Note { body } => body.contains("force-push failed"),
         _ => false,
     });
-    assert!(has_failure_note, "expected force-push failure Note event; report: {report:?}");
+    assert!(
+        has_failure_note,
+        "expected force-push failure Note event; report: {report:?}"
+    );
 }
 
 // ---- report_is_idle (private fn tested via run_attached) ----------------
@@ -2498,15 +2530,17 @@ async fn run_attached_exit_when_idle_requires_no_action_in_tick() {
 
     // With exit_when_idle=true this should run 2 ticks (first dispatches,
     // second is idle) and then return.
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        async { foreman.run_attached().await },
-    )
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        foreman.run_attached().await
+    })
     .await
     .expect("timeout")
     .expect("run_attached");
 
-    assert!(!recorder.calls().await.is_empty(), "expected at least one dispatch");
+    assert!(
+        !recorder.calls().await.is_empty(),
+        "expected at least one dispatch"
+    );
 }
 
 // ---- GhRepoState pr_status: branch-level output parsing -----------------
@@ -2519,10 +2553,7 @@ async fn gh_repo_state_pr_status_returns_not_found_on_failure() {
     // We exercise this by creating a real temp git repo and running gh
     // against a branch that has no PR. gh is expected to exit non-zero.
     // If gh is not available, skip via the "gh not available" guard below.
-    let which = std::process::Command::new("which")
-        .arg("gh")
-        .output()
-        .ok();
+    let which = std::process::Command::new("which").arg("gh").output().ok();
     if which.map(|o| !o.status.success()).unwrap_or(true) {
         // gh not available in this environment — skip.
         return;
@@ -2616,7 +2647,9 @@ async fn gh_repo_state_target_contains_sha_returns_true_for_commit_on_branch() {
         .output()
         .await
         .expect("abbrev-ref");
-    let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_owned();
+    let branch = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_owned();
 
     let state = GhRepoState::new(root.to_path_buf());
     let result = state
@@ -2639,7 +2672,9 @@ async fn gh_repo_state_target_contains_sha_returns_false_for_unknown_sha() {
         .output()
         .await
         .expect("abbrev-ref");
-    let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_owned();
+    let branch = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_owned();
 
     let state = GhRepoState::new(root.to_path_buf());
     let result = state

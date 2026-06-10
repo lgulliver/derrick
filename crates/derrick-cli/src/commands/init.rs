@@ -269,15 +269,13 @@ fn build_seeds(repo_root: &Path, config: &Config) -> Seeds {
                     .display()
             ),
         )],
-        feedback: vec![
-            (
-                "guardrails".to_owned(),
-                "Assay verdict is binding unless --no-assay is passed. \
+        feedback: vec![(
+            "guardrails".to_owned(),
+            "Assay verdict is binding unless --no-assay is passed. \
                  Batches must never be re-ordered after creation. \
                  Do not mutate the substrate DB directly."
-                    .to_owned(),
-            ),
-        ],
+                .to_owned(),
+        )],
     }
 }
 
@@ -895,7 +893,8 @@ fn print_greenfield_plan(repo_root: &Path, resolved: &ResolvedInitOptions) {
 
     // Memory seeding is reported separately (it writes to the host memory
     // dir, not the repo, so it does not fit the `writes` list).
-    let memory_note = "memory seeds (project/reference/feedback) → ~/.claude/memory/derrick/<site>/";
+    let memory_note =
+        "memory seeds (project/reference/feedback) → ~/.claude/memory/derrick/<site>/";
 
     println!("dry run — greenfield init plan for {}", repo_root.display());
     let mut iter = writes.iter();

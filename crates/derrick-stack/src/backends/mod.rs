@@ -76,7 +76,10 @@ pub(crate) fn find_pr_url_and_number(text: &str) -> Option<(String, u64)> {
         let candidate = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '/');
         if let Some(idx) = candidate.find("/pull/") {
             let number_part = &candidate[idx + "/pull/".len()..];
-            let digits: String = number_part.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let digits: String = number_part
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
             if let Ok(number) = digits.parse::<u64>() {
                 let url_end = idx + "/pull/".len() + digits.len();
                 return Some((candidate[..url_end].to_owned(), number));
@@ -111,11 +114,10 @@ pub(crate) async fn lookup_pr_via_gh(
         });
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|error| {
-        StackError::Gh {
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).map_err(|error| StackError::Gh {
             message: format!("could not parse gh pr view JSON for {branch}: {error}"),
-        }
-    })?;
+        })?;
     let url = value
         .get("url")
         .and_then(|v| v.as_str())

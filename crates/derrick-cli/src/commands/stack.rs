@@ -38,7 +38,10 @@ pub(crate) async fn execute(args: StackArgs) -> Result<CliExitCode, crate::CliEr
     result
 }
 
-fn build_backend(repo_root: &Path, config: &Config) -> Result<Arc<dyn StackBackend>, crate::CliError> {
+fn build_backend(
+    repo_root: &Path,
+    config: &Config,
+) -> Result<Arc<dyn StackBackend>, crate::CliError> {
     let stack_cfg = config.tools().git().stacking();
     let backend: Arc<dyn StackBackend> = match stack_cfg.backend() {
         StackBackendKind::Native => Arc::new(NativeStackBackend::new(
@@ -390,11 +393,7 @@ state:
         unsafe {
             std::env::set_var(
                 "PATH",
-                format!(
-                    "{}:{}",
-                    tmp.path().display(),
-                    prev.as_deref().unwrap_or("")
-                ),
+                format!("{}:{}", tmp.path().display(), prev.as_deref().unwrap_or("")),
             );
         }
         install_fake(tmp.path(), "gs");
@@ -420,11 +419,7 @@ state:
         unsafe {
             std::env::set_var(
                 "PATH",
-                format!(
-                    "{}:{}",
-                    tmp.path().display(),
-                    prev.as_deref().unwrap_or("")
-                ),
+                format!("{}:{}", tmp.path().display(), prev.as_deref().unwrap_or("")),
             );
         }
         install_fake(tmp.path(), "gt");

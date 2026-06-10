@@ -25,8 +25,7 @@ use crate::{OpenPrParams, PrInfo, RestackOutcome, RestackParams, StackBackend, S
 
 const BACKEND: &str = "git-spice";
 const BINARY: &str = "gs";
-const INSTALL_HINT: &str =
-    "gs not found on PATH — install git-spice from https://abhinav.github.io/git-spice/ \
+const INSTALL_HINT: &str = "gs not found on PATH — install git-spice from https://abhinav.github.io/git-spice/ \
      (e.g. `brew install git-spice`) and run `gs auth login`";
 
 /// git-spice stack backend. Delegates rebase/submit to the `gs` CLI.

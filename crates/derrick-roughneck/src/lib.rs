@@ -185,12 +185,20 @@ pub fn estimate_savings(output: &str, level: &str) -> RoughneckSavings {
         "lite" => 0.30,
         "full" => 0.65,
         "ultra" => 0.75,
-        _ => return RoughneckSavings { tokens_saved: 0, compliance: Compliance::None },
+        _ => {
+            return RoughneckSavings {
+                tokens_saved: 0,
+                compliance: Compliance::None,
+            };
+        }
     };
 
     let compliance = detect_compliance(output, level);
     let tokens_saved = compute_tokens_saved(output, rate, compliance);
-    RoughneckSavings { tokens_saved, compliance }
+    RoughneckSavings {
+        tokens_saved,
+        compliance,
+    }
 }
 
 /// Estimates how many output tokens roughneck saved given the observed
@@ -268,9 +276,15 @@ fn score_no_preamble(output: &str) -> u32 {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let window = if first_line.len() > 200 { &first_line[..200] } else { &first_line };
+    let window = if first_line.len() > 200 {
+        &first_line[..200]
+    } else {
+        &first_line
+    };
 
-    let has_preamble = PREAMBLE_PHRASES.iter().any(|phrase| window.contains(phrase));
+    let has_preamble = PREAMBLE_PHRASES
+        .iter()
+        .any(|phrase| window.contains(phrase));
     if has_preamble { 0 } else { 1 }
 }
 
@@ -447,11 +461,7 @@ fn fragment_fraction(output: &str) -> f64 {
         }
         total += 1;
         let is_bullet = trimmed.starts_with(['-', '*', '+', '•'])
-            || trimmed
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit())
-                && trimmed.contains(". ");
+            || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) && trimmed.contains(". ");
         let no_terminal = !trimmed.ends_with(['.', '!', '?']);
         if is_bullet || no_terminal {
             fragment += 1;

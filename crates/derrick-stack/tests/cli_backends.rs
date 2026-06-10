@@ -54,10 +54,7 @@ impl Fixture {
         run_git(&repo_root, &["config", "tag.gpgsign", "false"]);
         fs::write(repo_root.join("README.md"), "hello\n").expect("write file");
         run_git(&repo_root, &["add", "."]);
-        run_git(
-            &repo_root,
-            &["commit", "-q", "--no-gpg-sign", "-m", "init"],
-        );
+        run_git(&repo_root, &["commit", "-q", "--no-gpg-sign", "-m", "init"]);
         let branch = "derrick/alpha/drk-1".to_owned();
         run_git(&repo_root, &["checkout", "-q", "-b", &branch]);
 
@@ -278,7 +275,10 @@ async fn git_spice_restack_non_conflict_failure_is_error() {
         .expect_err("should error");
     match err {
         StackError::Git { message } => {
-            assert!(message.contains("gs upstack restack failed"), "got: {message}");
+            assert!(
+                message.contains("gs upstack restack failed"),
+                "got: {message}"
+            );
         }
         other => panic!("expected Git error, got {other:?}"),
     }

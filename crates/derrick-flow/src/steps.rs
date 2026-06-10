@@ -1003,10 +1003,7 @@ fn template_context(
 /// substituted value is wrapped in POSIX single quotes so it arrives at the
 /// shell as a single literal word. This is the only rendering path that must
 /// escape values; argv-passed host-CLI commands stay byte-identical.
-fn render_template_shell(
-    template: &str,
-    context: &TemplateContext,
-) -> Result<String, RunError> {
+fn render_template_shell(template: &str, context: &TemplateContext) -> Result<String, RunError> {
     let mut rendered = String::new();
     let mut rest = template;
     while let Some(start) = rest.find("{{") {

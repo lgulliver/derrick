@@ -418,7 +418,7 @@ fn diagnostic_block_end(input: &str, pos: usize) -> usize {
             || trimmed.starts_with("Traceback")    // Python
             || trimmed.starts_with("caused by:")
             || trimmed.starts_with("^ ")           // some diagnostic pointers
-            || is_gutter_line(trimmed);            // "42 | ..." gutter
+            || is_gutter_line(trimmed); // "42 | ..." gutter
 
         if is_continuation {
             end += line_len + 1;
