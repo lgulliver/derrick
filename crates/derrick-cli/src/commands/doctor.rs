@@ -108,13 +108,10 @@ async fn add_config_driven_checks(repo_root: &Path, config: &Config, checks: &mu
 
     let stack_backend = config.tools().git().stacking().backend();
     if stack_backend != StackBackendKind::None {
+        // The native backend (D72) is derrick's only stacking engine; it drives
+        // plain `git` plus `gh pr create`. `git` is already checked above, so we
+        // only need to ensure `gh` is present here.
         checks.push(binary_check("gh", true));
-        // The graphite and git-spice backends shell out to a third-party CLI;
-        // flag a missing binary so the failure surfaces at `derrick doctor`
-        // rather than mid-run when the foreman tries to restack.
-        if let Some(binary) = stack_backend_binary(stack_backend) {
-            checks.push(binary_check(binary, true));
-        }
         check_squash_merge_policy(repo_root, checks).await;
     }
 
@@ -280,16 +277,6 @@ fn host_binary(host: Host) -> &'static str {
         Host::Copilot => "copilot",
         Host::Opencode => "opencode",
         Host::Aider => "aider",
-    }
-}
-
-/// The third-party CLI binary a stacking backend shells out to, if any. The
-/// native and none backends use only `git`/`gh`, which are checked elsewhere.
-fn stack_backend_binary(backend: StackBackendKind) -> Option<&'static str> {
-    match backend {
-        StackBackendKind::Graphite => Some("gt"),
-        StackBackendKind::GitSpice => Some("gs"),
-        StackBackendKind::Native | StackBackendKind::None => None,
     }
 }
 

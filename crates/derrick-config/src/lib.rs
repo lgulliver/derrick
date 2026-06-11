@@ -992,16 +992,16 @@ impl Default for Stacking {
 }
 
 /// PR stacking backend kind.
+///
+/// Per D72 derrick owns its stacking technology: the native backend is the only
+/// engine. The third-party Graphite (`gt`) and git-spice (`gs`) adapters were
+/// removed; the `StackBackend` trait remains as the §8.6 extension seam.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StackBackendKind {
     /// Disable stacking.
     None,
-    /// Use derrick's native stack backend.
+    /// Use derrick's native stack backend (plain `git` + `gh`).
     Native,
-    /// Use Graphite.
-    Graphite,
-    /// Use git-spice.
-    GitSpice,
 }
 
 /// Force-push safety policy.
@@ -1432,10 +1432,13 @@ fn parse_stack_backend(value: &str) -> Result<StackBackendKind, ConfigError> {
     match value {
         "none" => Ok(StackBackendKind::None),
         "native" => Ok(StackBackendKind::Native),
-        "graphite" => Ok(StackBackendKind::Graphite),
-        "git-spice" => Ok(StackBackendKind::GitSpice),
+        "graphite" | "git-spice" => validation(format!(
+            "tools.git.stacking.backend: stacking backend {value:?} was removed (D72) — \
+             derrick's native stacking is the supported engine; \
+             set tools.git.stacking.backend: native"
+        )),
         other => validation(format!(
-            "tools.git.stacking.backend: {other:?} must be one of none | native | graphite | git-spice"
+            "tools.git.stacking.backend: {other:?} must be one of none | native"
         )),
     }
 }
@@ -2195,8 +2198,6 @@ impl From<Stacking> for StackingLayer {
                 match stacking.backend {
                     StackBackendKind::None => "none",
                     StackBackendKind::Native => "native",
-                    StackBackendKind::Graphite => "graphite",
-                    StackBackendKind::GitSpice => "git-spice",
                 }
                 .to_owned(),
             ),
@@ -2751,6 +2752,34 @@ state:
     }
 
     #[test]
+    fn config_graphite_backend_is_rejected_with_actionable_d72_error() {
+        let yaml = replace(
+            &minimal_yaml(),
+            "  substrate:\n    backend: native\n    mode: solo",
+            "  substrate:\n    backend: native\n    mode: solo\n  git:\n    stacking:\n      backend: graphite",
+        );
+
+        // Removed (D72): must name the removed value, the decision, and the
+        // exact remediation rather than a bare unknown-variant message.
+        assert_validation(&yaml, "removed (D72)");
+        assert_validation(&yaml, "\"graphite\"");
+        assert_validation(&yaml, "set tools.git.stacking.backend: native");
+    }
+
+    #[test]
+    fn config_git_spice_backend_is_rejected_with_actionable_d72_error() {
+        let yaml = replace(
+            &minimal_yaml(),
+            "  substrate:\n    backend: native\n    mode: solo",
+            "  substrate:\n    backend: native\n    mode: solo\n  git:\n    stacking:\n      backend: git-spice",
+        );
+
+        assert_validation(&yaml, "removed (D72)");
+        assert_validation(&yaml, "\"git-spice\"");
+        assert_validation(&yaml, "set tools.git.stacking.backend: native");
+    }
+
+    #[test]
     fn config_invalid_site_prefix_is_rejected() {
         let yaml = replace(&minimal_yaml(), "prefix: tst", "prefix: TooLong");
 
@@ -3004,7 +3033,7 @@ tools:
   git:
     branch_prefix: "feature"
     stacking:
-      backend: graphite
+      backend: native
       branch_pattern: "stack/{{ticket_id}}"
       auto_restack_on_merge: false
       force_push: off
@@ -3085,7 +3114,7 @@ state:
         assert_eq!(config.tools().copilot().agent_identity(), "custom-hand");
         assert_eq!(
             config.tools().git().stacking().backend(),
-            StackBackendKind::Graphite
+            StackBackendKind::Native
         );
         assert_eq!(
             config.tools().git().stacking().branch_pattern(),
