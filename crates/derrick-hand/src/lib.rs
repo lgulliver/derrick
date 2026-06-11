@@ -19,6 +19,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use derrick_memory::LessonIndex;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use derrick_substrate::{
@@ -62,6 +64,11 @@ pub struct HostCliHandDispatcherConfig {
     pub roughneck_enabled: bool,
     /// Roughneck level: "lite", "full", or "ultra".
     pub roughneck_level: String,
+    /// Pre-loaded lesson index for retrieval injection (§9.A.4). When
+    /// present, up to [`derrick_memory::LESSON_RETRIEVAL_LIMIT`] relevant
+    /// lessons are appended to the ticket prompt. `None` skips injection
+    /// and adds zero tokens.
+    pub lesson_index: Option<Arc<LessonIndex>>,
 }
 
 impl Default for HostCliHandDispatcherConfig {
@@ -76,6 +83,7 @@ impl Default for HostCliHandDispatcherConfig {
             worktree_root: PathBuf::from(".derrick/host-worktrees"),
             roughneck_enabled: true,
             roughneck_level: "full".to_owned(),
+            lesson_index: None,
         }
     }
 }
@@ -204,6 +212,14 @@ impl HostCliHandDispatcher {
             id = ticket.id,
             spec = ticket.body,
         );
+        // Inject relevant lessons (§9.A.4). Query uses the ticket title and id
+        // to find tag matches; empty index → no block, zero tokens added.
+        let query = format!("{} {}", ticket.id, ticket.title);
+        let body = if let Some(index) = &self.config.lesson_index {
+            derrick_memory::inject_lessons_into_prompt(&body, index, &query)
+        } else {
+            body
+        };
         if self.config.roughneck_enabled {
             derrick_roughneck::inject_prompt(&body, &self.config.roughneck_level)
         } else {
@@ -438,10 +454,8 @@ impl HostCliHandDispatcher {
             .saturating_add(err_stats.bytes_in.saturating_sub(err_stats.bytes_out))
             .min(u64::from(u32::MAX)) as u32;
         let roughneck_saved = if self.config.roughneck_enabled {
-            derrick_roughneck::estimate_tokens_saved(
-                response.tokens_out,
-                &self.config.roughneck_level,
-            )
+            derrick_roughneck::estimate_savings(&response.stdout, &self.config.roughneck_level)
+                .tokens_saved
         } else {
             0
         };
@@ -738,6 +752,9 @@ mod tests {
         run(&["init", "-q", "-b", "main"]);
         run(&["config", "user.email", "test@example.invalid"]);
         run(&["config", "user.name", "Test"]);
+        // Host environments may enforce commit signing globally; tests must
+        // not depend on a signing key being available.
+        run(&["config", "commit.gpgsign", "false"]);
         run(&["commit", "--allow-empty", "-q", "-m", "init"]);
     }
 
@@ -752,6 +769,7 @@ mod tests {
             worktree_root,
             roughneck_enabled: false,
             roughneck_level: "full".to_owned(),
+            lesson_index: None,
         }
     }
 

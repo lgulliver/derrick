@@ -173,11 +173,29 @@ fn file_mtime(meta: &std::fs::Metadata) -> i64 {
 }
 
 /// Status: counts plus the set of files that differ from the working tree.
-pub(crate) fn status(conn: &Connection, repo_root: &Path) -> Result<IndexStatus, SurveyError> {
+///
+/// `rebuilding` should be `true` when the background watcher has detected
+/// changes and a rebuild is in progress (used to compute the `freshness` label).
+pub(crate) fn status(
+    conn: &Connection,
+    repo_root: &Path,
+    rebuilding: bool,
+) -> Result<IndexStatus, SurveyError> {
     let files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
     let symbols: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
     let refs: i64 = conn.query_row("SELECT COUNT(*) FROM refs", [], |r| r.get(0))?;
     let schema_version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+
+    // Read the last-build timestamp from the meta table (may not exist on v1 DBs
+    // that have not yet been migrated, or before the first build completes).
+    let last_build_ts: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'last_build_ts'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok());
 
     // Index state: path -> (size, mtime, content_hash). Size and mtime let us
     // skip hashing files whose cheap stat metadata is unchanged.
@@ -238,11 +256,130 @@ pub(crate) fn status(conn: &Connection, repo_root: &Path) -> Result<IndexStatus,
         }
     }
 
+    let freshness = compute_freshness(&pending, last_build_ts, rebuilding);
+
     Ok(IndexStatus {
         files: files as u64,
         symbols: symbols as u64,
         refs: refs as u64,
         schema_version,
         pending,
+        last_build_ts,
+        freshness,
     })
+}
+
+/// Build the human-readable freshness label.
+fn compute_freshness(
+    pending: &[PendingFile],
+    last_build_ts: Option<i64>,
+    rebuilding: bool,
+) -> String {
+    if rebuilding {
+        return "rebuilding".to_owned();
+    }
+    if pending.is_empty() {
+        return "fresh".to_owned();
+    }
+    // Stale: include last-build time when available.
+    match last_build_ts {
+        Some(ts) => {
+            // Format as a simple ISO-8601 UTC timestamp.
+            let iso = unix_ts_to_iso8601(ts);
+            format!("stale since {iso}")
+        }
+        None => "stale".to_owned(),
+    }
+}
+
+/// Convert a Unix timestamp (seconds) to a minimal ISO-8601 UTC string,
+/// e.g. `"2024-01-02T09:00:00Z"`. Falls back to the raw number on overflow.
+fn unix_ts_to_iso8601(ts: i64) -> String {
+    // Manual computation avoids pulling in a date-time crate.
+    // We only need second-granularity and UTC.
+    if ts < 0 {
+        return ts.to_string();
+    }
+    let secs = ts as u64;
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    // Compute year/month/day from `days` (days since 1970-01-01).
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+/// Convert days-since-epoch to (year, month, day) via the proleptic Gregorian
+/// calendar. Only valid for dates after 1970-01-01.
+fn days_to_ymd(days: u64) -> (u32, u32, u32) {
+    // Shift epoch to 1 March 0000 (a convenient astronomical calendar).
+    let days = days + 719468;
+    let era = days / 146097;
+    let doe = days % 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u32, m as u32, d as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freshness_fresh_when_no_pending() {
+        let label = compute_freshness(&[], Some(1_700_000_000), false);
+        assert_eq!(label, "fresh");
+    }
+
+    #[test]
+    fn freshness_rebuilding_overrides_pending() {
+        let pending = vec![PendingFile {
+            path: "src/lib.rs".to_owned(),
+            reason: "modified".to_owned(),
+        }];
+        let label = compute_freshness(&pending, Some(1_700_000_000), true);
+        assert_eq!(label, "rebuilding");
+    }
+
+    #[test]
+    fn freshness_stale_with_timestamp() {
+        let pending = vec![PendingFile {
+            path: "src/lib.rs".to_owned(),
+            reason: "modified".to_owned(),
+        }];
+        // 2024-01-02T09:00:00Z = 1704186000
+        let label = compute_freshness(&pending, Some(1_704_186_000), false);
+        assert!(
+            label.starts_with("stale since "),
+            "expected 'stale since ...', got: {label}"
+        );
+        assert!(label.contains("2024"), "should contain year: {label}");
+    }
+
+    #[test]
+    fn freshness_stale_without_timestamp() {
+        let pending = vec![PendingFile {
+            path: "x.rs".to_owned(),
+            reason: "new".to_owned(),
+        }];
+        let label = compute_freshness(&pending, None, false);
+        assert_eq!(label, "stale");
+    }
+
+    #[test]
+    fn unix_ts_to_iso8601_known_date() {
+        // 2024-01-02T09:00:00Z
+        assert_eq!(unix_ts_to_iso8601(1_704_186_000), "2024-01-02T09:00:00Z");
+    }
+
+    #[test]
+    fn unix_ts_to_iso8601_epoch() {
+        assert_eq!(unix_ts_to_iso8601(0), "1970-01-01T00:00:00Z");
+    }
 }

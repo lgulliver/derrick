@@ -111,6 +111,16 @@ pub(crate) fn run(
     }
     tx.commit()?;
 
+    // Record the build timestamp so freshness queries can surface it.
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    connection.execute(
+        "INSERT INTO meta (key, value) VALUES ('last_build_ts', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![now],
+    )?;
+
     let (symbols, refs) = counts(connection)?;
     Ok(BuildReport {
         files_indexed: parsed.len() as u64,

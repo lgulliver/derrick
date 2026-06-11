@@ -163,13 +163,25 @@ impl Survey {
     }
 
     /// Freshness and size summary, including files that differ from the index.
-    pub async fn status(&self) -> Result<IndexStatus, SurveyError> {
+    ///
+    /// `rebuilding` should be `true` when the background watcher has detected
+    /// changes and a rebuild is currently running, so the freshness label can
+    /// accurately reflect the in-progress state.
+    pub async fn status_with_flag(&self, rebuilding: bool) -> Result<IndexStatus, SurveyError> {
         let readers = std::sync::Arc::clone(&self.inner.readers);
         let repo_root = self.inner.repo_root.clone();
         tokio::task::spawn_blocking(move || {
             let lease = readers.lease()?;
-            query::status(lease.connection()?, &repo_root)
+            query::status(lease.connection()?, &repo_root, rebuilding)
         })
         .await?
+    }
+
+    /// Freshness and size summary, including files that differ from the index.
+    ///
+    /// Equivalent to `status_with_flag(false)` — use when no watcher is running
+    /// or the caller does not have access to the dirty flag.
+    pub async fn status(&self) -> Result<IndexStatus, SurveyError> {
+        self.status_with_flag(false).await
     }
 }

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use derrick_adopt::{AdoptOptions, Adopter, ConstitutionMode};
 use derrick_config::{Config, InitTemplateVars, render_init_template};
+use derrick_memory::{MemoryPaths, MemoryStore, Seeds};
 use derrick_substrate_native::NativeSubstrate;
 
 use crate::commands::InitArgs;
@@ -85,12 +86,13 @@ struct ResolvedInitOptions {
 }
 
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
-    if !args.dry_run {
-        check_prerequisites()?;
-    }
+    // DESIGN §5.2 step 1: prerequisites are always checked first, with no
+    // partial init. This runs even under --dry-run so a dry run reports
+    // missing tools and exits non-zero exactly as the real run would.
+    check_prerequisites()?;
     let (repo_root, fresh_git_init) = match current_repo_root() {
         Ok(root) => (root, false),
-        Err(_) => (ensure_git_repo(args.yes)?, true),
+        Err(_) => (ensure_git_repo(args.yes, args.dry_run)?, true),
     };
     let resolved = match resolve_options(&repo_root, args, fresh_git_init)? {
         Some(resolved) => resolved,
@@ -218,6 +220,103 @@ fn likely_existing_project(repo_root: &Path) -> bool {
         || repo_root.join("package.json").exists()
 }
 
+/// Detect the Claude Code auto-memory root (`~/.claude/memory/`).
+///
+/// Returns `None` when the home directory cannot be determined — seeding is
+/// best-effort and silently skipped in those cases so `derrick init` does not
+/// fail in CI or non-Claude environments.
+fn host_memory_root() -> Option<std::path::PathBuf> {
+    // Claude Code's auto-memory convention: `~/.claude/memory/`. The
+    // MemoryStore appends `derrick/<site>/` itself so we only supply the
+    // root here. This matches the §9.A.1 description and is additive —
+    // refinements to the exact path can be patched without touching callers.
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".claude").join("memory"))
+}
+
+/// Build the init-time memory seeds from a loaded config.
+///
+/// Per D55 and §9.A.1 the seeds include project facts (site name, prefix,
+/// mode, primary constitution path) and a reference entry pointing at the
+/// survey index location so the assistant always knows where to look.
+fn build_seeds(repo_root: &Path, config: &Config) -> Seeds {
+    let site = config.site();
+    let mode = match config.tools().substrate().mode() {
+        derrick_config::SubstrateMode::Solo => "solo",
+        derrick_config::SubstrateMode::Copilot => "copilot",
+        derrick_config::SubstrateMode::Crew => "crew",
+    };
+    let constitution_rel = config.guardrails().constitution_path();
+
+    Seeds {
+        project: vec![
+            ("site-name".to_owned(), site.name().to_owned()),
+            ("ticket-prefix".to_owned(), site.prefix().to_owned()),
+            ("mode".to_owned(), mode.to_owned()),
+            (
+                "constitution-path".to_owned(),
+                constitution_rel.display().to_string(),
+            ),
+        ],
+        reference: vec![(
+            "survey-index".to_owned(),
+            format!(
+                "Survey artifacts live under {}. Run `derrick survey` to inspect.",
+                repo_root
+                    .join(config.state().dir())
+                    .join("survey")
+                    .display()
+            ),
+        )],
+        feedback: vec![(
+            "guardrails".to_owned(),
+            "Assay verdict is binding unless --no-assay is passed. \
+                 Batches must never be re-ordered after creation. \
+                 Do not mutate the substrate DB directly."
+                .to_owned(),
+        )],
+    }
+}
+
+/// Apply memory seeding for a completed init. Best-effort: logs a warning
+/// on failure but does not abort the init.
+fn seed_memory(repo_root: &Path, config: &Config, dry_run: bool) {
+    let seeds = build_seeds(repo_root, config);
+    let state_dir = repo_root.join(config.state().dir());
+
+    if dry_run {
+        // Dry-run: report what would be seeded without writing anything.
+        println!(
+            "memory-seed   {} project facts, {} reference, {} feedback (host auto-memory)",
+            seeds.project.len(),
+            seeds.reference.len(),
+            seeds.feedback.len(),
+        );
+        return;
+    }
+
+    let paths = MemoryPaths {
+        host_memory_root: host_memory_root(),
+        repo_state: state_dir,
+    };
+    match MemoryStore::open(paths, config.site()) {
+        Ok(store) => match store.seed(&seeds) {
+            Ok(written) => {
+                for path in &written {
+                    print_written(&path.display().to_string());
+                }
+            }
+            Err(err) => {
+                tracing::warn!(?err, "memory seeding failed — skipping");
+            }
+        },
+        Err(err) => {
+            tracing::warn!(?err, "failed to open memory store — skipping seed");
+        }
+    }
+}
+
 async fn brownfield_init(
     repo_root: &Path,
     resolved: &ResolvedInitOptions,
@@ -266,6 +365,10 @@ async fn brownfield_init(
     if resolved.jetbrains {
         write_jetbrains_configs(repo_root)?;
     }
+    // Seed memory after apply so the config and state dir are present.
+    if let Ok(config) = read_config(repo_root) {
+        seed_memory(repo_root, &config, resolved.dry_run);
+    }
     if !resolved.yes {
         println!();
         println!("{}", ui::hint("review `git status` before committing"));
@@ -284,6 +387,14 @@ async fn greenfield_init(
             "{} already exists; rerun with --force to overwrite it",
             config_path.display()
         )));
+    }
+
+    // DESIGN §5.2: --dry-run opts out of all writes globally. Print the plan
+    // of what greenfield init WOULD write, then return success without
+    // touching the filesystem or opening the substrate.
+    if resolved.dry_run {
+        print_greenfield_plan(repo_root, resolved);
+        return Ok(CliExitCode::Success);
     }
 
     let rendered = render_init_template(
@@ -346,6 +457,10 @@ async fn greenfield_init(
     // Make an initial commit so `git worktree add ... HEAD` succeeds on the
     // first `derrick add`. Only runs when the repo has no commits yet.
     maybe_initial_commit(repo_root)?;
+
+    // Seed the memory store now that the config and state dir exist (§9.A.1 /
+    // D55). Best-effort — failures are logged, not propagated.
+    seed_memory(repo_root, &config, false);
 
     print_summary(&config, resolved.ai_style);
     Ok(CliExitCode::Success)
@@ -740,6 +855,60 @@ fn init_mode_to_substrate(mode: crate::commands::InitMode) -> derrick_config::Su
     }
 }
 
+/// Print the greenfield init plan under --dry-run. Mirrors `print_plan`'s
+/// layout: a `writes` block listing every path greenfield init would create,
+/// conditioned on the resolved flags. Nothing is written and the substrate is
+/// not opened.
+fn print_greenfield_plan(repo_root: &Path, resolved: &ResolvedInitOptions) {
+    const INDENT: &str = "             ";
+
+    // The state dir / db / constitution paths match the bundled template
+    // defaults (state.dir = .derrick, guardrails.constitution_path =
+    // .specify/memory/constitution.md).
+    let mut writes: Vec<String> = vec![
+        "derrick.yaml".to_owned(),
+        ".derrick/.gitignore".to_owned(),
+        ".derrick/derrick.db".to_owned(),
+    ];
+
+    if resolved.no_hooks {
+        writes.push(".claude/settings.json".to_owned());
+    } else {
+        writes.push(".codex/instructions.md".to_owned());
+        writes.push(".claude/settings.json".to_owned());
+        writes.push(".claude/commands/ (derrick command shims)".to_owned());
+    }
+    // Survey MCP server is registered regardless of --no-hooks.
+    writes.push(".mcp.json".to_owned());
+
+    if resolved.vscode {
+        writes.push(".vscode/tasks.json".to_owned());
+    }
+    if resolved.jetbrains {
+        writes.push(".idea/runConfigurations/ (derrick run configs)".to_owned());
+    }
+
+    // seed_constitution writes the constitution last.
+    writes.push(".specify/memory/constitution.md".to_owned());
+
+    // Memory seeding is reported separately (it writes to the host memory
+    // dir, not the repo, so it does not fit the `writes` list).
+    let memory_note =
+        "memory seeds (project/reference/feedback) → ~/.claude/memory/derrick/<site>/";
+
+    println!("dry run — greenfield init plan for {}", repo_root.display());
+    let mut iter = writes.iter();
+    if let Some(first) = iter.next() {
+        println!("writes       {first}");
+        for path in iter {
+            println!("{INDENT}{path}");
+        }
+    }
+    println!("seeds        {memory_note}");
+    println!();
+    println!("{}", ui::hint("re-run without --dry-run to apply"));
+}
+
 fn print_plan(plan: &derrick_adopt::AdoptionPlan) {
     const INDENT: &str = "             ";
     println!("adoption plan");
@@ -774,7 +943,7 @@ fn print_plan(plan: &derrick_adopt::AdoptionPlan) {
     }
 }
 
-fn ensure_git_repo(yes: bool) -> Result<std::path::PathBuf, crate::CliError> {
+fn ensure_git_repo(yes: bool, dry_run: bool) -> Result<std::path::PathBuf, crate::CliError> {
     let cwd = std::env::current_dir().map_err(|source| crate::CliError::Io {
         path: std::path::PathBuf::from("."),
         source,
@@ -784,6 +953,13 @@ fn ensure_git_repo(yes: bool) -> Result<std::path::PathBuf, crate::CliError> {
         "{}",
         ui::warn("No git repository found in this directory or any parent.")
     );
+
+    // DESIGN §5.2: --dry-run never mutates the filesystem. Report what would
+    // happen and return the cwd without running `git init`.
+    if dry_run {
+        println!("would run `git init` in {}", cwd.display());
+        return Ok(cwd);
+    }
 
     let confirmed = if yes {
         true

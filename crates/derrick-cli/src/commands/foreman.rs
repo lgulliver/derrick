@@ -10,7 +10,9 @@ use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
 use derrick_copilot::{LocalCopilotHandDispatcher, LocalCopilotHandDispatcherConfig};
 use derrick_flow::hand_kind_for_executor;
 use derrick_hand::{HostCliHandDispatcher, HostCliHandDispatcherConfig};
-use derrick_stack::{GraphiteStackBackend, NativeStackBackend, NoneStackBackend, StackBackend};
+use derrick_stack::{
+    GitSpiceStackBackend, GraphiteStackBackend, NativeStackBackend, NoneStackBackend, StackBackend,
+};
 use derrick_substrate::{HandKind, Substrate};
 use derrick_substrate_native::NativeSubstrate;
 #[allow(deprecated)]
@@ -64,7 +66,7 @@ async fn start_attached(repo_root: &Path, config: &Config) -> Result<CliExitCode
     let substrate = open_substrate(repo_root, config).await?;
     let pid = std::process::id();
     substrate.record_foreman_attached(pid).await?;
-    let foreman = build_foreman(repo_root, config, Arc::clone(&substrate));
+    let foreman = build_foreman(repo_root, config, Arc::clone(&substrate))?;
     let result = foreman.run_attached().await;
     let _ignored = substrate.record_foreman_stopped().await;
     drop(foreman);
@@ -80,7 +82,7 @@ async fn foreman_tick(_args: ForemanTickArgs) -> Result<CliExitCode, crate::CliE
     let config = read_config(&repo_root)?;
     require_native(&config)?;
     let substrate = open_substrate(&repo_root, &config).await?;
-    let foreman = build_foreman(&repo_root, &config, Arc::clone(&substrate));
+    let foreman = build_foreman(&repo_root, &config, Arc::clone(&substrate))?;
     let report = foreman
         .tick()
         .await
@@ -95,7 +97,11 @@ async fn foreman_tick(_args: ForemanTickArgs) -> Result<CliExitCode, crate::CliE
     Ok(CliExitCode::Success)
 }
 
-fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstrate>) -> Foreman {
+fn build_foreman(
+    repo_root: &Path,
+    config: &Config,
+    substrate: Arc<NativeSubstrate>,
+) -> Result<Foreman, crate::CliError> {
     let ttls = ForemanTtls {
         poll_interval: config.tools().foreman().poll_interval(),
         in_review_ttl: chrono::Duration::from_std(config.tools().foreman().in_review_ttl())
@@ -111,12 +117,17 @@ fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstra
             repo_root.to_path_buf(),
             stack_cfg.force_push(),
         )),
-        StackBackendKind::Graphite | StackBackendKind::GitSpice => Arc::new(GraphiteStackBackend),
+        StackBackendKind::Graphite => Arc::new(
+            GraphiteStackBackend::new().map_err(|error| message(format!("graphite: {error}")))?,
+        ),
+        StackBackendKind::GitSpice => Arc::new(
+            GitSpiceStackBackend::new().map_err(|error| message(format!("git-spice: {error}")))?,
+        ),
         StackBackendKind::None => Arc::new(NoneStackBackend),
     };
     let dispatcher: Box<dyn HandDispatcher> =
         build_dispatcher(repo_root, config, &substrate, Arc::clone(&stack_backend));
-    Foreman::new(
+    Ok(Foreman::new(
         substrate,
         config.clone(),
         Box::new(GhRepoState::new(repo_root.to_path_buf())),
@@ -125,7 +136,7 @@ fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstra
     )
     .with_ttls(ttls)
     .with_exit_when_idle(config.tools().foreman().exit_when_idle())
-    .with_stack_backend(stack_backend, stack_cfg)
+    .with_stack_backend(stack_backend, stack_cfg))
 }
 
 fn build_dispatcher(
@@ -215,6 +226,7 @@ fn build_dispatcher(
             roughneck_enabled: config.tools().roughneck().enabled(),
             roughneck_level: config.tools().roughneck().level().to_owned(),
             stack_draft: config.tools().git().stacking().draft(),
+            lesson_index: None,
         };
         multi = multi.register(Box::new(
             LocalCopilotHandDispatcher::new(Arc::clone(substrate), copilot_config)
@@ -235,6 +247,7 @@ fn build_dispatcher(
             base_branch: "main".to_owned(),
             roughneck_enabled: config.tools().roughneck().enabled(),
             roughneck_level: config.tools().roughneck().level().to_owned(),
+            lesson_index: None,
         };
         multi = multi.register(Box::new(
             ClaudeHandDispatcher::new(Arc::clone(substrate), dispatcher_config)
@@ -435,7 +448,7 @@ async fn run_daemon_child(
     // Child path: do NOT write to the foreman row (parent already did).
     // Just run the loop until SIGTERM/SIGINT.
     let substrate = open_substrate(repo_root, config).await?;
-    let foreman = build_foreman(repo_root, config, Arc::clone(&substrate));
+    let foreman = build_foreman(repo_root, config, Arc::clone(&substrate))?;
     let result = foreman.run_attached().await;
     let _ignored = substrate.record_foreman_stopped().await;
     match result {

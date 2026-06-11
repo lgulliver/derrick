@@ -821,13 +821,32 @@ impl Substrate for NativeSubstrate {
                 });
             }
             ensure_hand_exists(&transaction, &hand)?;
-            transaction
+            // The state predicate makes the claim atomic at the SQLite level.
+            // The in-Rust check above only protects against same-process
+            // callers; the writer mutex does not span processes (foreman
+            // daemon + CLI, or two foremen in crew mode). Another writer can
+            // flip this ticket to `in_flight` between our SELECT and UPDATE,
+            // so we gate the UPDATE on `state = 'ready'` and treat a zero-row
+            // result as a lost-update conflict. (D-substrate single-writer.)
+            let affected = transaction
                 .execute(
                     "UPDATE tickets SET state = 'in_flight', owner = ?1, updated_at = ?2
-                     WHERE id = ?3",
+                     WHERE id = ?3 AND state = 'ready'",
                     params![hand.as_str(), now_text(), id.as_str()],
                 )
                 .map_err(conflict_or_sql)?;
+            if affected == 0 {
+                // Our SELECT saw `Ready`, but the UPDATE matched no rows: a
+                // concurrent writer claimed the ticket first. Do not write the
+                // assignment events; abort the whole transaction so nothing is
+                // persisted.
+                return Err(SubstrateError::Conflict {
+                    message: format!(
+                        "ticket {} was claimed concurrently; assign_to_hand lost the race",
+                        id.as_str()
+                    ),
+                });
+            }
             insert_typed_event_raw(
                 &transaction,
                 &EventScope::Ticket(id.clone()),
@@ -1797,7 +1816,7 @@ impl Substrate for NativeSubstrate {
                             scope_hand, scope_run_id
                      FROM events
                      WHERE (?1 IS NULL OR at > ?1)
-                     ORDER BY rowid ASC
+                     ORDER BY at DESC, rowid DESC
                      LIMIT ?2",
                 )
                 .map_err(sql_error)?;

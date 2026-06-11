@@ -796,6 +796,24 @@ pub struct MemoryEntry {
     pub preview: String,
 }
 
+/// Load state for the Stack tab's background refresh.
+///
+/// Starts as [`StackLoadResult::Loading`] before the background task
+/// completes. Transitions to [`StackLoadResult::Loaded`] on success (even
+/// when `gh` returns zero nodes) or to [`StackLoadResult::Error`] when
+/// the shell-out fails or auth is unavailable.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum StackLoadResult {
+    /// Background refresh has not yet completed.
+    #[default]
+    Loading,
+    /// Refresh completed — nodes are populated (or empty if there are none).
+    Loaded,
+    /// Refresh failed; the inner string is a short human-readable reason
+    /// suitable for display in the Stack tab.
+    Error(String),
+}
+
 /// Snapshot of every tab's data, produced by [`DataModel::refresh`].
 #[derive(Clone, Debug, Default)]
 pub struct DataModel {
@@ -805,6 +823,8 @@ pub struct DataModel {
     pub tickets: Vec<TicketRow>,
     /// PR stack nodes from the stack adapter.
     pub stack_nodes: Vec<StackNode>,
+    /// Load state for the stack adapter background refresh.
+    pub stack_load_result: StackLoadResult,
     /// Activity tail, newest first.
     pub events: Vec<EventRow>,
     /// Token spend summary.
@@ -829,12 +849,17 @@ impl DataModel {
     /// Pulls fresh data from `substrate` and merges the injected stack,
     /// memory, and run-manifest state.
     ///
+    /// `stack_load_result` reflects whether the background stack-adapter
+    /// refresh has completed, is still in progress, or failed. Pass
+    /// [`StackLoadResult::Loading`] until the background task has resolved.
+    ///
     /// `runs_dir` should point to the `.derrick/runs/` directory so that
     /// token counts can be aggregated from the per-run manifests. Pass
     /// `None` in tests or contexts where manifests are unavailable.
     pub async fn refresh(
         substrate: &dyn Substrate,
         stack_nodes: &[StackNode],
+        stack_load_result: StackLoadResult,
         memory_entries: &[MemoryEntry],
         runs_dir: Option<&Path>,
     ) -> Result<Self, SubstrateError> {
@@ -914,6 +939,7 @@ impl DataModel {
             overview,
             tickets: ticket_rows,
             stack_nodes: stack_nodes.to_vec(),
+            stack_load_result,
             events: event_rows,
             token_summary,
             memory_entries: memory_entries.to_vec(),
@@ -926,7 +952,86 @@ impl DataModel {
 
 #[cfg(test)]
 mod tests {
+    // Test fixtures may panic on setup failure; the crate-level
+    // expect/unwrap deny is for production render paths.
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // DataModel::refresh from a real empty NativeSubstrate (per house rules:
+    // real SQLite via tempfile, not mocks).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn data_model_refresh_on_empty_substrate_succeeds() {
+        use derrick_config::Config;
+        use derrick_substrate_native::{NativeConfig, NativeSubstrate};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let cfg = Config::defaults();
+        let native_cfg = NativeConfig {
+            db_path: tmp.path().join("derrick.db"),
+            worktree_root: tmp.path().join("worktrees"),
+        };
+        let substrate = NativeSubstrate::open(native_cfg, cfg.site().clone())
+            .await
+            .expect("open substrate");
+
+        // Use a non-existent runs_dir to simulate absent `.derrick/runs/`.
+        let absent_runs = tmp.path().join("runs-does-not-exist");
+
+        let result = DataModel::refresh(
+            &substrate,
+            &[],
+            StackLoadResult::Loading,
+            &[],
+            Some(absent_runs.as_path()),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "refresh on empty substrate should succeed, got: {:?}",
+            result.err()
+        );
+        let model = result.expect("model");
+        assert!(model.tickets.is_empty());
+        assert!(model.events.is_empty());
+        assert!(model.stack_nodes.is_empty());
+        assert_eq!(model.stack_load_result, StackLoadResult::Loading);
+        assert_eq!(model.token_summary.total_in, 0);
+        assert_eq!(model.token_summary.total_out, 0);
+    }
+
+    #[tokio::test]
+    async fn data_model_refresh_propagates_stack_error_state() {
+        use derrick_config::Config;
+        use derrick_substrate_native::{NativeConfig, NativeSubstrate};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let cfg = Config::defaults();
+        let native_cfg = NativeConfig {
+            db_path: tmp.path().join("derrick.db"),
+            worktree_root: tmp.path().join("worktrees"),
+        };
+        let substrate = NativeSubstrate::open(native_cfg, cfg.site().clone())
+            .await
+            .expect("open substrate");
+
+        let error_state = StackLoadResult::Error("gh exited non-zero: auth required".to_owned());
+
+        let model = DataModel::refresh(&substrate, &[], error_state.clone(), &[], None)
+            .await
+            .expect("refresh");
+
+        assert_eq!(
+            model.stack_load_result, error_state,
+            "stack_load_result should be forwarded unchanged"
+        );
+    }
 
     #[test]
     fn tab_from_str_accepts_known_names() {

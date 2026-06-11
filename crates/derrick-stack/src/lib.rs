@@ -5,8 +5,10 @@
 //! - [`NoneStackBackend`]: stacking disabled. Open-PR fails with
 //!   [`StackError::NotSupported`]; restack/force-push are no-ops.
 //! - [`NativeStackBackend`]: shells to `git rebase --onto` and `gh pr create`.
-//! - [`GraphiteStackBackend`]: not implemented in v1; documents the manual
-//!   `gt restack` recipe via [`StackError::NotSupported`].
+//! - [`GraphiteStackBackend`]: shells to the `gt` CLI (`gt submit` /
+//!   `gt restack`).
+//! - [`GitSpiceStackBackend`]: shells to the `gs` CLI (`gs branch submit` /
+//!   `gs upstack restack`).
 //!
 //! The crate is transport-agnostic: it knows about git, gh, and config but
 //! has no substrate or foreman dependency. Callers (foreman, CLI) compute
@@ -22,6 +24,7 @@ use thiserror::Error;
 
 pub mod backends;
 
+pub use backends::git_spice::GitSpiceStackBackend;
 pub use backends::graphite::GraphiteStackBackend;
 pub use backends::native::NativeStackBackend;
 pub use backends::none::NoneStackBackend;

@@ -11,6 +11,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use derrick_memory::LessonIndex;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use derrick_substrate::{
@@ -55,6 +57,11 @@ pub struct ClaudeHandDispatcherConfig {
     pub roughneck_enabled: bool,
     /// Roughneck level: "lite", "full", or "ultra".
     pub roughneck_level: String,
+    /// Pre-loaded lesson index for retrieval injection (§9.A.4). When
+    /// present, up to [`derrick_memory::LESSON_RETRIEVAL_LIMIT`] relevant
+    /// lessons are appended to the queue file prompt. `None` skips injection
+    /// and adds zero tokens.
+    pub lesson_index: Option<Arc<LessonIndex>>,
 }
 
 impl Default for ClaudeHandDispatcherConfig {
@@ -69,6 +76,7 @@ impl Default for ClaudeHandDispatcherConfig {
             base_branch: "main".to_owned(),
             roughneck_enabled: true,
             roughneck_level: "full".to_owned(),
+            lesson_index: None,
         }
     }
 }
@@ -192,7 +200,7 @@ impl HandDispatcher for ClaudeHandDispatcher {
             .batch
             .as_ref()
             .map(derrick_substrate::BatchName::as_str);
-        let queue_body = render_queue_file(
+        let raw_body = render_queue_file(
             ticket.id.as_str(),
             batch,
             &ticket.title,
@@ -202,6 +210,13 @@ impl HandDispatcher for ClaudeHandDispatcher {
             self.config.roughneck_enabled,
             &self.config.roughneck_level,
         );
+        // Inject relevant lessons (§9.A.4). Query uses the ticket id + title.
+        let query = format!("{} {}", ticket.id, ticket.title);
+        let queue_body = if let Some(index) = &self.config.lesson_index {
+            derrick_memory::inject_lessons_into_prompt(&raw_body, index, &query)
+        } else {
+            raw_body
+        };
         let queue_file = self
             .config
             .queue_dir
@@ -297,7 +312,11 @@ impl PollTask {
         }
         cmd.stdin(Stdio::from(stdin_handle))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Fail closed: if the supervising foreman crashes or this task is
+            // cancelled, the `claude --print` child must not survive as an
+            // orphan. `kill_on_drop` ties the child's lifetime to `child`.
+            .kill_on_drop(true);
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -420,7 +439,10 @@ impl PollTask {
             };
 
         let roughneck_saved = if self.roughneck_enabled {
-            derrick_roughneck::estimate_tokens_saved(tokens_out, &self.roughneck_level)
+            // Use the text-based compliance measurement (replaces the
+            // deprecated estimate_tokens_saved which assumed full compliance).
+            let text = std::str::from_utf8(stdout_bytes).unwrap_or("");
+            derrick_roughneck::estimate_savings(text, &self.roughneck_level).tokens_saved
         } else {
             0
         };
@@ -553,6 +575,7 @@ mod tests {
             base_branch: "main".to_owned(),
             roughneck_enabled: false,
             roughneck_level: "full".to_owned(),
+            lesson_index: None,
         }
     }
 
@@ -740,5 +763,58 @@ mod tests {
             }
         }
         assert!(released, "expected claude poll task to release the hand");
+    }
+
+    /// Regression guard for orphaned subprocesses: a `tokio::process::Command`
+    /// configured the way `PollTask::run` configures the `claude --print`
+    /// invocation (with `.kill_on_drop(true)`) must terminate its child when
+    /// the `Child` handle is dropped, rather than leaving it running.
+    #[tokio::test]
+    async fn kill_on_drop_terminates_orphaned_child() {
+        // A long-running child that would otherwise outlive the handle.
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn sleep");
+        let pid = child.id().expect("child has a pid");
+
+        // Sanity: the process is alive immediately after spawn.
+        assert!(
+            process_is_alive(pid),
+            "child should be running right after spawn"
+        );
+
+        // Dropping the handle must reap/kill the child because of kill_on_drop.
+        drop(child);
+
+        // Give the runtime a moment to deliver the kill and reap the zombie.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut gone = false;
+        while std::time::Instant::now() < deadline {
+            if !process_is_alive(pid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        assert!(
+            gone,
+            "child {pid} should be terminated after dropping the handle"
+        );
+    }
+
+    /// Returns true while `pid` refers to a live, non-reaped process.
+    /// Uses `kill(pid, 0)` probe semantics so the check works on both Linux
+    /// and macOS (which has no `/proc`).
+    fn process_is_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 }

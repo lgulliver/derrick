@@ -17,7 +17,7 @@ use owo_colors::OwoColorize;
 use crate::clarify;
 use derrick_assay::io::write_log;
 use derrick_assay::names::host_name;
-use derrick_assay::template::{TemplateContext, render_template};
+use derrick_assay::template::{TemplateContext, render_template, template_value};
 use derrick_assay::types::{RunError, StepExecution, StepRecord, StepStatus};
 use derrick_assay::{self as assay, ExecutionState};
 
@@ -285,10 +285,11 @@ async fn execute_role_step(
             })?;
         }
         let roughneck_saved = if config.tools().roughneck().enabled() {
-            derrick_roughneck::estimate_tokens_saved(
-                step_tokens_out,
+            derrick_roughneck::estimate_savings(
+                &response.stdout,
                 config.tools().roughneck().level(),
             )
+            .tokens_saved
         } else {
             0
         };
@@ -327,10 +328,8 @@ async fn execute_role_step(
             .max((prompt_len as u32).saturating_div(4));
         write_log(log_path, &response.text, "")?;
         let roughneck_saved = if config.tools().roughneck().enabled() {
-            derrick_roughneck::estimate_tokens_saved(
-                response.tokens_out,
-                config.tools().roughneck().level(),
-            )
+            derrick_roughneck::estimate_savings(&response.text, config.tools().roughneck().level())
+                .tokens_saved
         } else {
             0
         };
@@ -884,7 +883,12 @@ async fn execute_bash_step(
 ) -> Result<StepExecution, RunError> {
     use tokio::process::Command;
     let command = derrick_assay::io::required_step_text(step.command(), step.id(), "command")?;
-    let command = render_template(command, &template_context(config, state)?)?;
+    // SECURITY: bash steps run through `bash -lc`, so every substituted
+    // template value (notably the user-controlled `{{prompt}}`) must be
+    // shell-escaped to prevent command injection. The host-CLI path renders
+    // via `render_template` and passes argv directly, so it must NOT be
+    // escaped — keep that path byte-identical.
+    let command = render_template_shell(command, &template_context(config, state)?)?;
 
     // Derive a tool name from the first word of the command for scrubbing.
     // Strip any path prefix so "cargo test" → "cargo" and "/usr/bin/git" → "git".
@@ -991,6 +995,47 @@ fn template_context(
         feature_dir: state.feature_dir.clone(),
         run_id: state.run_id.clone(),
     })
+}
+
+/// Render a template for execution inside a `bash -lc` command line.
+///
+/// Identical substitution semantics to [`render_template`], except every
+/// substituted value is wrapped in POSIX single quotes so it arrives at the
+/// shell as a single literal word. This is the only rendering path that must
+/// escape values; argv-passed host-CLI commands stay byte-identical.
+fn render_template_shell(template: &str, context: &TemplateContext) -> Result<String, RunError> {
+    let mut rendered = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let (prefix, after_prefix) = rest.split_at(start);
+        rendered.push_str(prefix);
+        let end = after_prefix
+            .find("}}")
+            .ok_or_else(|| RunError::Config("unterminated template var".to_owned()))?;
+        let name = after_prefix[2..end].trim();
+        let value = template_value(name, context)?;
+        rendered.push_str(&shell_single_quote(&value));
+        rest = &after_prefix[end + 2..];
+    }
+    rendered.push_str(rest);
+    Ok(rendered)
+}
+
+/// POSIX single-quote escaping: wrap the value in `'...'` and replace each
+/// embedded `'` with `'\''`. The result is a single shell word whose contents
+/// are exactly `value` (newlines, `$()`, backticks, `;` all literal).
+fn shell_single_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 pub(crate) fn inject_clarify_answers_for_plan(
@@ -1326,5 +1371,60 @@ Update version_matches_cargo_pkg_version.
     fn hand_kind_uses_provider_for_claude() {
         let kind = super::hand_kind_for_executor("claude", None);
         assert_eq!(kind, derrick_substrate::HandKind::Claude);
+    }
+
+    fn ctx_with_prompt(prompt: &str) -> derrick_assay::template::TemplateContext {
+        derrick_assay::template::TemplateContext {
+            prompt: prompt.to_owned(),
+            site_name: "site".to_owned(),
+            site_prefix: "st".to_owned(),
+            feature_dir: None,
+            run_id: "20250101-000000".to_owned(),
+        }
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quotes() {
+        assert_eq!(super::shell_single_quote("abc"), "'abc'");
+        assert_eq!(super::shell_single_quote("a'b"), "'a'\\''b'");
+        assert_eq!(super::shell_single_quote(""), "''");
+    }
+
+    #[test]
+    fn render_template_shell_wraps_value_in_single_quotes() {
+        let ctx = ctx_with_prompt("hello world");
+        let rendered = super::render_template_shell("printf '%s' {{prompt}}", &ctx).unwrap();
+        assert_eq!(rendered, "printf '%s' 'hello world'");
+    }
+
+    /// End-to-end: a malicious prompt must arrive at the bash step as literal
+    /// text, never as shell metacharacters. We render through the shell path
+    /// and actually execute the result, then compare what bash wrote.
+    fn assert_bash_receives_literal(prompt: &str) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path().join("out.txt");
+        let ctx = ctx_with_prompt(prompt);
+        // The template printf-writes {{prompt}} verbatim to a file.
+        let template = format!("printf '%s' {{{{prompt}}}} > {}", out.display());
+        let rendered = super::render_template_shell(&template, &ctx).unwrap();
+        let status = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(&rendered)
+            .status()
+            .expect("run bash");
+        assert!(status.success(), "bash failed for prompt {prompt:?}");
+        let written = std::fs::read_to_string(&out).expect("read out");
+        // The bytes printf wrote equal the original prompt verbatim: no
+        // command substitution, word splitting, or statement separation ran.
+        assert_eq!(written, prompt, "rendered: {rendered}");
+    }
+
+    #[test]
+    fn bash_step_receives_injection_attempts_as_literal_text() {
+        assert_bash_receives_literal("'; echo pwned; '");
+        assert_bash_receives_literal("$(touch pwned)");
+        assert_bash_receives_literal("`touch pwned`");
+        assert_bash_receives_literal("line1\nline2");
+        assert_bash_receives_literal("a && rm -rf / ; b");
     }
 }

@@ -1,0 +1,12 @@
+error[E0308]: mismatched types
+  --> src/main.rs:10:14
+   |
+10 |     let x: i32 = "hello";
+   |            ---   ^^^^^^^ expected `i32`, found `&str`
+   |            |
+   |            expected due to this
+   |
+   = note: expected type `i32`
+              found type `&str`
+   = help: you can convert a `&str` to an `i32` by calling `parse::<i32>()`
+

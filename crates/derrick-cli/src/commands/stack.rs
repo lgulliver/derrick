@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
 use derrick_stack::{
-    GraphiteStackBackend, NativeStackBackend, NoneStackBackend, OpenPrParams, RestackOutcome,
-    RestackParams, StackBackend,
+    GitSpiceStackBackend, GraphiteStackBackend, NativeStackBackend, NoneStackBackend, OpenPrParams,
+    RestackOutcome, RestackParams, StackBackend,
 };
 use derrick_substrate::{
     BatchName, BlockReason, EventKind, EventScope, Substrate, TicketFilter, TicketState,
@@ -38,16 +38,25 @@ pub(crate) async fn execute(args: StackArgs) -> Result<CliExitCode, crate::CliEr
     result
 }
 
-fn build_backend(repo_root: &Path, config: &Config) -> Arc<dyn StackBackend> {
+fn build_backend(
+    repo_root: &Path,
+    config: &Config,
+) -> Result<Arc<dyn StackBackend>, crate::CliError> {
     let stack_cfg = config.tools().git().stacking();
-    match stack_cfg.backend() {
+    let backend: Arc<dyn StackBackend> = match stack_cfg.backend() {
         StackBackendKind::Native => Arc::new(NativeStackBackend::new(
             repo_root.to_path_buf(),
             stack_cfg.force_push(),
         )),
-        StackBackendKind::Graphite | StackBackendKind::GitSpice => Arc::new(GraphiteStackBackend),
+        StackBackendKind::Graphite => Arc::new(
+            GraphiteStackBackend::new().map_err(|error| message(format!("graphite: {error}")))?,
+        ),
+        StackBackendKind::GitSpice => Arc::new(
+            GitSpiceStackBackend::new().map_err(|error| message(format!("git-spice: {error}")))?,
+        ),
         StackBackendKind::None => Arc::new(NoneStackBackend),
-    }
+    };
+    Ok(backend)
 }
 
 async fn stack_show(substrate: &NativeSubstrate) -> Result<CliExitCode, crate::CliError> {
@@ -113,7 +122,7 @@ async fn stack_restack(
     repo_root: &Path,
     substrate: &NativeSubstrate,
 ) -> Result<CliExitCode, crate::CliError> {
-    let backend = build_backend(repo_root, config);
+    let backend = build_backend(repo_root, config)?;
     let target_branch = "main".to_owned();
     let tickets = substrate
         .list_tickets(TicketFilter::default())
@@ -203,7 +212,7 @@ async fn stack_submit(
     repo_root: &Path,
     substrate: &NativeSubstrate,
 ) -> Result<CliExitCode, crate::CliError> {
-    let backend = build_backend(repo_root, config);
+    let backend = build_backend(repo_root, config)?;
     let target_branch = "main".to_owned();
     let filter = TicketFilter {
         state: Some(TicketState::InReview),
@@ -290,4 +299,140 @@ async fn stack_submit(
     }
     println!("submit summary: opened={opened}");
     Ok(CliExitCode::Success)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use super::*;
+
+    // build_backend's git-spice/graphite arms shell out to a CLI whose presence
+    // is verified at construction, so these tests put a fake `gs`/`gt` on PATH.
+    // PATH is process-global; serialize via this lock.
+    fn path_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn install_fake(dir: &Path, name: &str) {
+        let path = dir.join(name);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake binary");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod");
+    }
+
+    fn config_with_backend(backend: &str) -> Config {
+        let yaml = format!(
+            r#"
+version: 1
+site:
+  name: test-site
+  prefix: tst
+models:
+  claude-sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-6
+roles:
+  drafter: claude-sonnet
+  proposer: claude-sonnet
+  reviewer: claude-sonnet
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: 1
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+  git:
+    stacking:
+      backend: {backend}
+pipeline: []
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("derrick.yaml");
+        fs::write(&path, yaml).expect("write yaml");
+        Config::load_from_path(&path).expect("load config")
+    }
+
+    /// Regression test for the wiring bug: configuring `git-spice` used to map
+    /// to the Graphite stub. It must now build a real git-spice backend.
+    #[test]
+    fn git_spice_config_builds_git_spice_backend() {
+        let _guard = path_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var("PATH").ok();
+        // SAFETY: serialized by path_lock; PATH restored below.
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                format!("{}:{}", tmp.path().display(), prev.as_deref().unwrap_or("")),
+            );
+        }
+        install_fake(tmp.path(), "gs");
+
+        let config = config_with_backend("git-spice");
+        let backend = build_backend(Path::new("."), &config).expect("build git-spice backend");
+        assert_eq!(backend.kind(), "git-spice");
+
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    /// Graphite config builds the graphite backend (not the git-spice one).
+    #[test]
+    fn graphite_config_builds_graphite_backend() {
+        let _guard = path_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var("PATH").ok();
+        unsafe {
+            std::env::set_var(
+                "PATH",
+                format!("{}:{}", tmp.path().display(), prev.as_deref().unwrap_or("")),
+            );
+        }
+        install_fake(tmp.path(), "gt");
+
+        let config = config_with_backend("graphite");
+        let backend = build_backend(Path::new("."), &config).expect("build graphite backend");
+        assert_eq!(backend.kind(), "graphite");
+
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
 }

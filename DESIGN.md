@@ -4,28 +4,32 @@
 > that lifts every length of pipe in and out of the hole. Without it, the
 > rig is a hole in the ground.
 
-Derrick is a unified layer over **speckit**, **courtroom**, and **gastown**.
-One install, one config, one command (`/add-feature`). It works in any repo,
-for any user, without them needing to know how the underlying tools talk to
-each other.
+**Derrick** is a Rust CLI that turns a single command into a full dark-factory
+feature pipeline — spec, adversarial review, tickets, dispatch, PR stacking —
+without asking you to wire each underlying tool by hand. One install, one
+config (`derrick.yaml`), one primary command (`/add-feature`).
+
+> *Lineage note: derrick's pipeline pattern descends from the
+> speckit → courtroom → gastown toolchain it replaces. courtroom is the
+> historical inspiration for the assay; gastown is the historical inspiration
+> for the execution substrate. Neither is a runtime dependency.*
 
 ---
 
 ## 1. Problem
 
-Today, getting the speckit → courtroom → gastown flow running in a new repo
-means:
+Getting a coherent spec → adversarial-review → task → dispatch → PR-stack
+flow running in a new repo previously meant:
 
-1. Install `claude`, `codex`, `gt`, `bd`, `specify` CLIs separately.
-2. Install the `courtroom` Claude Code plugin.
-3. Run `specify init` and tune `.specify/` for the project.
-4. Author a `rigs.json` entry and bootstrap the rig with `gt`.
-5. Wire `tasks-to-beads.sh` as a SpecKit post-tasks hook.
-6. Author a CLAUDE.md and AGENTS.md that explain the flow.
-7. Document the runbook, the dolt-server caveats, the mayor session etc.
+1. Install `claude`, `codex`, and one or more stacking CLIs separately.
+2. Install a courtroom-style adversarial-review plugin.
+3. Wire a speckit constitution and per-project config.
+4. Author bespoke CLAUDE.md / AGENTS.md that explain the glue.
+5. Build your own execution substrate (ticket tracking, foreman, worktrees).
+6. Document all the caveats and runbook steps.
 
 This is bespoke per repo. Every part is **glued to a specific toolchain** —
-its phase labels, its rule, its constitution path.
+its phase labels, its rules, its config path.
 
 We want: **any user, any repo, single command, `/add-feature` UX.**
 
@@ -52,28 +56,25 @@ Plus the product surface:
   the deps.
 - **One-line init**: `derrick init` in a repo writes the config, the
   templates, the hooks, the constitution skeleton, and registers the
-  rig with gastown.
+  site with the native substrate.
 - **One primary command**: `/add-feature <prompt>` runs the full
   dark factory pipeline — spec → assay → plan → tasks → batch →
   foreman / Copilot agents.
 - **One front door for observability**: `derrick status` is the
-  answer to "what's going on?" — never `gt status` + `bd query` +
-  `gt mail` separately.
+  answer to "what's going on?" — one command, not one per underlying tool.
 - **Reusable**: nothing in derrick assumes a specific toolchain. Project-
   specific rules live in the repo's constitution + `derrick.yaml`,
   not in derrick.
 - **Transparent**: every underlying tool call is logged and exit
   codes propagate. Nothing is magic. Power users can still call
-  `gt`, `bd`, `claude /speckit.specify` directly.
+  `claude /speckit.specify` or any host CLI directly.
 
 ### Non-goals (v1)
 
-- Re-implementing speckit, courtroom, or gastown. Derrick **orchestrates**;
-  it does not replace.
+- Re-implementing speckit. Derrick defers to speckit when it is
+  installed (detect-then-defer, D2); it does not replace speckit.
 - A GUI. CLI + slash command only.
-- Self-hosted dolt management. Users who use gastown inherit gastown's
-  dolt server contract; derrick will surface its health but not run it.
-- Cross-language polyglot dispatching beyond what gastown already does.
+- Cross-language polyglot dispatching beyond what the host CLIs already do.
 
 ---
 
@@ -88,7 +89,7 @@ Plus the product surface:
                   ▼                           ▼
         ┌──────────────────┐        ┌───────────────────────┐
         │   derrick CLI    │        │  /add-feature command │
-        │     (Go bin)     │        │  (Claude Code plugin) │
+        │   (Rust binary)  │        │  (Claude Code plugin) │
         └────────┬─────────┘        └───────────┬───────────┘
                  │                              │
                  │  reads/writes                │ shells out via
@@ -98,15 +99,17 @@ Plus the product surface:
         │              Derrick Orchestrator               │
         │                                                 │
         │   Phase pipeline  ←→  derrick.yaml (per repo)   │
-        │   Tool detection  ←→  ~/.derrick/state.json     │
+        │   Native substrate ←→  .derrick/derrick.db      │
         │   Logging         ←→  .derrick/runs/<ts>.log    │
-        └──────────┬────────┬────────┬────────┬───────────┘
-                   │        │        │        │
-                   ▼        ▼        ▼        ▼
-                ┌────┐  ┌──────┐  ┌────────┐  ┌────┐
-                │spec│  │court │  │gastown │  │mayor│
-                │kit │  │room  │  │bd/sling│  │ gt │
-                └────┘  └──────┘  └────────┘  └────┘
+        └──────────┬───────────────────┬──────────────────┘
+                   │                   │
+       speckit     │  (optional,       │  all model inference
+       detect-     │   D2)             │  routes through one of
+       then-defer  ▼                   ▼  five host CLIs:
+                ┌──────┐   ┌───────────────────────────────┐
+                │spec  │   │  claude │ codex │ copilot      │
+                │kit   │   │  opencode │ aider              │
+                └──────┘   └───────────────────────────────┘
 ```
 
 ### 3.1 Components
@@ -150,9 +153,7 @@ Why Rust?
   via GitHub releases or Homebrew.
 - **SQLite via `rusqlite`** (bundled) or `sqlx` — both first-class.
 
-Trade-off accepted: build times are slower than Go's, and the gastown shim
-(if we ever add one) means shelling to a Go CLI, not vendoring its types.
-That cost is bounded.
+Trade-off accepted: build times are slower than Go's. That cost is bounded.
 
 ---
 
@@ -282,7 +283,7 @@ Resolution rules:
 
 - Repo `derrick.yaml` wins.
 - Falls back to `~/.derrick/config.yaml` for user defaults
-  (preferred model, courtroom rounds, etc).
+  (preferred model, assay rounds, etc).
 - Falls back to a baked-in default shipped with the binary.
 
 Templates use a simple `{{var}}` substitution (no general
@@ -656,9 +657,9 @@ checklist:
 
 Once a feature is in flight, the user shouldn't need to remember
 which underlying tool answers which question. Derrick exposes a
-flat, predictable surface that aggregates gastown/bd/Copilot reads
-into one view. Everything here is **read-only** — these commands
-never mutate state.
+flat, predictable surface that aggregates substrate, git, and
+host-CLI reads into one view. Everything here is **read-only** —
+these commands never mutate state.
 
 All commands talk to the `Substrate` trait. Output uses derrick's
 vocabulary regardless of backend (v1 ships only the native one).
@@ -693,10 +694,10 @@ Design rules for the observability surface:
   status` shows the current spec dir and tasks.md progress, no
   tickets. In `mode: copilot` it shows Copilot agent dispatch
   state, no foreman. In `mode: crew` it shows the lot.
-- **No mutation.** If the user wants to claim/close/comment, they
-  use `bd` directly. Derrick is deliberately not a wrapper around
-  every write path; that surface is gastown's by design and
-  derrick doesn't want to keep up.
+- **No mutation.** The observability commands never mutate state.
+  Write paths are surfaced through the explicit mutation API
+  (`derrick ticket done/review/block/reopen`, §8.2) — not
+  through the status/observe surface.
 - **JSON when piped.** `--format json` (or auto-detected from
   non-TTY) emits structured output for scripting and for the future
   `derrick observe` TUI.
@@ -1626,9 +1627,9 @@ auto-memory dir (`~/.claude/projects/.../memory/derrick/<rig>/`):
   language(s), constitution path. One file each, one-line entries
   in `MEMORY.md`.
 - *reference memory*: where specs/tasks/verdicts/logs live.
-- *feedback memory*: derrick's own guardrails ("never `gt dolt stop`",
-  "batches never re-ordered after creation", "assay verdict is
-  binding unless `--no-assay`").
+- *feedback memory*: derrick's own guardrails ("batches never
+  re-ordered after creation", "assay verdict is binding unless
+  `--no-assay`", "don't mutate the substrate DB directly").
 
 **9.A.2 Per-run memory** (`.derrick/runs/<ts>/memory.md`). After
 every pipeline step derrick appends a one-line digest:
@@ -1833,10 +1834,9 @@ parallel by default. Derrick treats serial work as a justified
 exception.
 
 **9.C.1 Batch fan-out.** Independent tickets in a batch run
-concurrently. The substrate's foreman (native in-process loop,
-or gastown's `gt prime` behind the shim) walks ready tickets and
-dispatches them to hands, serialising only across explicit
-`blocks` dependencies. Default concurrency is
+concurrently. The substrate's foreman (native in-process loop)
+walks ready tickets and dispatches them to hands, serialising only
+across explicit `blocks` dependencies. Default concurrency is
 `min(8, len(ready_tickets))`; configurable in `derrick.yaml`:
 
 ```yaml
@@ -1864,9 +1864,9 @@ tools:
   `reject`.
 
 **9.C.3 Concurrent observability reads.** `derrick status`
-aggregates from `gt status`, `bd query`, `gt dolt status`, and the
-local manifest — all fired in parallel. The whole dashboard
-returns in the slowest read, not the sum.
+aggregates substrate reads, git/gh queries, and the local manifest
+— all fired in parallel. The whole dashboard returns in the
+slowest read, not the sum.
 
 **9.C.4 Parallel pipeline steps.** Steps with no data dependency
 on each other can be marked `parallel_group: <name>` in the yaml
@@ -2121,7 +2121,7 @@ links back to the section where it lives.
 | D51 | **Pipeline step order fix: `tasks` runs before `analyze`.** Task generation depends on the accepted plan but not on codebase analysis. `analyze` then has the full task list available as context. Canonical order: `specify → clarify → plan → tasks → analyze → assay → bridge → foreman`. All pipeline config, step descriptions, and the §9.B.1 table updated to match. | §4 pipeline yaml / §9.B.1 / §9.C |
 | D52 | **`derrick switch`: solo → crew upgrade command.** New subcommand upgrades a repo from `mode: solo` to `mode: crew` (or `copilot` via `--mode`). Patches `tools.substrate.mode`, adds `peers:` stanza, writes foreman defaults. Idempotent. `--dry-run` previews the yaml diff. | §5.2.2 / §11 |
 | D53 | **`derrick upgrade` name reserved for binary self-update.** The subcommand is registered in the CLI but not yet implemented. It prints a clear "not yet available" message rather than a "command not found" error, preserving the name for the future self-update feature (check GitHub releases, download, replace running binary). | §11 |
-| D54 | **Native code-graph index (`derrick-survey`): native Rust, own SQLite, MCP agent surface.** A pre-built symbol/reference/call-graph index that AI agents query via MCP instead of fanning out across file reads. Three locked choices: (a) **Native Rust, not a Node wrapper** — preserves the single-static-binary, no-external-runtime ethos and D11 substrate/scope discipline; CodeGraph's data model (symbols + `references` edges + FTS5) is the reference, not its runtime. (b) **MCP server as the agent-facing surface** — `derrick survey serve --mcp`; `derrick-adopt` wires the `mcpServers` stanza into Claude Code settings and documents the gap for other hosts (same posture as D34). This is the first MCP seam in derrick; today the boundary is host CLI subprocess (D30) + hooks (D29). CLI subcommands (`build|search|context|impact|status`) ship for Bash/ad-hoc parity. (c) **Separate SQLite DB at `.derrick/index.db`, not the substrate DB** — different schema, rebuildable-cache lifecycle (gitignored), and read-heavy concurrency profile incompatible with the substrate's single-writer contract. | §3.1 / §9.B.8 |
+| D54 | **Native code-graph index (`derrick-survey`): native Rust, own SQLite, MCP agent surface.** A pre-built symbol/reference/call-graph index that AI agents query via MCP instead of fanning out across file reads. Three locked choices: (a) **Native Rust, not a Node wrapper** — preserves the single-static-binary, no-external-runtime ethos and D11 substrate/scope discipline; CodeGraph's data model (symbols + `references` edges + FTS5) is the reference, not its runtime. (b) **MCP server as the agent-facing surface** — `derrick survey serve --mcp`; `derrick-adopt` wires the `mcpServers` stanza into Claude Code settings and documents the gap for other hosts (same posture as D34). This is the first MCP seam in derrick; today the boundary is host CLI subprocess (D30) + hooks (D29). CLI subcommands (`build|search|context|impact|status`) ship for Bash/ad-hoc parity. *(Superseded by D57 on MCP host-wiring split.)* (c) **Separate SQLite DB at `.derrick/index.db`, not the substrate DB** — different schema, rebuildable-cache lifecycle (gitignored), and read-heavy concurrency profile incompatible with the substrate's single-writer contract. | §3.1 / §9.B.8 |
 | D55 | **Survey v1 language scope and pillar wiring.** Language scope: Rust, TypeScript/JavaScript, Python, Go (extended to C# by D58; to Java and Kotlin by D59). Symbol index + FTS5 full-text search + caller/callee/impact. Framework-aware routing and iOS/RN cross-language bridging deferred. Pillar wiring: Tokens — a `derrick gain` line for survey (`survey_tokens_saved`), owned by the token-economist role so numbers reconcile; Memory — `derrick init` seeds the index location as a reference memory entry; Parallelism — per-file parse fan-out at build time; index DB shared read-only across worktree runs per D38, behind a reader pool (`tools.survey.reader_pool`). Config knob at §9.B.8. | §9.B.8 / §9.A.1 / §9.C |
 | D56 | **Workspace MSRV bump to unlock `derrick-survey` dependencies.** The declared `rust-version = "1.75"` floor (root `Cargo.toml`) blocked the official MCP SDK (`rmcp`, edition 2024 / Rust ≥ 1.85) and current `tree-sitter` (≥ 1.76). The floor was declared but never enforced — CI and release build on `@stable` (1.95 at decision time), with no `rust-toolchain.toml` and no MSRV gate. Resolution: raise `rust-version` to a modern floor (≥ 1.85, the edition-2024 minimum) so survey can depend on `rmcp` and the latest `tree-sitter` grammar line rather than hand-rolling an MCP transport and pinning stale grammars. Supersedes rust-architect's hold-1.75 fallback (which assumed the floor was load-bearing). Other crates' dependencies are upgraded as required by the bump. No MSRV CI gate is added — the floor remains advisory, matching prior practice. | §3.1 / D54 / root `Cargo.toml` |
 | D57 | **MCP host-wiring split: `.mcp.json` for the server stanza, `settings.json` for permissions.** Corrects D54 clause (b), which stated "`derrick-adopt` wires the `mcpServers` stanza into Claude Code's `settings.json`". Claude Code does not honour `mcpServers` in `.claude/settings.json` for project-scoped servers. The correct split: (i) the server declaration is written to `.mcp.json` at the repo root (project-scoped, checked into VCS), shaped as `{ "mcpServers": { "derrick-survey": { "type": "stdio", "command": "derrick", "args": ["survey","serve","--mcp"] } } }`; (ii) per-tool permissions are written to `.claude/settings.json` under `permissions.allow`, using the `mcp__derrick-survey__<tool>` naming convention, to suppress per-call trust prompts for known tools. Known gap: Claude Code still requires a one-time interactive project-trust prompt on first load of `.mcp.json`; no settings key eliminates it (same "document the gap" posture as D34). All other host-wiring statements in D54 and §9.B.8 remain valid. Supersedes D54 clause (b) only. | §9.B.8 / D54 |
@@ -2137,6 +2137,8 @@ links back to the section where it lives.
 | D67 | **Foreman-driven adaptive model selection.** Refines D65/D66/§6.5. Five clauses. (1) **`auto` sentinel**: a role's model id may be a concrete PIN (always used as-is) or one of the sentinels `auto` / `auto:light` / `auto:standard` / `auto:heavy`. `auto:*` is a hard tier override that ignores the ticket's complexity; plain `auto` maps to the tier that matches the ticket's complexity. The executor role defaults to `auto`. `auto` is never passed to a host CLI — it is resolved to a concrete model id (or omitted to let the host default) before `HostRequest` is built. `derrick models check` treats only the exact sentinels (`auto` / `auto:light` / `auto:standard` / `auto:heavy`) as PASS once the host CLI is present; lookalikes such as `auto-foo` are validated as ordinary pinned model ids. (2) **Per-host model tiers** live in the D65 catalogue (`derrick-tools/src/catalogue.rs`): each host gains an ordered light / standard / heavy tier mapping — claude: haiku-4-5 / sonnet-4-6 / opus-4-8; codex: gpt-5.4-mini / gpt-5.4 / gpt-5.5; copilot: claude-haiku-4.5 / gpt-5.4 / gpt-5.3-codex; opencode and aider: the `provider/model` string from their curated catalogue entry at the matching tier. Complexity→tier: Low→light, Standard→standard, Heavy→heavy; missing complexity → standard. (3) **`Ticket.complexity`**: a new `Option<Complexity{Low,Standard,Heavy}>` field on the `Ticket` struct, persisted via migration 0004 (a clean `ADD COLUMN complexity TEXT` on the `tickets` table). Complexity is produced by the `tasks` generation step: each task heading carries an HTML-comment marker `<!-- complexity: low|standard|heavy -->`; the tasks→tickets bridge parses and stores it. Missing or garbled values are treated as Standard. Complexity is advisory — it never blocks dispatch. (4) **All crew hands are local CLIs and all participate**: clarifies D66 clause 3, which incorrectly characterised the copilot crew hand as a cloud API path and excluded it from `--model`. The crew wires the LOCAL copilot CLI (`LocalCopilotHandDispatcher`); the cloud GitHub-issue dispatcher is intentionally not wired as a crew hand. The local copilot CLI, like codex / opencode / aider / claude, receives `--model` and participates in tier selection. Model selection for each ticket is resolved inside the three crew dispatchers (`derrick-hand` generic, `LocalCopilotHandDispatcher`, `ClaudeHandDispatcher`) via a shared selector reading `ctx.ticket.complexity`. (5) **Host selection vs model selection**: D66 narrowed §6.5 so derrick asserts model *identity* when configured; D67 refines that to: the user picks the HOST (the executor role's `ModelDef.provider`); the foreman picks the best MODEL within that host per ticket, by tier. An explicit model PIN in `derrick.yaml` always wins over tier selection. | §6.5 / D30 / D41 / D65 / D66 |
 | D68 | **Per-ticket hand worktree lifecycle (hybrid).** Supersedes the D66 deferral that left success-path hand-worktree cleanup out of scope. Both local hand dispatchers (`LocalCopilotHandDispatcher`, `HostCliHandDispatcher`) create a per-ticket `git worktree add` checkout but previously only removed it on a failure path, leaking `.derrick/{copilot,host}-worktrees/<id>` dirs the foreman TTL pass never reclaimed (untracked by any `worktrees` row). Resolution is hybrid: **(a)** each per-ticket worktree is tracked as a ticket-keyed `worktrees` row — `run_id` namespaced `ticket:<id>`, storing the dispatcher's explicit caller-chosen path (distinct from run-keyed rows whose path `reserve_worktree` derives from `worktree_root`) — via two new inherent `pub` methods on `NativeSubstrate`, `register_ticket_worktree(ticket_id, branch, path)` / `forget_ticket_worktree(ticket_id)`; this reuses the existing table (no migration, `SCHEMA_VERSION` unchanged) and needs no `Substrate` trait change (dispatchers hold `Arc<NativeSubstrate>`), and the cleanup pass reclaims abandoned ticket rows unchanged since it keys on `path`+`run_id`. **(b)** A shared helper `foreman::prune_ticket_worktree_dir(repo_root, path)` plus `forget_ticket_worktree` removes the checkout the moment a ticket reaches a terminal hand state (`InReview`/`Done`) or its hand is released/fails — applied identically to both dispatchers (the copilot `PollTask` previously leaked on every non-success path too). Policy: register on create; prune dir + forget row on terminal-success or release/failure; KEEP both (TTL backstop) when left for an operator (`auto_dispatch` off) or when the CLI exited without reaching `InReview`. Safe because the verify/merge flow (`verify_in_review_ticket`, copilot `open_stacked_pr`) observes merges via `gh`/SHAs on `repo_root` and never touches the per-ticket checkout. Accepted caveat: a hand running past `worktree_ttl` (24h) could have its tracked worktree pruned mid-run — identical to the existing run-worktree risk and far beyond the 1h default `poll_timeout`. | §8.2 / §8.6 / D66 |
 | D69 | **Codex PreToolUse/PostToolUse hooks implemented; D34 deferred stance resolved.** `derrick init` now writes `.codex/settings.toml` with scrub and caveman hooks mirroring the Claude Code D29 path. Hook format is the same JSON-equivalent structure: `PreToolUse` (derrick:scrub, `derrick scrub --tool bash`) and `PostToolUse` (derrick:caveman, `derrick caveman --intensity lite`) both on matcher `Bash|Read|Write|Edit|Glob|Grep`. `CodexHost::run()` passes `--dangerously-bypass-hook-trust` so hooks fire in non-interactive automation. The "Codex tool I/O not scrubbed" warning on `derrick init` is removed. *Supersedes D34.* | §9.B.2 / §9.B.3 / T011 |
+| D70 | **Assay reviewer-instruction envelope.** The assay prepends reviewer instructions (`assay_system_prompt`) to the prompt it sends through the host CLI. This is a deliberate, narrow exception to §6.5 "hosts own their own context" — the same narrowing pattern as D66's `--model` clause. Derrick asserts the reviewer's task framing because the assay IS derrick's own feature, not a user pipeline step; the host's broader AGENTS.md / skills are still respected. The verdict contract is now a strict final `**Verdict:** accept\|revise\|reject` line, parsed fail-closed: a response that lacks this exact line is treated as `reject`. Full reviewer quorum is required in multi-reviewer mode — a reviewer that fails to emit the verdict line counts as a `reject` against the quorum. | §7 / §9.C.2 |
+| D71 | **Stacking backends implemented.** The graphite (`gt`) and git-spice (`gs`) backends in `derrick-stack` are real, tested implementations — not v1 stubs. Restack-conflict policy (D19) is unchanged. `derrick doctor` checks the configured backend's binary (`gt` for graphite, `gs` for git-spice, `git`+`gh` for native) and fails the doctor check if the configured backend binary is absent. Supersedes any prose implying these backends were future work. | §8.5 / D19 |
 
 ### Remaining open questions
 

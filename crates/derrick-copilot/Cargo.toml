@@ -10,6 +10,7 @@ repository.workspace = true
 async-trait = { workspace = true }
 chrono = { workspace = true }
 derrick-config = { path = "../derrick-config" }
+derrick-memory = { path = "../derrick-memory" }
 derrick-roughneck = { path = "../derrick-roughneck" }
 derrick-scrub = { path = "../derrick-scrub" }
 derrick-stack = { path = "../derrick-stack" }

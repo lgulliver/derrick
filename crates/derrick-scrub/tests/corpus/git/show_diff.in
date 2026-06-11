@@ -1,0 +1,17 @@
+commit deadbeef00000000000000000000000000000000
+Author: Bob <bob@example.com>
+Date:   Tue Jan 2 09:00:00 2024 +0000
+
+    Fix type mismatch in parser
+
+diff --git a/src/parser.rs b/src/parser.rs
+index aaaaaaa..bbbbbbb 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -10,7 +10,7 @@ fn parse(input: &str) -> Result<Token, Error> {
+     match input {
+         "" => Err(Error::Empty),
+-        s  => Ok(Token::Str(s.to_string())),
++        s  => Ok(Token::Text(s.to_owned())),
+     }
+ }
