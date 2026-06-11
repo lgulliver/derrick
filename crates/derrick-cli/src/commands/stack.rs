@@ -5,8 +5,7 @@ use std::sync::Arc;
 
 use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
 use derrick_stack::{
-    GitSpiceStackBackend, GraphiteStackBackend, NativeStackBackend, NoneStackBackend, OpenPrParams,
-    RestackOutcome, RestackParams, StackBackend,
+    NativeStackBackend, NoneStackBackend, OpenPrParams, RestackOutcome, RestackParams, StackBackend,
 };
 use derrick_substrate::{
     BatchName, BlockReason, EventKind, EventScope, Substrate, TicketFilter, TicketState,
@@ -48,12 +47,6 @@ fn build_backend(
             repo_root.to_path_buf(),
             stack_cfg.force_push(),
         )),
-        StackBackendKind::Graphite => Arc::new(
-            GraphiteStackBackend::new().map_err(|error| message(format!("graphite: {error}")))?,
-        ),
-        StackBackendKind::GitSpice => Arc::new(
-            GitSpiceStackBackend::new().map_err(|error| message(format!("git-spice: {error}")))?,
-        ),
         StackBackendKind::None => Arc::new(NoneStackBackend),
     };
     Ok(backend)
@@ -192,7 +185,20 @@ async fn stack_restack(
             .map_err(|error| message(format!("restack {}: {error}", metadata.branch)))?;
         match outcome {
             RestackOutcome::Restacked => {
-                println!("restacked {} onto {}", metadata.branch, new_parent);
+                // A local rebase alone leaves the remote stale; publish the
+                // rewritten branch with --force-with-lease so the open PR
+                // reflects the new parent. Mirrors the foreman's restack path
+                // (§8.5 step 4). When the force_push policy is off the native
+                // backend reports NotSupported; like the foreman, warn and
+                // continue rather than failing the whole restack run.
+                if let Err(error) = backend.force_push(&metadata.branch, repo_root).await {
+                    println!(
+                        "restacked {} onto {} but force-push failed: {error}",
+                        metadata.branch, new_parent
+                    );
+                } else {
+                    println!("restacked {} onto {}", metadata.branch, new_parent);
+                }
                 restacked += 1;
             }
             RestackOutcome::Conflict { recipe } => {
@@ -301,32 +307,12 @@ async fn stack_submit(
     Ok(CliExitCode::Success)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use super::*;
-
-    // build_backend's git-spice/graphite arms shell out to a CLI whose presence
-    // is verified at construction, so these tests put a fake `gs`/`gt` on PATH.
-    // PATH is process-global; serialize via this lock.
-    fn path_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn install_fake(dir: &Path, name: &str) {
-        let path = dir.join(name);
-        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake binary");
-        let mut perms = fs::metadata(&path).expect("metadata").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).expect("chmod");
-    }
 
     fn config_with_backend(backend: &str) -> Config {
         let yaml = format!(
@@ -382,57 +368,84 @@ state:
         Config::load_from_path(&path).expect("load config")
     }
 
-    /// Regression test for the wiring bug: configuring `git-spice` used to map
-    /// to the Graphite stub. It must now build a real git-spice backend.
+    /// The native backend is derrick's only real stacking engine (D72) and
+    /// builds without any third-party binary on PATH.
     #[test]
-    fn git_spice_config_builds_git_spice_backend() {
-        let _guard = path_lock();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var("PATH").ok();
-        // SAFETY: serialized by path_lock; PATH restored below.
-        unsafe {
-            std::env::set_var(
-                "PATH",
-                format!("{}:{}", tmp.path().display(), prev.as_deref().unwrap_or("")),
-            );
-        }
-        install_fake(tmp.path(), "gs");
-
-        let config = config_with_backend("git-spice");
-        let backend = build_backend(Path::new("."), &config).expect("build git-spice backend");
-        assert_eq!(backend.kind(), "git-spice");
-
-        unsafe {
-            match prev {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+    fn native_config_builds_native_backend() {
+        let config = config_with_backend("native");
+        let backend = build_backend(Path::new("."), &config).expect("build native backend");
+        assert_eq!(backend.kind(), "native");
     }
 
-    /// Graphite config builds the graphite backend (not the git-spice one).
+    /// The `none` backend disables stacking and builds unconditionally.
     #[test]
-    fn graphite_config_builds_graphite_backend() {
-        let _guard = path_lock();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var("PATH").ok();
-        unsafe {
-            std::env::set_var(
-                "PATH",
-                format!("{}:{}", tmp.path().display(), prev.as_deref().unwrap_or("")),
-            );
-        }
-        install_fake(tmp.path(), "gt");
+    fn none_config_builds_none_backend() {
+        let config = config_with_backend("none");
+        let backend = build_backend(Path::new("."), &config).expect("build none backend");
+        assert_eq!(backend.kind(), "none");
+    }
 
-        let config = config_with_backend("graphite");
-        let backend = build_backend(Path::new("."), &config).expect("build graphite backend");
-        assert_eq!(backend.kind(), "graphite");
+    /// A removed third-party backend name must fail config load with the
+    /// actionable D72 error rather than silently building anything.
+    #[test]
+    fn graphite_backend_name_is_rejected_at_config_load() {
+        let yaml = removed_backend_yaml("graphite");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("derrick.yaml");
+        fs::write(&path, yaml).expect("write yaml");
+        let err = Config::load_from_path(&path).expect_err("graphite must be rejected");
+        let text = err.to_string();
+        assert!(text.contains("graphite"), "got: {text}");
+        assert!(text.contains("native"), "got: {text}");
+    }
 
-        unsafe {
-            match prev {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+    fn removed_backend_yaml(backend: &str) -> String {
+        format!(
+            r#"
+version: 1
+site:
+  name: test-site
+  prefix: tst
+models:
+  claude-sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-6
+roles:
+  drafter: claude-sonnet
+  proposer: claude-sonnet
+  reviewer: claude-sonnet
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: 1
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+  git:
+    stacking:
+      backend: {backend}
+pipeline: []
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#
+        )
     }
 }

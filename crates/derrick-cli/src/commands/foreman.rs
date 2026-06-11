@@ -10,9 +10,7 @@ use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
 use derrick_copilot::{LocalCopilotHandDispatcher, LocalCopilotHandDispatcherConfig};
 use derrick_flow::hand_kind_for_executor;
 use derrick_hand::{HostCliHandDispatcher, HostCliHandDispatcherConfig};
-use derrick_stack::{
-    GitSpiceStackBackend, GraphiteStackBackend, NativeStackBackend, NoneStackBackend, StackBackend,
-};
+use derrick_stack::{NativeStackBackend, NoneStackBackend, StackBackend};
 use derrick_substrate::{HandKind, Substrate};
 use derrick_substrate_native::NativeSubstrate;
 #[allow(deprecated)]
@@ -117,12 +115,6 @@ fn build_foreman(
             repo_root.to_path_buf(),
             stack_cfg.force_push(),
         )),
-        StackBackendKind::Graphite => Arc::new(
-            GraphiteStackBackend::new().map_err(|error| message(format!("graphite: {error}")))?,
-        ),
-        StackBackendKind::GitSpice => Arc::new(
-            GitSpiceStackBackend::new().map_err(|error| message(format!("git-spice: {error}")))?,
-        ),
         StackBackendKind::None => Arc::new(NoneStackBackend),
     };
     let dispatcher: Box<dyn HandDispatcher> =

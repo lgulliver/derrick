@@ -132,7 +132,7 @@ modules can be tested, profiled, and (later) ported in isolation.
 | Adopt | `crates/derrick-adopt` | Brownfield detection of AGENTS.md, CLAUDE.md, agents/, skills/, docs (§5.6); writes Claude Code host hook configs (`.claude/settings.json` PreToolUse/PostToolUse) so scrub+caveman fire at host boundaries (D29). Codex hook installation deferred (D34); T011 writes `.codex/instructions.md` only. |
 | Substrate trait | `crates/derrick-substrate` | One async trait (`Substrate`); a native impl, future impls slot in behind it |
 | Native substrate | `crates/derrick-substrate-native` | SQLite-backed execution substrate + in-process foreman |
-| Stack | `crates/derrick-stack` | PR stacking: trait + native / graphite / git-spice backends (see §8.5) |
+| Stack | `crates/derrick-stack` | PR stacking: native engine (plain git + `gh`); `StackBackend` trait as extension seam (see §8.5) |
 | Survey | `crates/derrick-survey` | Native code-graph index: SQLite + FTS5 symbol/reference/call-graph index at `.derrick/index.db`; MCP server surface for agent queries; CLI subcommands `build|search|context|impact|status` for ad-hoc/Bash parity (see §9.B.8) |
 | TUI | `crates/derrick-tui` | `derrick observe` — ratatui-based interactive dashboard (see §5.7) |
 | Observe | `crates/derrick-observe` | Aggregated read-only view (talks to substrate trait) |
@@ -1387,21 +1387,21 @@ stacking, the same N PRs form a clean DAG.
 - **`none`** (default) — derrick doesn't manage PRs. Hands
   push branches and open PRs however they want. Sensible
   for solo mode or single-ticket batches.
-- **`native`** — derrick manages the stack itself using plain
-  `git` + `gh pr create`. v1 default when stacking is enabled.
+- **`native`** — derrick's own stacking engine using plain
+  `git` + `gh pr create`. The sole implemented backend (D72).
   Branches are named `derrick/<batch>/<ticket-id>`; the foreman
   sets parents based on `blocks` links; when a parent PR lands,
-  derrick rebases and force-pushes all dependents.
-- **`graphite`** — shell out to Graphite (`gt`). Adapter
-  records `gt branch create --parent <branch>` and lets
-  Graphite handle restacks. Detected automatically if
-  Graphite is installed and the repo is initialised
-  (`.graphite_user_config` present).
-- **`git-spice`** — shell out to `gs` (git-spice). Same shape
-  as the graphite adapter.
+  derrick rebases and force-pushes all dependents (`--force-with-lease`,
+  D19 conflict-bail, D20 branch ownership). Stacked PRs are
+  opened via `gh pr create`; `derrick doctor` checks that
+  `git` and `gh` are present.
 
-The trait `StackBackend` lives in `crates/derrick-stack`;
-adapters in `crates/derrick-stack/src/backends/`.
+Legacy configs that name `graphite` or `git-spice` fail at
+load time with an actionable error directing the user to set
+`backend: native`.
+
+The trait `StackBackend` lives in `crates/derrick-stack` as
+the §8.6 extension seam for future backends.
 
 #### What the foreman does when stacking is on
 
@@ -1415,8 +1415,7 @@ adapters in `crates/derrick-stack/src/backends/`.
 3. When the hand opens a PR, derrick adds the PR URL to the
    ticket via the substrate.
 4. When a PR merges, derrick walks the dependent tickets and
-   asks the backend to restack them (`git rebase --onto` for
-   native; `gt restack` for graphite). Force-push uses
+   restacks them via `git rebase --onto`. Force-push uses
    `--force-with-lease`.
 5. If a restack fails (merge conflict), derrick bails immediately
    (D19): the ticket moves to `blocked` with a `restack-conflict`
@@ -1443,7 +1442,7 @@ adapters in `crates/derrick-stack/src/backends/`.
 tools:
   git:
     stacking:
-      backend: native            # none | native | graphite | git-spice
+      backend: native            # none | native
       branch_pattern: "derrick/{{batch}}/{{ticket_id}}"
       auto_restack_on_merge: true
       force_push: with-lease     # with-lease | off
@@ -1453,11 +1452,10 @@ tools:
 
 #### Brownfield detection
 
-`derrick init` detects Graphite via `.graphite_user_config` or
-`~/.graphite/`. If found, it proposes `backend: graphite` in
-the generated `derrick.yaml` so the user keeps their existing
-stack tooling. Same idea for git-spice. Otherwise it proposes
-`backend: native`.
+`derrick init` always proposes `backend: native`. Repos that
+previously used Graphite or git-spice will need to migrate to
+the native engine; the init wizard notes this if it finds
+`.graphite_user_config` or a `gs`-managed repo.
 
 #### Squash-merge warning (D21)
 
@@ -2006,8 +2004,9 @@ to reconstruct the full history of a prompt across retries.
 - Token tooling: `derrick scrub`, `derrick caveman`, `derrick gain`.
 - BYOM tooling: `derrick models check`, `derrick auth set/list`.
 - PR stacking: `derrick stack` / `derrick stack restack` /
-  `derrick stack submit`; native backend default, graphite and
-  git-spice adapters detected and offered at init time.
+  `derrick stack submit`; native engine only (D72) — plain
+  git + gh, parent computation from `blocks` links, rebase
+  --onto restack with --force-with-lease.
 - TUI dashboard: `derrick observe` (ratatui), six tabs covering
   Overview / Tickets / Stack / Activity / Tokens / Memory.
   Live-updating via filesystem watcher + 1s tick.
@@ -2084,7 +2083,7 @@ links back to the section where it lives.
 | D14 | **Sub-agent / skill telemetry**: derrick parses Claude Code's session transcript files (`~/.claude/projects/<repo>/*.jsonl`) post-step for accurate token counts; falls back to estimates for codex / copilot / raw API. | §9.B.7 |
 | D15 | **Role/host validation**: `derrick models check` subcommand for explicit verification; warnings (not errors) emitted at `derrick init` and `derrick run` so issues surface early. *Implemented by D65*: the check runs against the curated host catalogue in `derrick-tools/src/catalogue.rs`; unknown model ids produce WARN, not FAIL — the hybrid validation rule is now the authoritative posture. | §6.5 / D65 |
 | D16 | **v1 install surface (beyond CLI + plugin)**: shell completions (clap_complete: bash/zsh/fish), VS Code + JetBrains editor configs in templates (opt-in), `.codex/instructions.md` wrapper config written during init so codex sees the constitution, `derrick uninstall` to cleanly reverse init. | §11 |
-| D17 | **PR stacking ships in v1** as a first-class concern. Default backend `native` (plain git + `gh pr create`). Graphite and git-spice adapters auto-detected at init. Foreman restacks dependents on merge using `--force-with-lease`. | §8.5 |
+| D17 | **PR stacking ships in v1** as a first-class concern. Default backend `native` (plain git + `gh pr create`). Graphite and git-spice adapters auto-detected at init. Foreman restacks dependents on merge using `--force-with-lease`. *Superseded by D72* (adapter clauses only — graphite/git-spice adapters removed; native is the sole backend). | §8.5 |
 | D18 | **TUI dashboard ships in v1** as `derrick observe`. ratatui + crossterm, six tabs, read-only, live-updates via filesystem watcher + 1s tick. Mutation features are explicitly out of scope for v1. | §5.7 |
 | D19 | **Restack conflict policy**: bail immediately, surface the exact `git rebase --onto` recipe to the activity log, mark the ticket `blocked` with `restack-conflict`. No auto three-way-merge attempts (they produce subtly-wrong force-pushed history). | §8.5 |
 | D20 | **Branch ownership when stacking**: derrick creates the branch off the computed parent for `native` and `copilot` hands. Human hands create their own branches; derrick rebases them after if needed. | §8.5 |
@@ -2138,7 +2137,8 @@ links back to the section where it lives.
 | D68 | **Per-ticket hand worktree lifecycle (hybrid).** Supersedes the D66 deferral that left success-path hand-worktree cleanup out of scope. Both local hand dispatchers (`LocalCopilotHandDispatcher`, `HostCliHandDispatcher`) create a per-ticket `git worktree add` checkout but previously only removed it on a failure path, leaking `.derrick/{copilot,host}-worktrees/<id>` dirs the foreman TTL pass never reclaimed (untracked by any `worktrees` row). Resolution is hybrid: **(a)** each per-ticket worktree is tracked as a ticket-keyed `worktrees` row — `run_id` namespaced `ticket:<id>`, storing the dispatcher's explicit caller-chosen path (distinct from run-keyed rows whose path `reserve_worktree` derives from `worktree_root`) — via two new inherent `pub` methods on `NativeSubstrate`, `register_ticket_worktree(ticket_id, branch, path)` / `forget_ticket_worktree(ticket_id)`; this reuses the existing table (no migration, `SCHEMA_VERSION` unchanged) and needs no `Substrate` trait change (dispatchers hold `Arc<NativeSubstrate>`), and the cleanup pass reclaims abandoned ticket rows unchanged since it keys on `path`+`run_id`. **(b)** A shared helper `foreman::prune_ticket_worktree_dir(repo_root, path)` plus `forget_ticket_worktree` removes the checkout the moment a ticket reaches a terminal hand state (`InReview`/`Done`) or its hand is released/fails — applied identically to both dispatchers (the copilot `PollTask` previously leaked on every non-success path too). Policy: register on create; prune dir + forget row on terminal-success or release/failure; KEEP both (TTL backstop) when left for an operator (`auto_dispatch` off) or when the CLI exited without reaching `InReview`. Safe because the verify/merge flow (`verify_in_review_ticket`, copilot `open_stacked_pr`) observes merges via `gh`/SHAs on `repo_root` and never touches the per-ticket checkout. Accepted caveat: a hand running past `worktree_ttl` (24h) could have its tracked worktree pruned mid-run — identical to the existing run-worktree risk and far beyond the 1h default `poll_timeout`. | §8.2 / §8.6 / D66 |
 | D69 | **Codex PreToolUse/PostToolUse hooks implemented; D34 deferred stance resolved.** `derrick init` now writes `.codex/settings.toml` with scrub and caveman hooks mirroring the Claude Code D29 path. Hook format is the same JSON-equivalent structure: `PreToolUse` (derrick:scrub, `derrick scrub --tool bash`) and `PostToolUse` (derrick:caveman, `derrick caveman --intensity lite`) both on matcher `Bash|Read|Write|Edit|Glob|Grep`. `CodexHost::run()` passes `--dangerously-bypass-hook-trust` so hooks fire in non-interactive automation. The "Codex tool I/O not scrubbed" warning on `derrick init` is removed. *Supersedes D34.* | §9.B.2 / §9.B.3 / T011 |
 | D70 | **Assay reviewer-instruction envelope.** The assay prepends reviewer instructions (`assay_system_prompt`) to the prompt it sends through the host CLI. This is a deliberate, narrow exception to §6.5 "hosts own their own context" — the same narrowing pattern as D66's `--model` clause. Derrick asserts the reviewer's task framing because the assay IS derrick's own feature, not a user pipeline step; the host's broader AGENTS.md / skills are still respected. The verdict contract is now a strict final `**Verdict:** accept\|revise\|reject` line, parsed fail-closed: a response that lacks this exact line is treated as `reject`. Full reviewer quorum is required in multi-reviewer mode — a reviewer that fails to emit the verdict line counts as a `reject` against the quorum. | §7 / §9.C.2 |
-| D71 | **Stacking backends implemented.** The graphite (`gt`) and git-spice (`gs`) backends in `derrick-stack` are real, tested implementations — not v1 stubs. Restack-conflict policy (D19) is unchanged. `derrick doctor` checks the configured backend's binary (`gt` for graphite, `gs` for git-spice, `git`+`gh` for native) and fails the doctor check if the configured backend binary is absent. Supersedes any prose implying these backends were future work. | §8.5 / D19 |
+| D71 | **Stacking backends implemented.** The graphite (`gt`) and git-spice (`gs`) backends in `derrick-stack` are real, tested implementations — not v1 stubs. Restack-conflict policy (D19) is unchanged. `derrick doctor` checks the configured backend's binary (`gt` for graphite, `gs` for git-spice, `git`+`gh` for native) and fails the doctor check if the configured backend binary is absent. Supersedes any prose implying these backends were future work. *Superseded by D72* (graphite and git-spice backends deliberately removed). | §8.5 / D19 |
+| D72 | **Native-only stacking: derrick owns its stacking engine.** The graphite (`gt`) and git-spice (`gs`) third-party backend adapters are removed from `derrick-stack`; the native backend (plain git + `gh`) is the sole `StackBackend` implementation. Legacy configs naming `graphite` or `git-spice` fail with an actionable error pointing the user at `native`. Owning the stacking engine beats adapting to third-party CLIs whose semantics derrick cannot guarantee: restack correctness (D19 conflict-bail, D20 branch ownership) depends on derrick observing and controlling the exact git operations. D19, D20, D21, and D22 are unchanged — they govern the native engine. The `StackBackend` trait remains as the §8.6 extension seam for future backends. Supersedes the adapter clauses of D17 and D71. | §8.5 / D17 / D71 |
 
 ### Remaining open questions
 

@@ -1,14 +1,16 @@
 //! derrick-stack — PR stacking. See DESIGN.md §8.5.
 //!
-//! Defines the [`StackBackend`] trait and three implementations:
+//! Defines the [`StackBackend`] trait and its two implementations:
 //!
 //! - [`NoneStackBackend`]: stacking disabled. Open-PR fails with
 //!   [`StackError::NotSupported`]; restack/force-push are no-ops.
-//! - [`NativeStackBackend`]: shells to `git rebase --onto` and `gh pr create`.
-//! - [`GraphiteStackBackend`]: shells to the `gt` CLI (`gt submit` /
-//!   `gt restack`).
-//! - [`GitSpiceStackBackend`]: shells to the `gs` CLI (`gs branch submit` /
-//!   `gs upstack restack`).
+//! - [`NativeStackBackend`]: derrick's own stacking engine — plain `git`
+//!   (`rebase --onto`, `push --force-with-lease`) and `gh pr create`. This is
+//!   the only real backend (D72); derrick owns its stacking technology and
+//!   does not delegate to any third-party stacking CLI.
+//!
+//! The [`StackBackend`] trait stays as the §8.6 extension seam so a future
+//! backend can be added without touching callers.
 //!
 //! The crate is transport-agnostic: it knows about git, gh, and config but
 //! has no substrate or foreman dependency. Callers (foreman, CLI) compute
@@ -24,8 +26,6 @@ use thiserror::Error;
 
 pub mod backends;
 
-pub use backends::git_spice::GitSpiceStackBackend;
-pub use backends::graphite::GraphiteStackBackend;
 pub use backends::native::NativeStackBackend;
 pub use backends::none::NoneStackBackend;
 
@@ -51,7 +51,7 @@ pub enum StackError {
     /// Operation is not supported by the selected backend.
     #[error("not supported by backend {backend}: {reason}")]
     NotSupported {
-        /// Backend identifier (`"none"`, `"graphite"`, ...).
+        /// Backend identifier (`"none"`, `"native"`, ...).
         backend: &'static str,
         /// Human-readable reason or remediation.
         reason: &'static str,

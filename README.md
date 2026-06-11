@@ -246,7 +246,7 @@ derrick gain
 | `derrick-memory` | Tiered retrieval, tag index, lesson curation |
 | `derrick-tui` | ratatui dashboard (6 tabs) |
 | `derrick-observe` | TUI wiring, stack refresh, event loop |
-| `derrick-stack` | PR stacking (native / Graphite / git-spice) |
+| `derrick-stack` | PR stacking — native engine (plain git + gh); `StackBackend` trait as extension seam |
 | `derrick-models` | Model trait + host-delegated providers (one per host CLI) + shell escape hatch |
 | `derrick-adopt` | Brownfield adoption — detects AGENTS.md, writes hooks + survey MCP wiring |
 | `derrick-substrate` | Substrate trait + ticket/batch/hand state types |
@@ -307,7 +307,7 @@ You can override any role binding in `roles`, and pin a role's model to a concre
 
 ## Status
 
-**Active development.** Architecture and 71 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 72 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -334,7 +334,7 @@ What's landed and tested:
 - ✅ `derrick survey` — native code-graph index (SQLite + FTS5) over Rust/TS/JS/Python/Go/C#/Java/Kotlin; MCP server (`survey serve --mcp`) so agents query symbols/callers/impact instead of fanning out across reads; debounced watcher keeps it fresh
 - ✅ `derrick init` — brownfield-safe, VS Code + JetBrains opt-in, Codex instructions
 - ✅ `derrick doctor` — live squash-merge policy check via GitHub API
-- ✅ PR stacking: `stack show / restack / submit` — native, Graphite (`gt`), and git-spice (`gs`) backends
+- ✅ PR stacking: `stack show / restack / submit` — native engine (plain git + gh, D72)
 - ✅ Shell completions (bash / zsh / fish / elvish / powershell)
 - ✅ `scripts/install.sh` — curl-able, platform-detecting (linux-x86\_64, macos-arm64, macos-x86\_64)
 - ✅ GitHub release workflow — builds on `v*` tag push, attaches binaries + checksums
@@ -342,7 +342,7 @@ What's landed and tested:
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 - 🔜 Homebrew tap (v1.1)
 
-882 tests passing across 20 crates.
+873 tests passing across 20 crates.
 
 ## Coverage
 
@@ -358,7 +358,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 71 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 72 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 - [docs/survey.md](./docs/survey.md) — derrick survey deep-dive: how it works, setup, CLI reference, MCP tools, token accounting
