@@ -1416,7 +1416,10 @@ the §8.6 extension seam for future backends.
    ticket via the substrate.
 4. When a PR merges, derrick walks the dependent tickets and
    restacks them via `git rebase --onto`. Force-push uses
-   `--force-with-lease`.
+   `--force-with-lease`. After rebase+force-push the foreman
+   also retargets the child PR's base via `gh pr edit --base`
+   so GitHub shows the correct diff; `NotSupported` is tolerated
+   (warn + Note), same posture as the force-push gate.
 5. If a restack fails (merge conflict), derrick bails immediately
    (D19): the ticket moves to `blocked` with a `restack-conflict`
    label, and the activity log records the exact `git rebase
@@ -1427,14 +1430,21 @@ the §8.6 extension seam for future backends.
 
 #### `derrick stack` subcommand
 
-- `derrick stack` — show the current stack for the active batch:
-  parent → child PRs, merge status, restack health.
-- `derrick stack restack [--batch <name>]` — manual restack of
-  a batch's children after a parent lands (in case the foreman
-  isn't running).
-- `derrick stack submit [--batch <name>]` — open PRs for every
-  ticket whose hand has pushed a branch but not yet opened a
-  PR (catches up after a foreman crash).
+- `derrick stack show` — renders the current stack for the active
+  batch: a PARENT column with tree indentation by DAG depth in
+  topological order, merge status, and restack health.
+- `derrick stack restack [--batch <name>]` — topological cascade
+  restack: processes the `blocks` DAG in deterministic topological
+  order (tie-break: ordinal then ticket id). A D19 conflict blocks
+  only the conflicting ticket and poisons its transitive descendants;
+  independent subtrees continue unaffected. Manual fallback when
+  the foreman isn't running.
+- `derrick stack submit [--batch <name>]` — whole-stack submit:
+  walks the batch in stack order, opens missing PRs with the correct
+  base (parent branch for non-roots, `main` for roots), and retargets
+  existing PRs whose base is stale via `gh pr edit --base`. Also
+  maintains an idempotent stack navigation table (marked section) in
+  each PR body listing the stack with the current PR highlighted.
 
 #### Configuration
 
@@ -2139,6 +2149,7 @@ links back to the section where it lives.
 | D70 | **Assay reviewer-instruction envelope.** The assay prepends reviewer instructions (`assay_system_prompt`) to the prompt it sends through the host CLI. This is a deliberate, narrow exception to §6.5 "hosts own their own context" — the same narrowing pattern as D66's `--model` clause. Derrick asserts the reviewer's task framing because the assay IS derrick's own feature, not a user pipeline step; the host's broader AGENTS.md / skills are still respected. The verdict contract is now a strict final `**Verdict:** accept\|revise\|reject` line, parsed fail-closed: a response that lacks this exact line is treated as `reject`. Full reviewer quorum is required in multi-reviewer mode — a reviewer that fails to emit the verdict line counts as a `reject` against the quorum. | §7 / §9.C.2 |
 | D71 | **Stacking backends implemented.** The graphite (`gt`) and git-spice (`gs`) backends in `derrick-stack` are real, tested implementations — not v1 stubs. Restack-conflict policy (D19) is unchanged. `derrick doctor` checks the configured backend's binary (`gt` for graphite, `gs` for git-spice, `git`+`gh` for native) and fails the doctor check if the configured backend binary is absent. Supersedes any prose implying these backends were future work. *Superseded by D72* (graphite and git-spice backends deliberately removed). | §8.5 / D19 |
 | D72 | **Native-only stacking: derrick owns its stacking engine.** The graphite (`gt`) and git-spice (`gs`) third-party backend adapters are removed from `derrick-stack`; the native backend (plain git + `gh`) is the sole `StackBackend` implementation. Legacy configs naming `graphite` or `git-spice` fail with an actionable error pointing the user at `native`. Owning the stacking engine beats adapting to third-party CLIs whose semantics derrick cannot guarantee: restack correctness (D19 conflict-bail, D20 branch ownership) depends on derrick observing and controlling the exact git operations. D19, D20, D21, and D22 are unchanged — they govern the native engine. The `StackBackend` trait remains as the §8.6 extension seam for future backends. Supersedes the adapter clauses of D17 and D71. | §8.5 / D17 / D71 |
+| D73 | **Native stacking engine v2: topological cascade restack, whole-stack submit, merge-cascade PR retarget, stack navigation table.** Owning the engine (D72) obligates feature parity with the removed third-party tools where derrick's pipeline needs it; D19/D20/D21/D22 are unchanged. Four capabilities added: (1) `derrick stack restack` processes the `blocks` DAG in deterministic topological order (tie-break: ordinal then ticket id); a D19 conflict blocks only the conflicting ticket and poisons its transitive descendants — independent subtrees continue. (2) `derrick stack submit` walks the batch in stack order, opens missing PRs with the correct base (parent branch for non-roots, `main` for roots), and retargets existing PRs whose base is stale via `gh pr edit --base`. Submit retargets unconditionally rather than reading the current base first — `gh` treats a no-op base change idempotently, and one extra gh call beats a read-then-write race. (3) The foreman's merge-cascade (`restack_dependents`) also retargets the child PR's base after rebase+force-push; `NotSupported` is tolerated (warn + Note), same posture as the force-push gate. (4) `derrick stack submit` maintains an idempotent marked section (`<!-- derrick-stack-nav … -->`) in each stacked PR body listing the stack with the current PR highlighted; replace-if-present, append-if-absent. `derrick stack show` renders a PARENT column with tree indentation by DAG depth in topological order. `StackBackend` gains three additive default methods (`retarget_pr`, `set_pr_body`, `pr_body`) that return `NotSupported`; the native backend overrides all three; `NoneStackBackend` inherits the defaults. §8.6 seam preserved. | §8.5 / D72 |
 
 ### Remaining open questions
 
