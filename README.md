@@ -307,7 +307,7 @@ You can override any role binding in `roles`, and pin a role's model to a concre
 
 ## Status
 
-**Active development.** Architecture and 72 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 73 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -334,7 +334,7 @@ What's landed and tested:
 - ✅ `derrick survey` — native code-graph index (SQLite + FTS5) over Rust/TS/JS/Python/Go/C#/Java/Kotlin; MCP server (`survey serve --mcp`) so agents query symbols/callers/impact instead of fanning out across reads; debounced watcher keeps it fresh
 - ✅ `derrick init` — brownfield-safe, VS Code + JetBrains opt-in, Codex instructions
 - ✅ `derrick doctor` — live squash-merge policy check via GitHub API
-- ✅ PR stacking: `stack show / restack / submit` — native engine (plain git + gh, D72)
+- ✅ PR stacking: `stack show / restack / submit` — native engine (plain git + gh, D72); topological cascade restack with per-subtree conflict isolation (D73); whole-stack submit with base retargeting; stack navigation table maintained in each PR body
 - ✅ Shell completions (bash / zsh / fish / elvish / powershell)
 - ✅ `scripts/install.sh` — curl-able, platform-detecting (linux-x86\_64, macos-arm64, macos-x86\_64)
 - ✅ GitHub release workflow — builds on `v*` tag push, attaches binaries + checksums
@@ -342,7 +342,7 @@ What's landed and tested:
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 - 🔜 Homebrew tap (v1.1)
 
-873 tests passing across 20 crates.
+885 tests passing across 20 crates.
 
 ## Coverage
 
@@ -358,7 +358,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 72 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 73 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 - [docs/survey.md](./docs/survey.md) — derrick survey deep-dive: how it works, setup, CLI reference, MCP tools, token accounting
