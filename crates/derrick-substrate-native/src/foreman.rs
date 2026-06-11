@@ -1168,6 +1168,34 @@ impl Foreman {
                             .await?;
                         continue;
                     }
+                    // Move the child PR's GitHub base onto the new target.
+                    // A git rebase alone leaves the open PR comparing against
+                    // the merged (now-deleted) parent branch; the base must be
+                    // retargeted via gh. Backends that don't support it (e.g.
+                    // `none`) report NotSupported — warn and continue, like the
+                    // force-push gate above, rather than failing the whole pass.
+                    if let Err(error) = self
+                        .stack_backend
+                        .retarget_pr(&dependent_branch, &self.target_branch, &self.repo_root)
+                        .await
+                    {
+                        warn!(
+                            ticket = %dependent_id,
+                            branch = %dependent_branch,
+                            error = %error,
+                            "retarget pr base after restack failed",
+                        );
+                        self.substrate
+                            .record_typed_event(
+                                EventScope::Ticket(dependent_id.clone()),
+                                EventKind::Note {
+                                    body: format!(
+                                        "restacked {dependent_branch} but retarget of PR base failed: {error}"
+                                    ),
+                                },
+                            )
+                            .await?;
+                    }
                     info!(
                         ticket = %dependent_id,
                         branch = %dependent_branch,

@@ -1079,6 +1079,8 @@ impl HandDispatcher for ParentBranchRecorder {
 struct FakeStackBackend {
     calls: Arc<Mutex<Vec<derrick_stack::RestackParams>>>,
     force_conflict: Arc<Mutex<bool>>,
+    /// Recorded `(branch, new_base)` pairs from `retarget_pr`.
+    retarget_calls: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 #[async_trait]
@@ -1120,6 +1122,19 @@ impl derrick_stack::StackBackend for FakeStackBackend {
         _branch: &str,
         _repo_root: &std::path::Path,
     ) -> Result<(), derrick_stack::StackError> {
+        Ok(())
+    }
+
+    async fn retarget_pr(
+        &self,
+        branch: &str,
+        new_base: &str,
+        _repo_root: &std::path::Path,
+    ) -> Result<(), derrick_stack::StackError> {
+        self.retarget_calls
+            .lock()
+            .await
+            .push((branch.to_owned(), new_base.to_owned()));
         Ok(())
     }
 }
@@ -1232,6 +1247,15 @@ async fn restack_dependents_called_after_merge() {
     assert_eq!(calls[0].branch, "derrick/alpha/drk-2");
     assert_eq!(calls[0].old_parent, "derrick/alpha/drk-1");
     assert_eq!(calls[0].new_parent, "main");
+
+    // The merge cascade must also retarget the child PR's base via gh, not
+    // just rebase the git branch (capability 3).
+    let retargets = fake.retarget_calls.lock().await;
+    assert_eq!(retargets.len(), 1, "dependent PR base retargeted once");
+    assert_eq!(
+        retargets[0],
+        ("derrick/alpha/drk-2".to_owned(), "main".to_owned())
+    );
 
     assert!(
         report
