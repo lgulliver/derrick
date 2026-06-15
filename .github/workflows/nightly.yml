@@ -104,16 +104,24 @@ jobs:
             | grep "^${BASE}" || true)
           TAG="$BASE"
           if [ -n "$EXISTING" ]; then
-            # Extract suffix numbers from existing builds (skip bare base tag)
+            # Extract suffix numbers from existing dotted builds (e.g. nightly-20260101.3 → 3).
             MAX=$(echo "$EXISTING" \
               | sed -n "s/^${BASE}\.\([0-9][0-9]*\)$/\1/p" \
               | sort -n \
               | tail -1)
             if [ -z "$MAX" ]; then
+              # No dotted build exists yet, but EXISTING is non-empty, which means
+              # the bare BASE tag already occupies today's slot.  Treat it as N=0
+              # so the next release becomes BASE.1 rather than BASE (collision).
               TAG="${BASE}.1"
             else
               TAG="${BASE}.$((MAX + 1))"
             fi
+          fi
+          # Hard stop: never overwrite a tag that already exists in any form.
+          if gh release view "$TAG" &>/dev/null 2>&1; then
+            echo "ERROR: tag '$TAG' already exists — aborting to prevent overwrite." >&2
+            exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
         env:

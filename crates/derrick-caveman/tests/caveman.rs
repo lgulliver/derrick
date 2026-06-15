@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use derrick_caveman::{compress, CompressOutput, Compressor, Intensity};
+use derrick_caveman::{CompressOutput, Compressor, Intensity, compress};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 

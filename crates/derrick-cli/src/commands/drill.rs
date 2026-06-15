@@ -32,13 +32,20 @@ use owo_colors::OwoColorize;
 
 use crate::commands::{DrillArgs, DrillRunArgs, RunArgs, RunCommand};
 use crate::exit_code::CliExitCode;
-use crate::{current_repo_root, read_config, CliError};
+use crate::{CliError, current_repo_root, read_config};
 
 pub(crate) async fn execute(args: DrillArgs) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root()?;
 
+    // Resolve the prompt from the positional string, `--prompt-file`, or stdin
+    // exactly once (stdin can only be read once).  When nothing is supplied and
+    // stdin is a terminal this returns `None`, preserving the no-prompt
+    // fallback below.
+    let prompt =
+        crate::commands::prompt_input::resolve_prompt_from_env(args.prompt, args.prompt_file)?;
+
     // ── No-prompt fallback ────────────────────────────────────────────────
-    if args.prompt.is_none() && args.resume_from.is_none() {
+    if prompt.is_none() && args.resume_from.is_none() {
         if let Ok(Some(run_id)) = find_incomplete_run(&repo_root) {
             eprintln!(
                 "Incomplete or failed run detected: {run_id}\n\
@@ -52,7 +59,7 @@ pub(crate) async fn execute(args: DrillArgs) -> Result<CliExitCode, CliError> {
     let (auto_resume, run_id_override, force_prior_run_id) = if args.resume_from.is_none()
         && args.run_id.is_none()
     {
-        if let Some(ref prompt) = args.prompt {
+        if let Some(ref prompt) = prompt {
             if args.force {
                 // Force restart: look for a prior run to record as lineage.
                 let prior = find_incomplete_run_for_prompt(prompt, &repo_root).unwrap_or_default();
@@ -79,7 +86,9 @@ pub(crate) async fn execute(args: DrillArgs) -> Result<CliExitCode, CliError> {
     };
 
     let drill_run = DrillRunArgs {
-        prompt: args.prompt,
+        prompt,
+        // Already resolved above; do not let `run::execute` re-read stdin/file.
+        prompt_file: None,
         resume_from: args.resume_from,
         run_id: run_id_override.or(args.run_id),
         skip: args.skip,
@@ -183,6 +192,7 @@ mod tests {
     fn default_args() -> DrillArgs {
         DrillArgs {
             prompt: None,
+            prompt_file: None,
             resume_from: None,
             run_id: None,
             skip: vec![],

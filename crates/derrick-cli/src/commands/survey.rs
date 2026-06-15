@@ -1,6 +1,7 @@
 //! `derrick survey ...` subcommands: query the native code-graph index
 //! (DESIGN.md §9.B.8, D54/D55).
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use derrick_survey::{
@@ -10,7 +11,7 @@ use derrick_survey::{
 
 use crate::commands::{
     SurveyArgs, SurveyBuildArgs, SurveyCommand, SurveyImpactArgs, SurveyQueryArgs, SurveyServeArgs,
-    SurveyStatusArgs,
+    SurveySetupArgs, SurveyStatusArgs,
 };
 use crate::exit_code::CliExitCode;
 use crate::output::OutputFormat;
@@ -18,6 +19,10 @@ use crate::{create_dir_all, current_repo_root, message};
 
 pub(crate) async fn execute(args: SurveyArgs) -> Result<CliExitCode, crate::CliError> {
     let repo_root = current_repo_root()?;
+    // Setup doesn't need the index open — handle it before open_survey.
+    if let SurveyCommand::Setup(setup) = args.command {
+        return run_setup(&repo_root, setup);
+    }
     let survey = open_survey(&repo_root).await?;
     match args.command {
         SurveyCommand::Build(build) => run_build(&survey, build).await,
@@ -26,6 +31,7 @@ pub(crate) async fn execute(args: SurveyArgs) -> Result<CliExitCode, crate::CliE
         SurveyCommand::Impact(impact) => run_impact(&survey, impact).await,
         SurveyCommand::Status(status) => run_status(&survey, status).await,
         SurveyCommand::Serve(serve) => run_serve(survey, serve).await,
+        SurveyCommand::Setup(_) => unreachable!("handled above"),
     }
 }
 
@@ -33,6 +39,29 @@ async fn run_serve(survey: Survey, _args: SurveyServeArgs) -> Result<CliExitCode
     derrick_survey::serve_stdio(survey)
         .await
         .map_err(|error| message(format!("survey serve: {error}")))?;
+    Ok(CliExitCode::Success)
+}
+
+fn run_setup(repo_root: &Path, _args: SurveySetupArgs) -> Result<CliExitCode, crate::CliError> {
+    // 1. Create .derrick/ and write a .gitignore that excludes the index DB.
+    let derrick_dir = repo_root.join(".derrick");
+    create_dir_all(&derrick_dir)?;
+    let gitignore_path = derrick_dir.join(".gitignore");
+    if !gitignore_path.exists() {
+        fs::write(&gitignore_path, "index.db*\n")
+            .map_err(|source| message(format!("write {}: {source}", gitignore_path.display())))?;
+        println!("wrote  {}", gitignore_path.display());
+    }
+
+    // 2. Merge derrick-survey into .mcp.json (idempotent).
+    derrick_adopt::write_mcp_json(repo_root)
+        .map_err(|error| message(format!("write .mcp.json: {error}")))?;
+    println!("wrote  {}", repo_root.join(".mcp.json").display());
+
+    println!();
+    println!("Survey MCP server registered. Restart your editor / agent host");
+    println!("to pick up the new server, then run:");
+    println!("  derrick survey build");
     Ok(CliExitCode::Success)
 }
 

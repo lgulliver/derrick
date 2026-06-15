@@ -7,7 +7,7 @@ use inquire::validator::Validation;
 use inquire::{Confirm, MultiSelect, Select, Text};
 
 use crate::commands::init::{
-    available_model_ids, recommended_role_bindings, validate_prefix, RoleBindings,
+    RoleBindings, available_model_ids, recommended_role_bindings, validate_prefix,
 };
 
 // ─── terminal style ──────────────────────────────────────────────────────────
@@ -101,16 +101,24 @@ fn print_splash() {
     println!();
     if styled {
         println!("  \x1b[1m╭─────────────────────────────────────────────────────────────╮\x1b[0m");
-        println!("  \x1b[1m│\x1b[0m                                                             \x1b[1m│\x1b[0m");
-        println!("  \x1b[1m│   ██████╗ ███████╗██████╗ ██████╗ ██╗ ██████╗██╗  ██╗      │\x1b[0m");
-        println!("  \x1b[1m│   ██╔══██╗██╔════╝██╔══██╗██╔══██╗██║██╔════╝██║ ██╔╝      │\x1b[0m");
-        println!("  \x1b[1m│   ██║  ██║█████╗  ██████╔╝██████╔╝██║██║     █████╔╝       │\x1b[0m");
-        println!("  \x1b[1m│   ██║  ██║██╔══╝  ██╔══██╗██╔══██╗██║██║     ██╔═██╗       │\x1b[0m");
-        println!("  \x1b[1m│   ██████╔╝███████╗██║  ██║██║  ██║██║╚██████╗██║  ██╗      │\x1b[0m");
-        println!("  \x1b[1m│   ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝╚═╝  ╚═╝     │\x1b[0m");
-        println!("  \x1b[1m│\x1b[0m                                                             \x1b[1m│\x1b[0m");
-        println!("  \x1b[1m│\x1b[0m  \x1b[1msetup wizard\x1b[0m  \x1b[2m·  the load-bearing tower over an oil well\x1b[0m    \x1b[1m│\x1b[0m");
-        println!("  \x1b[1m│\x1b[0m                                                             \x1b[1m│\x1b[0m");
+        println!(
+            "  \x1b[1m│\x1b[0m                                                             \x1b[1m│\x1b[0m"
+        );
+        println!("  \x1b[1m│   ██████╗ ███████╗██████╗ ██████╗ ██╗ ██████╗██╗  ██╗       │\x1b[0m");
+        println!("  \x1b[1m│   ██╔══██╗██╔════╝██╔══██╗██╔══██╗██║██╔════╝██║ ██╔╝       │\x1b[0m");
+        println!("  \x1b[1m│   ██║  ██║█████╗  ██████╔╝██████╔╝██║██║     █████╔╝        │\x1b[0m");
+        println!("  \x1b[1m│   ██║  ██║██╔══╝  ██╔══██╗██╔══██╗██║██║     ██╔═██╗        │\x1b[0m");
+        println!("  \x1b[1m│   ██████╔╝███████╗██║  ██║██║  ██║██║╚██████╗██║  ██╗       │\x1b[0m");
+        println!("  \x1b[1m│   ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝╚═╝  ╚═╝       │\x1b[0m");
+        println!(
+            "  \x1b[1m│\x1b[0m                                                             \x1b[1m│\x1b[0m"
+        );
+        println!(
+            "  \x1b[1m│\x1b[0m  \x1b[1msetup wizard\x1b[0m  \x1b[2m·  the load-bearing tower over an oil well\x1b[0m   \x1b[1m│\x1b[0m"
+        );
+        println!(
+            "  \x1b[1m│\x1b[0m                                                             \x1b[1m│\x1b[0m"
+        );
         println!("  \x1b[1m╰─────────────────────────────────────────────────────────────╯\x1b[0m");
     } else {
         println!("  DERRICK  setup wizard");
@@ -577,11 +585,7 @@ fn constitution_label(mode: ConstitutionMode) -> &'static str {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value {
-        "yes"
-    } else {
-        "no"
-    }
+    if value { "yes" } else { "no" }
 }
 
 // ─── constitution seeding ─────────────────────────────────────────────────────

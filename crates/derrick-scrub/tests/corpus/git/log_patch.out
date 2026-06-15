@@ -1,0 +1,17 @@
+commit abc1234def5678abc1234def5678abc1234def56
+Author: Alice <alice@example.com>
+Date:   Mon Jan 1 12:00:00 2024 +0000
+
+    Update remote handling docs
+
+diff --git a/src/transport.rs b/src/transport.rs
+index 0000001..0000002 100644
+--- a/src/transport.rs
++++ b/src/transport.rs
+@@ -1,4 +1,5 @@
+ fn connect() {
+-    // remote: old comment
++    // remote: new comment
++    // remote: Counting objects is parsed here
+     fetch();
+ }

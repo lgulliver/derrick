@@ -58,7 +58,7 @@ Every byte across a model boundary earns its place.
 | **Scrub** (`derrick-scrub`) | Strips CLI noise (progress bars, spinners, ANSI codes) before tool output reaches the model. Records `bytes_raw`/`bytes_saved` per step. | **88% on `git fetch`**, 94% on `cargo build` |
 | **Roughneck** (`derrick-roughneck`) | LLM output compression via prompt injection — model emits a compressed form of its own output before handoff. Three levels: lite (~30%), full (~65%, default), ultra (~75%). | **~65% at Full** on typical model output |
 | **Caveman** | Compresses verbose prose in inter-step handoffs (lite / full / ultra) | **62% at Full** on typical AI-generated text |
-| **Model tiering** | Routes cheap steps to lighter models; expensive reasoning to frontier models | Configurable per pipeline step |
+| **Model tiering** | The foreman picks the model per ticket (light/standard/heavy) by estimated complexity, within the host you chose; pin a model to opt out | Per-ticket adaptive selection (`auto`) |
 | **Prompt caching** | Anthropic cache headers on repeated context | Up to 90% on repeated prefixes |
 
 Survey is wired automatically via MCP by `derrick init` — agents query it instead of fanning out across reads without any extra setup. Scrub and caveman fire automatically at every model boundary via Claude Code / Codex hooks written by `derrick init`. Roughneck fires at every model step via prompt injection; configure via `tools.roughneck` in `derrick.yaml`.
@@ -246,40 +246,43 @@ derrick gain
 | `derrick-memory` | Tiered retrieval, tag index, lesson curation |
 | `derrick-tui` | ratatui dashboard (6 tabs) |
 | `derrick-observe` | TUI wiring, stack refresh, event loop |
-| `derrick-stack` | PR stacking (native / Graphite / git-spice) |
-| `derrick-models` | Model trait + provider implementations (anthropic, openai-cli, opencode, shell) |
+| `derrick-stack` | PR stacking — native engine (plain git + gh); `StackBackend` trait as extension seam |
+| `derrick-models` | Model trait + host-delegated providers (one per host CLI) + shell escape hatch |
 | `derrick-adopt` | Brownfield adoption — detects AGENTS.md, writes hooks + survey MCP wiring |
 | `derrick-substrate` | Substrate trait + ticket/batch/hand state types |
 | `derrick-substrate-native` | SQLite-backed substrate + foreman loop |
 | `derrick-claude` | Claude substrate |
 | `derrick-copilot` | Copilot substrate |
-| `derrick-tools` | Host CLI adapters (claude, codex, copilot, opencode) |
+| `derrick-tools` | Host CLI adapters (claude, codex, copilot, opencode, aider) + model catalogue |
 
 ---
 
-## Supported model providers
+## Hosts and models
 
-| Provider key | Backend | Auth |
+Derrick routes **all** model inference through one of five host CLIs. It holds no API keys of its own — each host manages its own auth (no BYOK):
+
+| Host | CLI | Models |
 |---|---|---|
-| `anthropic` | Anthropic Messages API (streaming SSE) | `ANTHROPIC_API_KEY` env (or AuthStore override) |
-| `openai-cli` | `codex exec` CLI (default) or OpenAI Chat API when `OPENAI_API_KEY` is set | CLI: host-delegated; API: `OPENAI_API_KEY` env (or `openai-cli` AuthStore override) |
-| `opencode` | `opencode run` CLI | Host-delegated (opencode manages its own auth) |
-| `shell` | Any shell command via `cli:` field in `derrick.yaml` | N/A (caller-managed) |
+| `claude` | Claude Code (`claude`) | Anthropic (`claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`) |
+| `codex` | Codex (`codex`) | OpenAI (`gpt-5.5`, `gpt-5.4`, …) |
+| `copilot` | GitHub Copilot (`copilot`) | multi-model |
+| `opencode` | OpenCode (`opencode`) | multi-provider (`provider/model` ids) |
+| `aider` | Aider (`aider`) | multi-provider (`provider/model` ids) |
 
-**Hosts** (for pipeline steps that invoke a CLI tool to run a slash command):
-`claude` · `codex` · `copilot` · `opencode`
+A `shell` escape hatch remains for an arbitrary subprocess model. Model ids are validated against a curated, current catalogue by **`derrick models check`** — an unknown id warns but still passes through to the CLI; a missing host CLI fails.
 
-Configured per pipeline step in `derrick.yaml`. Bring your own model on any step.
+You pick the **tool** (host) per role; the **foreman picks the model per ticket** by size/complexity within that host, unless you pin one:
 
 ```yaml
 models:
-  claude-opus:   { provider: anthropic,  model: "claude-opus-4-7" }
-  codex-gpt5:    { provider: openai-cli, model: "gpt-5" }           # uses codex CLI by default
-  opencode-sonnet: { provider: opencode, model: "claude-sonnet-4-5" }
-  my-local:      { provider: shell,      cli: "my-model-wrapper --model foo", model: "foo" }
+  claude-opus:   { provider: claude,  model: "claude-opus-4-8" }
+  claude-sonnet: { provider: claude,  model: "claude-sonnet-4-6" }
+  claude-haiku:  { provider: claude,  model: "claude-haiku-4-5" }
+  codex-gpt5:    { provider: codex,   model: "gpt-5.5" }
+  copilot:       { provider: copilot, model: "auto" }   # foreman selects per ticket
 ```
 
-`openai-cli` falls back to the direct OpenAI API when `OPENAI_API_KEY` is present and no `cli:` override is set, so you get token-count telemetry without needing the codex binary installed.
+`auto` (or `auto:light` / `auto:heavy`) lets the foreman pick the model by the ticket's estimated complexity within the host's tier list (light/standard/heavy); a concrete id always wins. Legacy configs naming the old `anthropic` / `openai-cli` / `copilot-cli` providers still load (aliased to their host).
 
 ### Crew mode role bindings
 
@@ -294,17 +297,17 @@ roles:
   proposer: claude-opus
   drafter: claude-sonnet
   reviewer: codex-gpt5
-  executor: copilot
-  summariser: claude-sonnet
+  executor: copilot      # its model is `auto` — foreman picks per ticket
+  summariser: claude-haiku
 ```
 
-You can override any role binding in `roles`.
+You can override any role binding in `roles`, and pin a role's model to a concrete id (instead of `auto`) to take selection out of the foreman's hands.
 
 ---
 
 ## Status
 
-**Active development.** Architecture and 57 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 73 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -331,7 +334,7 @@ What's landed and tested:
 - ✅ `derrick survey` — native code-graph index (SQLite + FTS5) over Rust/TS/JS/Python/Go/C#/Java/Kotlin; MCP server (`survey serve --mcp`) so agents query symbols/callers/impact instead of fanning out across reads; debounced watcher keeps it fresh
 - ✅ `derrick init` — brownfield-safe, VS Code + JetBrains opt-in, Codex instructions
 - ✅ `derrick doctor` — live squash-merge policy check via GitHub API
-- ✅ PR stacking: `stack show / restack / submit`
+- ✅ PR stacking: `stack show / restack / submit` — native engine (plain git + gh, D72); topological cascade restack with per-subtree conflict isolation (D73); whole-stack submit with base retargeting; stack navigation table maintained in each PR body
 - ✅ Shell completions (bash / zsh / fish / elvish / powershell)
 - ✅ `scripts/install.sh` — curl-able, platform-detecting (linux-x86\_64, macos-arm64, macos-x86\_64)
 - ✅ GitHub release workflow — builds on `v*` tag push, attaches binaries + checksums
@@ -339,7 +342,7 @@ What's landed and tested:
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 - 🔜 Homebrew tap (v1.1)
 
-650 tests passing across 19 crates.
+885 tests passing across 20 crates.
 
 ## Coverage
 
@@ -355,7 +358,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 57 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 73 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 - [docs/survey.md](./docs/survey.md) — derrick survey deep-dive: how it works, setup, CLI reference, MCP tools, token accounting

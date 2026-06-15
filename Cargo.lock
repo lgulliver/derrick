@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "derrick-adopt"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "chrono",
  "derrick-config",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "derrick-assay"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "chrono",
  "derrick-adopt",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "derrick-caveman"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "regex",
  "serde",
@@ -587,15 +587,17 @@ dependencies = [
 
 [[package]]
 name = "derrick-claude"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "chrono",
  "derrick-config",
+ "derrick-memory",
  "derrick-roughneck",
  "derrick-scrub",
  "derrick-substrate",
  "derrick-substrate-native",
+ "derrick-tools",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -606,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "derrick-cli"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -621,6 +623,8 @@ dependencies = [
  "derrick-config",
  "derrick-copilot",
  "derrick-flow",
+ "derrick-hand",
+ "derrick-memory",
  "derrick-models",
  "derrick-observe",
  "derrick-scrub",
@@ -642,32 +646,36 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "which",
 ]
 
 [[package]]
 name = "derrick-config"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "humantime-serde",
  "serde",
  "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
 name = "derrick-copilot"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "chrono",
  "derrick-config",
+ "derrick-memory",
  "derrick-roughneck",
  "derrick-scrub",
  "derrick-stack",
  "derrick-substrate",
  "derrick-substrate-native",
+ "derrick-tools",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -679,13 +687,14 @@ dependencies = [
 
 [[package]]
 name = "derrick-flow"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "chrono",
  "derrick-adopt",
  "derrick-assay",
  "derrick-config",
+ "derrick-memory",
  "derrick-models",
  "derrick-roughneck",
  "derrick-scrub",
@@ -707,8 +716,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "derrick-hand"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "derrick-config",
+ "derrick-memory",
+ "derrick-roughneck",
+ "derrick-scrub",
+ "derrick-substrate",
+ "derrick-substrate-native",
+ "derrick-tools",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "derrick-memory"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "chrono",
  "derrick-config",
@@ -722,12 +749,12 @@ dependencies = [
 
 [[package]]
 name = "derrick-models"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "derrick-config",
+ "derrick-tools",
  "futures",
- "reqwest",
  "serde",
  "serde_json",
  "shell-words",
@@ -739,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "derrick-observe"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -758,23 +785,24 @@ dependencies = [
 
 [[package]]
 name = "derrick-roughneck"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "derrick-scrub"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "regex",
 ]
 
 [[package]]
 name = "derrick-stack"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "chrono",
  "derrick-config",
  "derrick-substrate",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -782,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "derrick-substrate"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -797,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "derrick-substrate-native"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -816,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "derrick-survey"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -846,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "derrick-tools"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "serde",
@@ -860,13 +888,15 @@ dependencies = [
 
 [[package]]
 name = "derrick-tui"
-version = "0.0.0"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
  "crossterm",
+ "derrick-config",
  "derrick-substrate",
+ "derrick-substrate-native",
  "futures",
  "notify",
  "ratatui",
@@ -2412,7 +2442,6 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
- "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -2432,14 +2461,12 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
- "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
  "web-sys",
  "webpki-roots",
 ]
@@ -3586,19 +3613,6 @@ dependencies = [
  "indexmap",
  "wasm-encoder",
  "wasmparser",
-]
-
-[[package]]
-name = "wasm-streams"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

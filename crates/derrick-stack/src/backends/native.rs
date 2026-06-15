@@ -171,6 +171,86 @@ impl StackBackend for NativeStackBackend {
         }
         Ok(())
     }
+
+    async fn retarget_pr(
+        &self,
+        branch: &str,
+        new_base: &str,
+        repo_root: &Path,
+    ) -> Result<(), StackError> {
+        let output = Command::new("gh")
+            .arg("pr")
+            .arg("edit")
+            .arg(branch)
+            .arg("--base")
+            .arg(new_base)
+            .current_dir(repo_root)
+            .stdin(Stdio::null())
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(StackError::Gh {
+                message: format!(
+                    "gh pr edit --base failed for {branch} -> {new_base}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        info!(branch = %branch, base = %new_base, "retargeted pr base");
+        Ok(())
+    }
+
+    async fn set_pr_body(
+        &self,
+        branch: &str,
+        body: &str,
+        repo_root: &Path,
+    ) -> Result<(), StackError> {
+        let output = Command::new("gh")
+            .arg("pr")
+            .arg("edit")
+            .arg(branch)
+            .arg("--body")
+            .arg(body)
+            .current_dir(repo_root)
+            .stdin(Stdio::null())
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(StackError::Gh {
+                message: format!(
+                    "gh pr edit --body failed for {branch}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        debug!(branch = %branch, "updated pr body");
+        Ok(())
+    }
+
+    async fn pr_body(&self, branch: &str, repo_root: &Path) -> Result<Option<String>, StackError> {
+        let output = Command::new("gh")
+            .arg("pr")
+            .arg("view")
+            .arg(branch)
+            .arg("--json")
+            .arg("body")
+            .arg("-q")
+            .arg(".body")
+            .current_dir(repo_root)
+            .stdin(Stdio::null())
+            .output()
+            .await?;
+        if !output.status.success() {
+            // No PR for this branch: gh exits non-zero. Treat as absent.
+            return Ok(None);
+        }
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout)
+                .trim_end()
+                .to_owned(),
+        ))
+    }
 }
 
 async fn git_rev_parse(repo_root: &Path, branch: &str) -> Result<String, StackError> {

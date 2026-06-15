@@ -469,7 +469,7 @@ fn status_json_round_trips() -> TestResult {
 fn doctor_passes_after_successful_init() -> TestResult {
     let dir = repo()?;
     greenfield(dir.path())?.success();
-    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+    let path = mock_path(dir.path(), &["git", "claude", "codex", "copilot"])?;
 
     let output = derrick()?
         .current_dir(dir.path())
@@ -489,7 +489,7 @@ fn doctor_passes_after_successful_init() -> TestResult {
 fn doctor_reports_claude_hooks_as_installed_when_markers_exist() -> TestResult {
     let dir = repo()?;
     adopted_init(dir.path())?.success();
-    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+    let path = mock_path(dir.path(), &["git", "claude", "codex", "copilot"])?;
 
     let output = derrick()?
         .current_dir(dir.path())
@@ -511,7 +511,7 @@ fn doctor_warns_when_claude_hook_markers_are_missing() -> TestResult {
     let dir = repo()?;
     adopted_init(dir.path())?.success();
     fs::write(dir.path().join(".claude/settings.json"), "{\"hooks\":{}}")?;
-    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+    let path = mock_path(dir.path(), &["git", "claude", "codex", "copilot"])?;
 
     let output = derrick()?
         .current_dir(dir.path())
@@ -537,7 +537,7 @@ fn doctor_warns_when_claude_settings_json_is_invalid() -> TestResult {
     let dir = repo()?;
     adopted_init(dir.path())?.success();
     fs::write(dir.path().join(".claude/settings.json"), "{")?;
-    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+    let path = mock_path(dir.path(), &["git", "claude", "codex", "copilot"])?;
 
     let output = derrick()?
         .current_dir(dir.path())
@@ -559,7 +559,7 @@ fn doctor_warns_when_claude_settings_json_is_invalid() -> TestResult {
 fn doctor_json_round_trips() -> TestResult {
     let dir = repo()?;
     greenfield(dir.path())?.success();
-    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+    let path = mock_path(dir.path(), &["git", "claude", "codex", "copilot"])?;
 
     let output = derrick()?
         .current_dir(dir.path())
@@ -619,7 +619,11 @@ fn doctor_fails_when_yaml_invalid() -> TestResult {
 }
 
 #[test]
-fn doctor_fails_for_reachable_env_provider() -> TestResult {
+fn doctor_does_not_require_api_keys_post_d64() -> TestResult {
+    // Post-D65 (host-CLI-only routing) doctor never checks for API keys: a
+    // legacy `anthropic` provider is remapped to the `claude` host, whose
+    // binary presence is the only requirement. With `claude` on PATH and no
+    // ANTHROPIC_API_KEY set, doctor passes and never mentions the env var.
     let dir = repo()?;
     fs::write(
         dir.path().join("derrick.yaml"),
@@ -631,7 +635,7 @@ site:
 models:
   claude-sonnet:
     provider: anthropic
-    model: claude-sonnet
+    model: claude-sonnet-4-6
 roles:
   drafter: claude-sonnet
 tools:
@@ -675,12 +679,16 @@ state:
         .env_remove("ANTHROPIC_API_KEY")
         .arg("doctor")
         .assert()
-        .code(1)
+        .code(0)
         .get_output()
         .stdout
         .clone();
 
-    assert_contains(&output, "ANTHROPIC_API_KEY")?;
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        !text.contains("ANTHROPIC_API_KEY"),
+        "doctor must not mention API keys post-D65: {text}"
+    );
     Ok(())
 }
 
@@ -705,7 +713,7 @@ fn doctor_fails_when_substrate_corrupt() -> TestResult {
     let dir = repo()?;
     greenfield(dir.path())?.success();
     fs::write(dir.path().join(".derrick/derrick.db"), "not sqlite")?;
-    let path = mock_path(dir.path(), &["git", "claude", "codex"])?;
+    let path = mock_path(dir.path(), &["git", "claude", "codex", "copilot"])?;
 
     let output = derrick()?
         .current_dir(dir.path())
@@ -767,16 +775,28 @@ fn doctor_exit_code_equals_fail_count() -> TestResult {
     greenfield(dir.path())?.success();
     let path = mock_path(dir.path(), &["git"])?;
 
+    // With only `git` on PATH the host CLIs are all absent, so doctor fails the
+    // two pipeline-host binary checks (claude, codex) plus the per-model host
+    // checks (D65 models-check core). The executor role binds the `copilot`
+    // model whose id is now `auto` (D67): `auto` is foreman-selected per ticket,
+    // but the host CLI must still be installed, so the missing `copilot` binary
+    // FAILs before the `auto` short-circuit — the host check runs first. That
+    // leaves seven failures total, and the exit code equals that count.
     let output = derrick()?
         .current_dir(dir.path())
         .env("PATH", path)
         .arg("doctor")
         .assert()
-        .code(2)
+        .code(7)
         .get_output()
         .stdout
         .clone();
 
+    let fail_lines = String::from_utf8_lossy(&output)
+        .lines()
+        .filter(|line| line.starts_with("fail"))
+        .count();
+    assert_eq!(fail_lines, 7, "exit code must equal the number of failures");
     assert_contains(&output, "claude")?;
     assert_contains(&output, "codex")?;
     Ok(())
@@ -813,10 +833,41 @@ fn run_drill_smoke_writes_real_artifacts() -> TestResult {
     assert!(dir.path().join("specs/001-hello/plan.md").exists());
     assert!(dir.path().join("specs/001-hello/tasks.md").exists());
     assert!(dir.path().join("specs/001-hello/assay/verdict.md").exists());
-    assert!(dir
-        .path()
-        .join(".derrick/runs/smoke/manifest.json")
-        .exists());
+    assert!(
+        dir.path()
+            .join(".derrick/runs/smoke/manifest.json")
+            .exists()
+    );
+    Ok(())
+}
+
+#[test]
+fn add_reads_prompt_from_stdin() -> TestResult {
+    let dir = repo()?;
+    greenfield(dir.path())?.success();
+    fs::create_dir_all(dir.path().join(".specify/memory"))?;
+    fs::write(
+        dir.path().join(".specify/memory/constitution.md"),
+        "constitution",
+    )?;
+    let path = mock_flow_path(dir.path())?;
+
+    // `derrick add -` reads the feature prompt from stdin, sidestepping
+    // shell-escaping for multi-line briefs.
+    derrick()?
+        .current_dir(dir.path())
+        .env("PATH", path)
+        .args(["add", "-", "--run", "stdin-smoke"])
+        .write_stdin("hello\n")
+        .assert()
+        .success();
+
+    assert!(dir.path().join("specs/001-hello/spec.md").exists());
+    assert!(
+        dir.path()
+            .join(".derrick/runs/stdin-smoke/manifest.json")
+            .exists()
+    );
     Ok(())
 }
 

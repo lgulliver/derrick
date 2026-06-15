@@ -10,6 +10,7 @@ members = [
     "crates/derrick-caveman",
     "crates/derrick-copilot",
     "crates/derrick-claude",
+    "crates/derrick-hand",
     "crates/derrick-models",
     "crates/derrick-adopt",
     "crates/derrick-substrate",
@@ -23,8 +24,8 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.0"
-edition = "2021"
+version = "0.1.0-alpha.3"
+edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/lgulliver/derrick"

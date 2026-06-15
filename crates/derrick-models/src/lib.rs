@@ -166,10 +166,20 @@ pub fn builtin_cost_hint(model_name: &str) -> Option<CostHint> {
             in_per_mtok: 3.0,
             out_per_mtok: 15.0,
         })
-    } else if n.contains("claude-haiku-3") {
+    } else if n.contains("claude-haiku-4") || n.contains("claude-haiku-3") {
         Some(CostHint {
             in_per_mtok: 0.8,
             out_per_mtok: 4.0,
+        })
+    } else if n.contains("gpt-5") && n.contains("mini") {
+        Some(CostHint {
+            in_per_mtok: 0.25,
+            out_per_mtok: 2.0,
+        })
+    } else if n.contains("gpt-5") {
+        Some(CostHint {
+            in_per_mtok: 1.25,
+            out_per_mtok: 10.0,
         })
     } else if n.contains("gpt-4o-mini") {
         Some(CostHint {
@@ -196,16 +206,20 @@ pub fn builtin_cost_hint(model_name: &str) -> Option<CostHint> {
     }
 }
 
-/// Credentials lookup backed by environment variables and test overrides.
+/// Environment passthrough store for host-delegated providers (D65).
+///
+/// Post-D65 derrick holds no API keys. This store exposes the process
+/// environment so host adapters can forward vars such as `GH_TOKEN` and proxy
+/// settings to the child CLI, which manages its own auth. The `overrides` map
+/// supports test injection.
 #[derive(Clone, Debug, Default)]
 pub struct AuthStore {
     env: HashMap<String, Secret>,
     overrides: HashMap<(String, String), Secret>,
-    required: Vec<(String, String)>,
 }
 
 impl AuthStore {
-    /// Reads credentials from process environment variables.
+    /// Reads the process environment.
     pub fn from_env() -> Self {
         let env = env::vars()
             .map(|(key, value)| (key, Secret::new(value)))
@@ -214,7 +228,6 @@ impl AuthStore {
         Self {
             env,
             overrides: HashMap::new(),
-            required: Vec::new(),
         }
     }
 
@@ -223,8 +236,18 @@ impl AuthStore {
         Self {
             env: HashMap::new(),
             overrides: map,
-            required: Vec::new(),
         }
+    }
+
+    /// Returns the process environment as a plain map for host passthrough.
+    ///
+    /// Host-delegated providers forward these to the child process so host
+    /// CLIs can pick up vars such as `GH_TOKEN` and proxy settings (D65).
+    pub fn env_map(&self) -> HashMap<String, String> {
+        self.env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.expose().to_owned()))
+            .collect()
     }
 
     /// Returns a secret by provider and env-var key.
@@ -232,21 +255,6 @@ impl AuthStore {
         self.overrides
             .get(&(provider.to_owned(), key.to_owned()))
             .or_else(|| self.env.get(key))
-    }
-
-    /// Returns required non-host-delegated credentials that are absent.
-    pub fn missing_required(&self) -> Vec<(String, String)> {
-        self.required
-            .iter()
-            .filter(|(provider, key)| self.get(provider, key).is_none())
-            .cloned()
-            .collect()
-    }
-
-    /// Declares a required env-var credential for a provider.
-    pub fn require(&mut self, provider: &str, env_var: &str) {
-        self.required
-            .push((provider.to_owned(), env_var.to_owned()));
     }
 }
 
@@ -285,14 +293,6 @@ pub enum ModelError {
     /// The requested provider is not registered.
     #[error("no such provider: {0}")]
     UnknownProvider(String),
-    /// A provider credential is required but absent.
-    #[error("missing credential for provider {provider}: env var {env_var} not set")]
-    MissingCredential {
-        /// Provider that requires the credential.
-        provider: String,
-        /// Missing environment variable name.
-        env_var: String,
-    },
     /// A provider call exceeded its configured timeout.
     #[error("timeout after {seconds}s calling {provider}")]
     Timeout {
@@ -330,7 +330,6 @@ impl ModelError {
             Self::UnknownModel(_)
             | Self::UnknownRole(_)
             | Self::UnknownProvider(_)
-            | Self::MissingCredential { .. }
             | Self::InvalidConfig { .. } => false,
         }
     }
@@ -346,13 +345,30 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Returns a registry pre-populated with T006 providers.
+    /// Returns a registry pre-populated with the default providers.
+    ///
+    /// Per D65, inference is host-delegated: each of the five host CLIs is
+    /// registered as a provider whose name equals the host name. The `shell`
+    /// provider survives as a bespoke-envelope escape hatch. There is no
+    /// direct-API path.
     pub fn with_defaults() -> Self {
         let mut registry = Self::default();
         registry.register("shell", providers::shell::build);
-        registry.register("anthropic", providers::anthropic::build);
-        registry.register("openai-cli", providers::openai_cli::build);
-        registry.register("opencode", providers::opencode::build);
+        register_host(&mut registry, "claude", || {
+            Arc::new(derrick_tools::ClaudeHost::new())
+        });
+        register_host(&mut registry, "codex", || {
+            Arc::new(derrick_tools::CodexHost::new())
+        });
+        register_host(&mut registry, "copilot", || {
+            Arc::new(derrick_tools::CopilotHost::new())
+        });
+        register_host(&mut registry, "opencode", || {
+            Arc::new(derrick_tools::OpencodeHost::new())
+        });
+        register_host(&mut registry, "aider", || {
+            Arc::new(derrick_tools::AiderHost::new())
+        });
         registry
     }
 
@@ -379,6 +395,21 @@ impl ProviderRegistry {
 
         constructor(model_def, auth)
     }
+}
+
+/// Registers a host-delegated provider for `host` in the registry.
+///
+/// `make_adapter` constructs a fresh `Arc<dyn HostAdapter>` per built model
+/// (the adapter's `run` takes `&self`; the registry is not `Clone` and owns no
+/// adapter references). The provider name equals the host name.
+fn register_host(
+    registry: &mut ProviderRegistry,
+    host: &'static str,
+    make_adapter: fn() -> Arc<dyn derrick_tools::HostAdapter>,
+) {
+    registry.register(host, move |model_def, auth| {
+        providers::host_delegated::build_for_host(host, make_adapter(), model_def, auth)
+    });
 }
 
 /// Resolves a role name to a ready-to-call model.

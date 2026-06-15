@@ -2,7 +2,7 @@
 
 use derrick_substrate::{NewTicket, Substrate, TicketId};
 use derrick_substrate_native::{NativeConfig, NativeSubstrate};
-use derrick_tui::DataModel;
+use derrick_tui::{DataModel, StackLoadResult};
 use tempfile::TempDir;
 
 fn site() -> derrick_config::Site {
@@ -56,7 +56,7 @@ async fn data_model_counts_reflect_substrate() {
         seed_ticket(&substrate, id).await;
     }
 
-    let data = match DataModel::refresh(&substrate, &[], &[], None).await {
+    let data = match DataModel::refresh(&substrate, &[], StackLoadResult::Loaded, &[], None).await {
         Ok(d) => d,
         Err(e) => unreachable!("refresh: {e}"),
     };

@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use crate::process::{is_available, run_host, CommandSpec};
+use crate::catalogue;
+use crate::process::{CommandSpec, is_available, run_host};
 use crate::{HostAdapter, HostError, HostRequest, HostResponse};
 
 const NAME: &str = "claude";
@@ -93,7 +94,7 @@ impl HostAdapter for ClaudeHost {
         ];
         if let Some(ref model) = request.model {
             args.push(OsString::from("--model"));
-            args.push(OsString::from(model.as_str()));
+            args.push(OsString::from(catalogue::normalize(self.name(), model)));
         }
         if request.headless {
             // Suppress interactive permission prompts when running without a

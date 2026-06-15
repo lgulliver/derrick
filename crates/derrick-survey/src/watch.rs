@@ -3,8 +3,8 @@
 //! short quiet period. The `dirty` flag lets the MCP layer surface a staleness
 //! banner cheaply without re-hashing the tree on every query.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use notify::{RecursiveMode, Watcher};

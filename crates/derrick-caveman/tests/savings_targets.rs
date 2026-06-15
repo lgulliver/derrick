@@ -1,4 +1,4 @@
-use derrick_caveman::{compress, Intensity};
+use derrick_caveman::{Intensity, compress};
 
 #[test]
 fn caveman_full_hits_60_pct_on_verbose_prose() {

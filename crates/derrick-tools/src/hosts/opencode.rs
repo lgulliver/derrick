@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use crate::process::{is_available, run_host, CommandSpec};
+use crate::catalogue;
+use crate::process::{CommandSpec, is_available, run_host};
 use crate::{HostAdapter, HostError, HostRequest, HostResponse};
 
 const NAME: &str = "opencode";
@@ -19,8 +20,9 @@ const NAME: &str = "opencode";
 /// working directory, which keeps the host's path resolution aligned with the
 /// derrick worktree. `--dangerously-skip-permissions` suppresses interactive
 /// tool-permission prompts in headless pipeline runs. `--model` is forwarded
-/// from [`HostRequest::model`] when set, allowing pipeline steps to override
-/// the opencode default (e.g. `anthropic/claude-sonnet-4-5`).
+/// from [`HostRequest::model`] when set, after catalogue normalisation; opencode
+/// expects a `provider/model` id (e.g. `anthropic/claude-sonnet-4-6`), which the
+/// catalogue passes through verbatim.
 #[derive(Clone, Debug)]
 pub struct OpencodeHost {
     binary: PathBuf,
@@ -67,7 +69,7 @@ impl HostAdapter for OpencodeHost {
         ];
         if let Some(ref model) = request.model {
             args.push(OsString::from("--model"));
-            args.push(OsString::from(model.as_str()));
+            args.push(OsString::from(catalogue::normalize(self.name(), model)));
         }
         if request.headless {
             args.push(OsString::from("--dangerously-skip-permissions"));

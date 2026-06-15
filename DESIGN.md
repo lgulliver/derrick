@@ -4,28 +4,32 @@
 > that lifts every length of pipe in and out of the hole. Without it, the
 > rig is a hole in the ground.
 
-Derrick is a unified layer over **speckit**, **courtroom**, and **gastown**.
-One install, one config, one command (`/drill`). It works in any repo,
-for any user, without them needing to know how the underlying tools talk to
-each other.
+**Derrick** is a Rust CLI that turns a single command into a full dark-factory
+feature pipeline — spec, adversarial review, tickets, dispatch, PR stacking —
+without asking you to wire each underlying tool by hand. One install, one
+config (`derrick.yaml`), one primary command (`/drill`).
+
+> *Lineage note: derrick's pipeline pattern descends from the
+> speckit → courtroom → gastown toolchain it replaces. courtroom is the
+> historical inspiration for the assay; gastown is the historical inspiration
+> for the execution substrate. Neither is a runtime dependency.*
 
 ---
 
 ## 1. Problem
 
-Today, getting the speckit → courtroom → gastown flow running in a new repo
-means:
+Getting a coherent spec → adversarial-review → task → dispatch → PR-stack
+flow running in a new repo previously meant:
 
-1. Install `claude`, `codex`, `gt`, `bd`, `specify` CLIs separately.
-2. Install the `courtroom` Claude Code plugin.
-3. Run `specify init` and tune `.specify/` for the project.
-4. Author a `rigs.json` entry and bootstrap the rig with `gt`.
-5. Wire `tasks-to-beads.sh` as a SpecKit post-tasks hook.
-6. Author a CLAUDE.md and AGENTS.md that explain the flow.
-7. Document the runbook, the dolt-server caveats, the mayor session etc.
+1. Install `claude`, `codex`, and one or more stacking CLIs separately.
+2. Install a courtroom-style adversarial-review plugin.
+3. Wire a speckit constitution and per-project config.
+4. Author bespoke CLAUDE.md / AGENTS.md that explain the glue.
+5. Build your own execution substrate (ticket tracking, foreman, worktrees).
+6. Document all the caveats and runbook steps.
 
 This is bespoke per repo. Every part is **glued to a specific toolchain** —
-its phase labels, its rule, its constitution path.
+its phase labels, its rules, its config path.
 
 We want: **any user, any repo, single command, `/drill` UX.**
 
@@ -52,28 +56,25 @@ Plus the product surface:
   the deps.
 - **One-line init**: `derrick init` in a repo writes the config, the
   templates, the hooks, the constitution skeleton, and registers the
-  rig with gastown.
+  site with the native substrate.
 - **One primary command**: `/drill <prompt>` runs the full
   dark factory pipeline — spec → assay → plan → tasks → batch →
   foreman / Copilot agents.
 - **One front door for observability**: `derrick status` is the
-  answer to "what's going on?" — never `gt status` + `bd query` +
-  `gt mail` separately.
+  answer to "what's going on?" — one command, not one per underlying tool.
 - **Reusable**: nothing in derrick assumes a specific toolchain. Project-
   specific rules live in the repo's constitution + `derrick.yaml`,
   not in derrick.
 - **Transparent**: every underlying tool call is logged and exit
   codes propagate. Nothing is magic. Power users can still call
-  `gt`, `bd`, `claude /speckit.specify` directly.
+  `claude /speckit.specify` or any host CLI directly.
 
 ### Non-goals (v1)
 
-- Re-implementing speckit, courtroom, or gastown. Derrick **orchestrates**;
-  it does not replace.
+- Re-implementing speckit. Derrick defers to speckit when it is
+  installed (detect-then-defer, D2); it does not replace speckit.
 - A GUI. CLI + slash command only.
-- Self-hosted dolt management. Users who use gastown inherit gastown's
-  dolt server contract; derrick will surface its health but not run it.
-- Cross-language polyglot dispatching beyond what gastown already does.
+- Cross-language polyglot dispatching beyond what the host CLIs already do.
 
 ---
 
@@ -88,7 +89,7 @@ Plus the product surface:
                   ▼                           ▼
         ┌──────────────────┐        ┌───────────────────────┐
         │   derrick CLI    │        │  /drill command       │
-        │     (Go bin)     │        │  (Claude Code plugin) │
+        │   (Rust binary)  │        │  (Claude Code plugin) │
         └────────┬─────────┘        └───────────┬───────────┘
                  │                              │
                  │  reads/writes                │ shells out via
@@ -98,15 +99,17 @@ Plus the product surface:
         │              Derrick Orchestrator               │
         │                                                 │
         │   Phase pipeline  ←→  derrick.yaml (per repo)   │
-        │   Tool detection  ←→  ~/.derrick/state.json     │
+        │   Native substrate ←→  .derrick/derrick.db      │
         │   Logging         ←→  .derrick/runs/<ts>.log    │
-        └──────────┬────────┬────────┬────────┬───────────┘
-                   │        │        │        │
-                   ▼        ▼        ▼        ▼
-                ┌────┐  ┌──────┐  ┌────────┐  ┌────┐
-                │spec│  │court │  │gastown │  │mayor│
-                │kit │  │room  │  │bd/sling│  │ gt │
-                └────┘  └──────┘  └────────┘  └────┘
+        └──────────┬───────────────────┬──────────────────┘
+                   │                   │
+       speckit     │  (optional,       │  all model inference
+       detect-     │   D2)             │  routes through one of
+       then-defer  ▼                   ▼  five host CLIs:
+                ┌──────┐   ┌───────────────────────────────┐
+                │spec  │   │  claude │ codex │ copilot      │
+                │kit   │   │  opencode │ aider              │
+                └──────┘   └───────────────────────────────┘
 ```
 
 ### 3.1 Components
@@ -129,7 +132,7 @@ modules can be tested, profiled, and (later) ported in isolation.
 | Adopt | `crates/derrick-adopt` | Brownfield detection of AGENTS.md, CLAUDE.md, agents/, skills/, docs (§5.6); writes Claude Code host hook configs (`.claude/settings.json` PreToolUse/PostToolUse) so scrub+caveman fire at host boundaries (D29). Codex hook installation deferred (D34); T011 writes `.codex/instructions.md` only. |
 | Substrate trait | `crates/derrick-substrate` | One async trait (`Substrate`); a native impl, future impls slot in behind it |
 | Native substrate | `crates/derrick-substrate-native` | SQLite-backed execution substrate + in-process foreman |
-| Stack | `crates/derrick-stack` | PR stacking: trait + native / graphite / git-spice backends (see §8.5) |
+| Stack | `crates/derrick-stack` | PR stacking: native engine (plain git + `gh`); `StackBackend` trait as extension seam (see §8.5) |
 | Survey | `crates/derrick-survey` | Native code-graph index: SQLite + FTS5 symbol/reference/call-graph index at `.derrick/index.db`; MCP server surface for agent queries; CLI subcommands `build|search|context|impact|status` for ad-hoc/Bash parity (see §9.B.8) |
 | TUI | `crates/derrick-tui` | `derrick observe` — ratatui-based interactive dashboard (see §5.7) |
 | Observe | `crates/derrick-observe` | Aggregated read-only view (talks to substrate trait) |
@@ -150,9 +153,7 @@ Why Rust?
   via GitHub releases or Homebrew.
 - **SQLite via `rusqlite`** (bundled) or `sqlx` — both first-class.
 
-Trade-off accepted: build times are slower than Go's, and the gastown shim
-(if we ever add one) means shelling to a Go CLI, not vendoring its types.
-That cost is bounded.
+Trade-off accepted: build times are slower than Go's. That cost is bounded.
 
 ---
 
@@ -172,16 +173,18 @@ site:
   prefix: mp           # ticket prefix (mp-1, mp-2 …)
 
 # Model registry — define providers once, name them in roles
+# provider names match host CLIs: claude | codex | copilot | opencode | aider
 models:
-  claude-opus:    { provider: anthropic, model: "claude-opus-4-7" }
-  claude-sonnet:  { provider: anthropic, model: "claude-sonnet-4-6" }
-  codex-gpt5:     { provider: openai-cli, cli: "codex exec", model: "gpt-5" }
-  copilot:        { provider: copilot-cli, cli: "copilot",  model: "gpt-5-codex" }
-  # examples of BYOM (none enabled by default):
-  # gemini-pro:   { provider: google,  model: "gemini-2.5-pro" }
-  # local-llama:  { provider: ollama,  base_url: "http://localhost:11434", model: "llama3.3:70b" }
-  # bedrock-claude: { provider: bedrock, region: "eu-west-2", model: "anthropic.claude-opus-4-7-v1" }
-  # azure-gpt5:   { provider: azure-openai, endpoint: "...", deployment: "gpt-5" }
+  claude-opus:    { provider: claude,   model: "claude-opus-4-8" }
+  claude-sonnet:  { provider: claude,   model: "claude-sonnet-4-6" }
+  claude-haiku:   { provider: claude,   model: "claude-haiku-4-5" }
+  codex-gpt5:     { provider: codex,    model: "gpt-5.5" }
+  copilot:        { provider: copilot,  model: "gpt-5.4" }
+  # opencode and aider use provider/model strings:
+  # opencode-claude: { provider: opencode, model: "anthropic/claude-opus-4-8" }
+  # aider-gpt5:    { provider: aider,    model: "openai/gpt-5.5" }
+  # shell escape hatch — any CLI that speaks the structured prompt envelope:
+  # my-tool:      { provider: shell, command: "my-tool --prompt-envelope" }
 
 # Role bindings — pipeline steps name a role; the role names a model.
 # Changing one model changes the whole class of step that uses it.
@@ -280,7 +283,7 @@ Resolution rules:
 
 - Repo `derrick.yaml` wins.
 - Falls back to `~/.derrick/config.yaml` for user defaults
-  (preferred model, courtroom rounds, etc).
+  (preferred model, assay rounds, etc).
 - Falls back to a baked-in default shipped with the binary.
 
 Templates use a simple `{{var}}` substitution (no general
@@ -513,6 +516,13 @@ The slash command resolves to `derrick run drill --prompt "..."`. The
 user never sees the underlying tools. All output and questions are in
 **derrick's voice**.
 
+The feature prompt may also be supplied from a file (`--prompt-file <path>`)
+or from stdin (`-` sentinel, or piped) on both `derrick drill` and
+`derrick run drill`, so a large multi-line `/speckit.specify`-style brief
+can be passed without shell-escaping (D64). The three sources fold into the one
+prompt string that feeds the `specify` step; supplying more than one explicit
+source is a usage error.
+
 The pipeline runs eight stages in sequence. Each stage that surfaces output
 to the user does so in a clean, styled terminal UI — same quality bar as
 §5.2's wizard. Stages that block on user input wait indefinitely; stages that
@@ -651,9 +661,9 @@ checklist:
 
 Once a feature is in flight, the user shouldn't need to remember
 which underlying tool answers which question. Derrick exposes a
-flat, predictable surface that aggregates gastown/bd/Copilot reads
-into one view. Everything here is **read-only** — these commands
-never mutate state.
+flat, predictable surface that aggregates substrate, git, and
+host-CLI reads into one view. Everything here is **read-only** —
+these commands never mutate state.
 
 All commands talk to the `Substrate` trait. Output uses derrick's
 vocabulary regardless of backend (v1 ships only the native one).
@@ -688,10 +698,10 @@ Design rules for the observability surface:
   status` shows the current spec dir and tasks.md progress, no
   tickets. In `mode: copilot` it shows Copilot agent dispatch
   state, no foreman. In `mode: crew` it shows the lot.
-- **No mutation.** If the user wants to claim/close/comment, they
-  use `bd` directly. Derrick is deliberately not a wrapper around
-  every write path; that surface is gastown's by design and
-  derrick doesn't want to keep up.
+- **No mutation.** The observability commands never mutate state.
+  Write paths are surfaced through the explicit mutation API
+  (`derrick ticket done/review/block/reopen`, §8.2) — not
+  through the status/observe surface.
 - **JSON when piped.** `--format json` (or auto-detected from
   non-TTY) emits structured output for scripting and for the future
   `derrick observe` TUI.
@@ -881,57 +891,104 @@ verifies derrick is installed, and then defers to the skill for the
 actual workflow narrative — same pattern the Anthropic-shipped skills
 use (a one-page command, a fat skill).
 
-### 6.5 BYOM (Bring Your Own Model) — hosts, providers, roles
+### 6.5 Hosts, models, roles (D65)
 
 Derrick separates three concerns most tools conflate:
 
-- **Provider** — *who serves the inference*. Anthropic API,
-  OpenAI API, Google Gemini, Bedrock, Azure OpenAI, Ollama,
-  llama.cpp, or a CLI shell (`codex exec`, `copilot`,
-  `claude --print`). Adapters live in
-  `internal/models/providers/<name>.go`.
-- **Host** — *who the user is conversing with*. `claude` (the
-  Claude Code CLI), `codex` (the Codex CLI), `copilot`, raw
-  HTTP, or none. The host loads its own context: AGENTS.md,
-  sub-agents, skills, plugins. Hosts are configured per pipeline
-  step (`host: claude`) or implied by the provider.
-- **Role** — *what the step needs done*. `proposer`,
-  `drafter`, `reviewer`, `executor`, `summariser`. Pipeline
-  steps name roles, never models directly.
+- **Host** — *who executes the work*. One of exactly five host CLIs:
+  `claude` (Claude Code), `codex`, `copilot` (GitHub Copilot CLI),
+  `opencode`, `aider`. The host loads its own context (AGENTS.md,
+  sub-agents, skills, plugins) and manages its own auth. Derrick
+  holds no API keys. Hosts are configured per pipeline step
+  (`host: claude`) or implied by the provider name.
+- **Provider** — in `derrick-models`, a provider is a named
+  **host-delegated wrapper** that maps a `ModelDef` to one of the
+  five hosts, builds a `HostRequest`, and calls the `derrick-tools`
+  host adapter. Provider names match host names (`claude`, `codex`,
+  `copilot`, `opencode`, `aider`). The `shell` provider survives as
+  a bespoke-envelope escape hatch for arbitrary command-line tools
+  that speak the structured prompt envelope protocol.
+- **Role** — *what the step needs done*. `proposer`, `drafter`,
+  `reviewer`, `executor`, `summariser`. Pipeline steps name roles,
+  never models directly.
 
-The binding is `step → role → model → provider`, with `host`
-selected per step. Changing your reviewer model from Codex to
-Gemini is one line in `models:`; no pipeline edits.
+The binding is `step → role → model → provider (= host)`.
+Changing the reviewer from codex to a copilot-backed model is one
+line in `models:`; no pipeline edits.
 
-#### Supported providers (v1)
+#### Five hosts
 
-Providers are reached through `derrick-models`'s `Model`
-trait. They take a structured `CompletionRequest` and return
-a `CompletionResponse`. This is distinct from **hosts**
-(claude / codex / copilot CLIs invoked when a pipeline step
-sets `host:` — those go through `derrick-tools` per D30).
-The same binary may serve both roles via different paths.
+All model inference runs through exactly one of these:
 
-| Provider | Type | Notes |
+| Host | Auth | Default model | Notes |
+|---|---|---|---|
+| `claude` | Claude Code's own auth | `claude-opus-4-8` | Anthropic models. Strips a leading `anthropic/` prefix from model ids before passing `--model`. |
+| `codex` | Codex CLI's own auth | `gpt-5.5` | OpenAI models. Strips a leading `openai/` prefix from model ids. |
+| `copilot` | GitHub Copilot CLI's own auth | `gpt-5.4` | Multi-model. Strips any `provider/` prefix; keeps dotted ids (e.g. `claude-sonnet-4.6`) — no dot↔dash translation. |
+| `opencode` | opencode's own auth | — | Multi-model; expects `provider/model` strings. Passes id verbatim. |
+| `aider` | aider's own auth | — | Multi-model; expects `provider/model` strings. Passes id verbatim. |
+
+Provider names `anthropic`, `openai-cli`, `copilot-cli` are
+migration aliases only — they are mapped at config load time and
+a deprecation warning is emitted. Use the host names above in new
+configs.
+
+The `shell` provider is not a host. It accepts any command that
+reads a structured prompt envelope on stdin and writes a
+sentinel-delimited response on stdout. Use it for bespoke tooling
+not covered by the five hosts.
+
+#### Role taxonomy
+
+| Role | Typical host | What it does |
 |---|---|---|
-| `anthropic` | API | First-class. Prompt caching used by §9.B.4. |
-| `openai` | API | Used for non-Claude reasoning roles. |
-| `openai-cli` | CLI-backed provider | Wraps `codex exec` in the Model trait, for users who want codex as a *backend completion source* (e.g. for an assay reviewer role). Distinct from `host: codex` pipeline steps, which use the host adapter in `derrick-tools` directly. |
-| `google` | API | Gemini. |
-| `bedrock` | API | AWS Bedrock. Region + model-id. |
-| `azure-openai` | API | Endpoint + deployment. |
-| `copilot-cli` | CLI-backed provider | Wraps the `copilot` CLI in the Model trait for *completion-style* use. The `derrick-tools` Copilot host adapter handles `host: copilot` pipeline-step invocations separately (D30). |
-| `copilot-sdk` | Lib | GitHub Copilot SDK in-process. v1.1 research target. |
-| `ollama` | Local | `base_url` + model tag. Sensible for `summariser` role to keep tokens off the network entirely. |
-| `llamacpp` | Local | Same idea. |
-| `shell` | Generic | Any command that takes a structured prompt envelope on stdin and emits a sentinel-delimited response on stdout. Escape hatch. |
+| `proposer` | `claude` | Generates the initial plan / spec |
+| `drafter` | `claude` | Writes or revises artifacts |
+| `reviewer` | `codex` | Cross-examines plans in assay; different family from proposer by default (D5) |
+| `executor` | `copilot` / `aider` / `opencode` | Implements tickets as a hand |
+| `summariser` | `claude` (haiku tier) | Compresses step output for memory / telemetry |
+
+These are defaults. Any role can bind to any host; the only
+constraint `derrick doctor` enforces is that `proposer` and
+`reviewer` do not share the same provider (§7).
+
+#### Model catalogue and normalisation (D65)
+
+A curated per-host catalogue lives in
+`derrick-tools/src/catalogue.rs`. It drives:
+
+- **Defaults** used by `Config::defaults()` and `derrick init`.
+- **`derrick models check`** — the implemented validation command
+  (D15). Checks: (1) host binary installed → FAIL if missing;
+  (2) model id in catalogue → WARN-only if not; (3) provider maps
+  to one of the five hosts → FAIL if not; (4) opencode/aider model
+  string contains `/` → WARN if not. Exit code equals the count of
+  FAILs. WARN conditions never block the pipeline.
+- **Per-host normalisation** applied inside each host adapter
+  before the `--model` argument is pushed (see Five hosts table).
+
+Current catalogue (May 2026):
+
+| Host | Known ids |
+|---|---|
+| `claude` | `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
+| `codex` | `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2-codex` |
+| `copilot` | `gpt-5.4`, `gpt-5.3-codex`, `claude-sonnet-4.6`, `claude-haiku-4.5`, `gpt-5.4-mini` |
+| `opencode` | A small curated set of `provider/model` strings; unknown ids WARN |
+| `aider` | A small curated set of `provider/model` strings; unknown ids WARN |
+
+Unknown model ids produce a warning and still pass through to the
+host CLI. Derrick never hard-fails solely because a model id is
+not in the catalogue — the host's own error is the source of truth.
+
+Soft warnings are also emitted at `derrick init` and `derrick run`
+so issues surface early without blocking experiments.
 
 #### Respecting the host's own rules
 
-When derrick invokes a step on a **host** CLI (claude / codex /
-copilot / opencode), it deliberately does **not** inject a system
-prompt, override the host's context, or bypass the host's rule
-loading. The contract:
+When derrick invokes a step on a host CLI it deliberately does
+**not** inject a system prompt, override the host's context, or
+bypass the host's rule loading. The contract:
 
 - Derrick passes the working directory (the user's repo) and the
   step command. That's it.
@@ -940,29 +997,47 @@ loading. The contract:
   `.claude/skills/`, plugins, hooks, `.codex/`, `~/.codex/`,
   `.github/copilot-instructions.md`, `.opencode/agents/`, etc.
   Derrick does not touch any of this.
-- Sub-agent spawn within a step (e.g. `Agent({subagent_type:
-  "Explore"})`) is the host's decision; derrick doesn't see it
-  and doesn't intercede.
+- Sub-agent spawn within a step is the host's decision; derrick
+  doesn't see it and doesn't intercede.
 - Skills triggered in-session (caveman, find-skills, the user's
-  custom skills) run inside the host. Derrick's *own* caveman
+  custom skills) run inside the host. Derrick's own caveman
   implementation is for inter-step compression, not in-session.
-- Derrick records *what command it sent* and *what artifact came
-  back*. It does not influence the host's internal context,
-  prompt expansion, or subagent behaviour. It *does* read the
-  host's transcript file after the step for token telemetry only
+- Derrick records what command it sent and what artifact came
+  back. It does not influence the host's internal context,
+  prompt expansion, or sub-agent behaviour. It reads the host's
+  transcript file after the step for token telemetry only
   (§9.B.7) — read-only, post-hoc, never used to alter the host's
   next call.
 
-This means: a brownfield repo with a carefully tuned AGENTS.md
-and twenty agents gets exactly the same Claude Code behaviour
-inside a derrick step as it would in a normal session. Derrick
-is the conductor, not the orchestra.
+A brownfield repo with a carefully tuned AGENTS.md and twenty
+agents gets exactly the same Claude Code behaviour inside a
+derrick step as it would in a normal session. Derrick is the
+conductor, not the orchestra.
 
-When a step uses an API provider directly (no host CLI),
-derrick *does* assemble the prompt — but only from declared
-inputs (the artifact files in `inputs:` and the constitution),
-never from arbitrary repo state. This is the only path where
-derrick acts as the prompter; we keep it narrow.
+**One narrowing (D66/D67)**: model selection is the single dimension
+derrick now asserts on the run path. The user picks the HOST (the
+executor role's `ModelDef.provider`); the foreman picks the best
+MODEL within that host per ticket by tier. A role's model id may be
+a concrete PIN (always used as-is) or the `auto` sentinel
+(`auto:light`, `auto:standard`, `auto:heavy`, or plain `auto`).
+Plain `auto` maps to the tier that matches the ticket's
+`Ticket.complexity` (Low→light, Standard→standard, Heavy→heavy;
+missing → standard). `auto:*` is a hard tier override. The per-host
+tier mapping lives in `derrick-tools/src/catalogue.rs` (D65). An
+`auto*` value is never forwarded to the CLI — it is resolved to a
+concrete model id before `HostRequest` is built. All five crew hands
+are local CLIs and all participate in tier selection; the cloud
+Copilot issue-dispatcher is not wired as a crew hand. When no model
+is configured the host keeps its own default, preserving the
+no-configuration-needed path. Everything else — context, agents,
+hooks, sub-agent spawn — remains the host's domain. See D66 and D67
+for the full scope.
+
+Codex host hooks are deferred (D34). aider's headless flags
+(`--yes-always --no-auto-commits --no-stream --no-pretty
+--no-show-release-notes`) are always on for pipeline runs;
+opencode and aider hook instrumentation is a documented gap with
+the same posture as D34.
 
 #### Cost and latency knobs per model
 
@@ -970,53 +1045,38 @@ derrick acts as the prompter; we keep it narrow.
 
 ```yaml
 models:
-  bedrock-claude:
-    provider: bedrock
-    region: eu-west-2
-    model: anthropic.claude-opus-4-7-v1
+  claude-opus:
+    provider: claude
+    model: "claude-opus-4-8"
     max_tokens: 4096
     temperature: 0.2
-    cache: true              # prompt caching where supported
     timeout: 120s
     rate_limit: { rpm: 20, tpm: 80000 }
     cost_hint:  { in_per_mtok: 15, out_per_mtok: 75 }   # for `derrick gain`
 ```
 
+Fields `endpoint`, `region`, `deployment`, and `base_url` are
+parsed-and-ignored (with a one-line deprecation warning) so
+existing `derrick.yaml` files continue to load after D65. The
+`cli` field is deprecated for the host providers
+(`claude`/`codex`/`copilot`/`opencode`/`aider`) and ignored
+there, but remains in use by the `shell` escape-hatch provider,
+which still spawns the configured command. No `CONFIG_VERSION`
+bump.
+
 Cost hints are optional but power the §9.B.7 telemetry — without
 them, `derrick gain` reports token counts only, not dollars.
 
-#### Validation: `derrick models check`
+#### Auth (D65 — no BYOK)
 
-Not every role / host / provider combination is sensible
-(`host: claude` + `provider: ollama` is nonsense — Claude Code
-calls Anthropic, not Ollama). v1 ships:
+Every host CLI manages its own auth. Derrick holds no API keys.
+`AuthStore` is env-passthrough only: env vars (e.g. `GH_TOKEN`,
+proxy vars) in `HostRequest.env` are forwarded to the child
+process. There is no `~/.derrick/credentials.yaml`, no
+`derrick auth` subcommand, and no `MissingCredential` error.
 
-- `derrick models check` — explicit subcommand; verifies every
-  binding in `derrick.yaml` resolves to a real provider, that
-  required env vars / credentials exist, and that the host/
-  provider pairing is supported. Exit code is the count of
-  failing checks.
-- Warnings (not errors) emitted at `derrick init` and `derrick
-  run` if validation finds anything off, so issues surface early
-  without blocking experiments.
-
-#### Auth
-
-Credentials are sensitive and live outside the repo:
-
-- **Env vars first** (CI-friendly): `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `AWS_*` for Bedrock, etc.
-  Derrick documents the env var per provider.
-- **Optional** `~/.derrick/credentials.yaml` for desktop
-  convenience: one file, one set of keys, never repo-local. Mode
-  0600. `derrick auth set <provider>` and `derrick auth list` for
-  ergonomics.
-- **Never** committed to a repo. `.gitignore` for `derrick.yaml`
-  is *not* defaulted (we want it in version control), so secrets
-  go through env vars or `~/.derrick/credentials.yaml` only.
-- **Host-delegated providers** (claude, codex, copilot) inherit
-  auth from the host CLI's own mechanism — derrick doesn't see
-  those keys.
+If a host CLI is not authenticated, it will fail on its own terms
+and that failure surfaces as a step error in the pipeline log.
 
 ---
 
@@ -1181,8 +1241,10 @@ no other code changes.
 - **Batch** — an ordered named group of tickets representing one
   feature. Closes when all member tickets close.
 - **Hand** — anything that can execute a ticket. v1 hand types:
-  `claude` (interactive human-driven), `copilot` (agent dispatch),
-  `human` (just claimed by a person).
+  `claude` (interactive human-driven), `copilot` (cloud agent
+  dispatch via GitHub API), `human` (just claimed by a person).
+  Extended by D66: `codex`, `opencode`, `aider` (host-CLI executor
+  hands dispatched by the generic `derrick-hand` dispatcher).
 - **Foreman** — the orchestrator that walks ready tickets, applies
   routing rules, dispatches to a hand, polls completion, reports.
   v1 runs as a tokio task inside the derrick process; can later
@@ -1331,21 +1393,21 @@ stacking, the same N PRs form a clean DAG.
 - **`none`** (default) — derrick doesn't manage PRs. Hands
   push branches and open PRs however they want. Sensible
   for solo mode or single-ticket batches.
-- **`native`** — derrick manages the stack itself using plain
-  `git` + `gh pr create`. v1 default when stacking is enabled.
+- **`native`** — derrick's own stacking engine using plain
+  `git` + `gh pr create`. The sole implemented backend (D72).
   Branches are named `derrick/<batch>/<ticket-id>`; the foreman
   sets parents based on `blocks` links; when a parent PR lands,
-  derrick rebases and force-pushes all dependents.
-- **`graphite`** — shell out to Graphite (`gt`). Adapter
-  records `gt branch create --parent <branch>` and lets
-  Graphite handle restacks. Detected automatically if
-  Graphite is installed and the repo is initialised
-  (`.graphite_user_config` present).
-- **`git-spice`** — shell out to `gs` (git-spice). Same shape
-  as the graphite adapter.
+  derrick rebases and force-pushes all dependents (`--force-with-lease`,
+  D19 conflict-bail, D20 branch ownership). Stacked PRs are
+  opened via `gh pr create`; `derrick doctor` checks that
+  `git` and `gh` are present.
 
-The trait `StackBackend` lives in `crates/derrick-stack`;
-adapters in `crates/derrick-stack/src/backends/`.
+Legacy configs that name `graphite` or `git-spice` fail at
+load time with an actionable error directing the user to set
+`backend: native`.
+
+The trait `StackBackend` lives in `crates/derrick-stack` as
+the §8.6 extension seam for future backends.
 
 #### What the foreman does when stacking is on
 
@@ -1359,9 +1421,11 @@ adapters in `crates/derrick-stack/src/backends/`.
 3. When the hand opens a PR, derrick adds the PR URL to the
    ticket via the substrate.
 4. When a PR merges, derrick walks the dependent tickets and
-   asks the backend to restack them (`git rebase --onto` for
-   native; `gt restack` for graphite). Force-push uses
-   `--force-with-lease`.
+   restacks them via `git rebase --onto`. Force-push uses
+   `--force-with-lease`. After rebase+force-push the foreman
+   also retargets the child PR's base via `gh pr edit --base`
+   so GitHub shows the correct diff; `NotSupported` is tolerated
+   (warn + Note), same posture as the force-push gate.
 5. If a restack fails (merge conflict), derrick bails immediately
    (D19): the ticket moves to `blocked` with a `restack-conflict`
    label, and the activity log records the exact `git rebase
@@ -1372,14 +1436,21 @@ adapters in `crates/derrick-stack/src/backends/`.
 
 #### `derrick stack` subcommand
 
-- `derrick stack` — show the current stack for the active batch:
-  parent → child PRs, merge status, restack health.
-- `derrick stack restack [--batch <name>]` — manual restack of
-  a batch's children after a parent lands (in case the foreman
-  isn't running).
-- `derrick stack submit [--batch <name>]` — open PRs for every
-  ticket whose hand has pushed a branch but not yet opened a
-  PR (catches up after a foreman crash).
+- `derrick stack show` — renders the current stack for the active
+  batch: a PARENT column with tree indentation by DAG depth in
+  topological order, merge status, and restack health.
+- `derrick stack restack [--batch <name>]` — topological cascade
+  restack: processes the `blocks` DAG in deterministic topological
+  order (tie-break: ordinal then ticket id). A D19 conflict blocks
+  only the conflicting ticket and poisons its transitive descendants;
+  independent subtrees continue unaffected. Manual fallback when
+  the foreman isn't running.
+- `derrick stack submit [--batch <name>]` — whole-stack submit:
+  walks the batch in stack order, opens missing PRs with the correct
+  base (parent branch for non-roots, `main` for roots), and retargets
+  existing PRs whose base is stale via `gh pr edit --base`. Also
+  maintains an idempotent stack navigation table (marked section) in
+  each PR body listing the stack with the current PR highlighted.
 
 #### Configuration
 
@@ -1387,7 +1458,7 @@ adapters in `crates/derrick-stack/src/backends/`.
 tools:
   git:
     stacking:
-      backend: native            # none | native | graphite | git-spice
+      backend: native            # none | native
       branch_pattern: "derrick/{{batch}}/{{ticket_id}}"
       auto_restack_on_merge: true
       force_push: with-lease     # with-lease | off
@@ -1397,11 +1468,10 @@ tools:
 
 #### Brownfield detection
 
-`derrick init` detects Graphite via `.graphite_user_config` or
-`~/.graphite/`. If found, it proposes `backend: graphite` in
-the generated `derrick.yaml` so the user keeps their existing
-stack tooling. Same idea for git-spice. Otherwise it proposes
-`backend: native`.
+`derrick init` always proposes `backend: native`. Repos that
+previously used Graphite or git-spice will need to migrate to
+the native engine; the init wizard notes this if it finds
+`.graphite_user_config` or a `gs`-managed repo.
 
 #### Squash-merge warning (D21)
 
@@ -1571,9 +1641,9 @@ auto-memory dir (`~/.claude/projects/.../memory/derrick/<rig>/`):
   language(s), constitution path. One file each, one-line entries
   in `MEMORY.md`.
 - *reference memory*: where specs/tasks/verdicts/logs live.
-- *feedback memory*: derrick's own guardrails ("never `gt dolt stop`",
-  "batches never re-ordered after creation", "assay verdict is
-  binding unless `--no-assay`").
+- *feedback memory*: derrick's own guardrails ("batches never
+  re-ordered after creation", "assay verdict is binding unless
+  `--no-assay`", "don't mutate the substrate DB directly").
 
 **9.A.2 Per-run memory** (`.derrick/runs/<ts>/memory.md`). After
 every pipeline step derrick appends a one-line digest:
@@ -1778,10 +1848,9 @@ parallel by default. Derrick treats serial work as a justified
 exception.
 
 **9.C.1 Batch fan-out.** Independent tickets in a batch run
-concurrently. The substrate's foreman (native in-process loop,
-or gastown's `gt prime` behind the shim) walks ready tickets and
-dispatches them to hands, serialising only across explicit
-`blocks` dependencies. Default concurrency is
+concurrently. The substrate's foreman (native in-process loop)
+walks ready tickets and dispatches them to hands, serialising only
+across explicit `blocks` dependencies. Default concurrency is
 `min(8, len(ready_tickets))`; configurable in `derrick.yaml`:
 
 ```yaml
@@ -1809,9 +1878,9 @@ tools:
   `reject`.
 
 **9.C.3 Concurrent observability reads.** `derrick status`
-aggregates from `gt status`, `bd query`, `gt dolt status`, and the
-local manifest — all fired in parallel. The whole dashboard
-returns in the slowest read, not the sum.
+aggregates substrate reads, git/gh queries, and the local manifest
+— all fired in parallel. The whole dashboard returns in the
+slowest read, not the sum.
 
 **9.C.4 Parallel pipeline steps.** Steps with no data dependency
 on each other can be marked `parallel_group: <name>` in the yaml
@@ -1951,8 +2020,9 @@ to reconstruct the full history of a prompt across retries.
 - Token tooling: `derrick scrub`, `derrick caveman`, `derrick gain`.
 - BYOM tooling: `derrick models check`, `derrick auth set/list`.
 - PR stacking: `derrick stack` / `derrick stack restack` /
-  `derrick stack submit`; native backend default, graphite and
-  git-spice adapters detected and offered at init time.
+  `derrick stack submit`; native engine only (D72) — plain
+  git + gh, parent computation from `blocks` links, rebase
+  --onto restack with --force-with-lease.
 - TUI dashboard: `derrick observe` (ratatui), six tabs covering
   Overview / Tickets / Stack / Activity / Tokens / Memory.
   Live-updating via filesystem watcher + 1s tick.
@@ -2024,12 +2094,12 @@ links back to the section where it lives.
 | D9 | **Cross-feature lessons**: shipped in v1 with a mechanical quality gate — each lesson must reference a specific ticket id or constitution section anchor, else discarded. | §9.A.4 |
 | D10 | **Multi-feature parallelism**: git worktrees per run (`.derrick/worktrees/<run-id>/`), not file locks. Substrate DB stays in the main checkout and is shared. | §9.C.5 |
 | D11 | **Native substrate scope discipline**: additions require explicit sign-off and a DESIGN.md note; an OSS-facing policy in `CONTRIBUTING.md` keeps the rule visible to external contributors. | §8.1 |
-| D12 | **Provider auth**: env vars first; optional `~/.derrick/credentials.yaml` (mode 0600) for desktop convenience; never repo-local; host-delegated providers inherit auth from the host CLI. | §6.5 |
+| D12 | **Provider auth**: env vars first; optional `~/.derrick/credentials.yaml` (mode 0600) for desktop convenience; never repo-local; host-delegated providers inherit auth from the host CLI. *Superseded by D65*, which removes direct-API providers entirely. Auth is now env-passthrough only; `credentials.yaml` and `derrick auth` are removed. | §6.5 |
 | D13 | **Copilot backend in v1**: standalone `copilot` CLI (`@github/copilot`). `gh copilot` is the older extension, not what we use. Backend trait allows an SDK-based path later. `@github/copilot-sdk` recorded as a v1.1 research target. | §8.4 |
 | D14 | **Sub-agent / skill telemetry**: derrick parses Claude Code's session transcript files (`~/.claude/projects/<repo>/*.jsonl`) post-step for accurate token counts; falls back to estimates for codex / copilot / raw API. | §9.B.7 |
-| D15 | **Role/host validation**: `derrick models check` subcommand for explicit verification; warnings (not errors) emitted at `derrick init` and `derrick run` so issues surface early. | §6.5 |
+| D15 | **Role/host validation**: `derrick models check` subcommand for explicit verification; warnings (not errors) emitted at `derrick init` and `derrick run` so issues surface early. *Implemented by D65*: the check runs against the curated host catalogue in `derrick-tools/src/catalogue.rs`; unknown model ids produce WARN, not FAIL — the hybrid validation rule is now the authoritative posture. | §6.5 / D65 |
 | D16 | **v1 install surface (beyond CLI + plugin)**: shell completions (clap_complete: bash/zsh/fish), VS Code + JetBrains editor configs in templates (opt-in), `.codex/instructions.md` wrapper config written during init so codex sees the constitution, `derrick uninstall` to cleanly reverse init. | §11 |
-| D17 | **PR stacking ships in v1** as a first-class concern. Default backend `native` (plain git + `gh pr create`). Graphite and git-spice adapters auto-detected at init. Foreman restacks dependents on merge using `--force-with-lease`. | §8.5 |
+| D17 | **PR stacking ships in v1** as a first-class concern. Default backend `native` (plain git + `gh pr create`). Graphite and git-spice adapters auto-detected at init. Foreman restacks dependents on merge using `--force-with-lease`. *Superseded by D72* (adapter clauses only — graphite/git-spice adapters removed; native is the sole backend). | §8.5 |
 | D18 | **TUI dashboard ships in v1** as `derrick observe`. ratatui + crossterm, six tabs, read-only, live-updates via filesystem watcher + 1s tick. Mutation features are explicitly out of scope for v1. | §5.7 |
 | D19 | **Restack conflict policy**: bail immediately, surface the exact `git rebase --onto` recipe to the activity log, mark the ticket `blocked` with `restack-conflict`. No auto three-way-merge attempts (they produce subtly-wrong force-pushed history). | §8.5 |
 | D20 | **Branch ownership when stacking**: derrick creates the branch off the computed parent for `native` and `copilot` hands. Human hands create their own branches; derrick rebases them after if needed. | §8.5 |
@@ -2043,9 +2113,9 @@ links back to the section where it lives.
 | D31 | **State machine integrity for tickets and batches: append-only, observable, verifiable.** Lessons banked from gastown's Refinery optimistic-close incident at scale. Three rules: (a) **`Done` requires observable evidence** — the foreman never transitions a ticket to `Done` based on a hand's self-report or PR-open event; it observes the merge SHA on the target branch (`git log origin/<base>`) or equivalent end-state for the workflow. A new `InReview` ticket state covers "hand finished, PR open, awaiting merge". (b) **State changes are append-only at the event log** — every state transition writes an immutable `events` row. Reverting a state moves *forward* to a different state (e.g. `Done → Reopened`), never erases history. (c) **The foreman trusts git, not just substrate state** — when polling ready tickets and reconciling batch closure, it cross-references against the actual repository (git log, gh PR status) rather than blindly trusting its own row values. Adds `InReview` to `TicketState`, a `merge_sha: Option<String>` field on the ticket, and a verifier loop step. | §8.1 / §8.2 / future T012 foreman |
 | D32 | **Worktree and ticket cleanup is continuous and self-healing.** Lessons banked from gastown's gt-pvx WISP-branch leak. Periodic cleanup runs (a) on every `derrick run` startup before doing anything else and (b) optionally as a launchd/systemd plist for long-lived setups. It walks worktree rows whose runs have crashed (no `finalize_worktree` event after a configurable TTL, default 24h), and either prunes them or marks them `Abandoned`. Same pattern for tickets stuck in `InReview` past a TTL: the foreman re-checks the PR and either transitions to `Done` (if observably merged), `Blocked` (if the PR was closed unmerged), or surfaces an escalation event. **There is no "trust eventually consistent state" path** — every long-lived state has an explicit reconciliation pass that can fail loud. | §8.2 / §9.C.5 / future T012 |
 | D33 | **The foreman never has authoritative state independent of the substrate and git.** Where gastown's Mayor reads `gt convoy status` and trusts it, derrick's foreman treats its own poll as a hint and the substrate + git as the truth. Concretely: on every loop iteration the foreman (a) reads `bd ready`-equivalent tickets from the substrate, (b) for any in `InReview`, queries `git log` and `gh pr view` for the PR's actual state, (c) reconciles before dispatching new work. The dispatch is idempotent against state drift — if a ticket the substrate says is `Ready` is actually merged on main, the foreman corrects to `Done` and continues. | future T012 |
-| D30 | **`derrick-tools` owns host CLI subprocess invocations; `derrick-models` owns the `Model` trait and providers.** Hosts (claude / codex / copilot) are invoked when a pipeline step sets `host:`. They receive an opaque prompt-as-argv (typically a slash command), they load their own context per the host rules, and derrick captures stdout. Providers are invoked when derrick needs a model completion via a structured `CompletionRequest` (assay reviewers, future direct-API calls). The same underlying binary (e.g. `codex`) may be reached via either path: as a host running a derrick-supplied prompt verbatim (`derrick-tools`), or as a backend for a model role that needs a structured completion (`derrick-models`'s `openai-cli` provider, etc.). The split is **invocation-shape-driven**, not binary-driven. | §3.1 / §6.5 / new T009 |
+| D30 | **`derrick-tools` owns host CLI subprocess invocations; `derrick-models` owns the `Model` trait and providers.** Hosts (claude / codex / copilot) are invoked when a pipeline step sets `host:`. They receive an opaque prompt-as-argv (typically a slash command), they load their own context per the host rules, and derrick captures stdout. Providers are invoked when derrick needs a model completion via a structured `CompletionRequest` (assay reviewers, future direct-API calls). The split is **invocation-shape-driven**, not binary-driven. *Amended by D65*: for the inference path, the two paths now converge — `derrick-models` providers are host-delegated wrappers that call through to `derrick-tools` host adapters. The only remaining distinct path is `shell` (bespoke-envelope escape hatch, not a host). The invocation-shape distinction stated in D30 remains accurate for `shell` and all non-inference subprocess calls. | §3.1 / §6.5 / D65 |
 | D35 | **§8.6 alignment with D32: a closed-unmerged PR transitions its ticket to `Blocked`, not `Rejected`.** Earlier §8.6 prose used `Rejected` for both closed-unmerged and explicit user rejection. D32 distinguishes them: closed-unmerged is recoverable (a human may re-open with a new branch or explicitly reject), so the verifier moves to `Blocked` and waits for a human decision. `Rejected` is reserved for explicit user rejection via the §8.2 mutation API. The §8.6 diagram and verifier prose are updated to match; the T012 trait method `verify_ticket_unmerged` transitions to `Blocked`. | §8.6 / T012 |
-| D34 | **D29 refinement — Codex host hooks are best-effort/deferred.** Codex's CLI today does not expose a stable `PreToolUse`/`PostToolUse`-equivalent hook surface that derrick can rely on. T011 writes `.codex/instructions.md` (constitution + derrick.yaml reference) but does **not** install Codex tool-boundary hooks. When Codex grows a stable hook mechanism a follow-up ticket extends `derrick-adopt`. Claude Code hooks (D29 path b) remain mandatory; Copilot inline path (D29 path c) is unchanged. Users in `mode: copilot`/`crew` with codex hosts see a documented warning at init that Codex tool I/O is not scrubbed in v1. | §9.B.2 / §9.B.3 / T011 |
+| D34 | **D29 refinement — Codex host hooks are best-effort/deferred.** Codex's CLI today does not expose a stable `PreToolUse`/`PostToolUse`-equivalent hook surface that derrick can rely on. T011 writes `.codex/instructions.md` (constitution + derrick.yaml reference) but does **not** install Codex tool-boundary hooks. When Codex grows a stable hook mechanism a follow-up ticket extends `derrick-adopt`. Claude Code hooks (D29 path b) remain mandatory; Copilot inline path (D29 path c) is unchanged. Users in `mode: copilot`/`crew` with codex hosts see a documented warning at init that Codex tool I/O is not scrubbed in v1. *Note from D65*: opencode and aider hook instrumentation inherits the same "documented gap, same posture as D34" stance — neither CLI offers a stable tool-boundary hook surface at this time. *Superseded by D69.* | §9.B.2 / §9.B.3 / T011 / D65 |
 | D29 | **Scrub and caveman fire at every model boundary, not just derrick's pipeline seams.** Three boundary classes: (a) derrick-internal — inline in `derrick-flow` and `derrick-substrate-native`; (b) host tool calls — `derrick init` writes `PreToolUse`+`PostToolUse` hooks in `.claude/settings.json` for Claude Code; Codex's equivalent is **deferred** (see D34); (c) Copilot dispatch — inline in `derrick-copilot` until Copilot's hook surface lands. Both directions matter: input (before embedding tool output into the next prompt) saves the most because of prompt caching; output (when an agent quotes tool output back) catches the second-order leakage. | §9.B.2 / §9.B.3 |
 | D28 | **Supersedes D1 and D24 — GitHub-only distribution.** The `derrick.dev` domain was unavailable, so all derrick artefacts (install script, marketplace JSON, release binaries) live under `github.com/lgulliver/derrick`. The Claude Code marketplace JSON is fetched from `https://raw.githubusercontent.com/lgulliver/derrick/main/marketplace.json`. There is no longer a separate marketplace host to health-check, so D24's fallback logic collapses to a single GitHub-releases path; transient GitHub unavailability surfaces as a normal network error to the user with the documented recovery (`gh release download` or manual binary install). | §11 |
 | D36 | **Headless subprocess Write permissions: pre-create feature dirs.** `claude --print` prompts for Write tool permission when creating files in directories that don't yet exist, even with a `permissions.allow` block in `.claude/settings.json` (the block format did not suppress the prompt in practice). Resolved: `derrick init` and the pipeline runner pre-create `.specify/features/` before invoking any host step, so the directory exists and the Write prompt is not triggered. Long-term: `derrick-flow` creates the feature dir as the first act of the `specify` step, before the host invocation. | §5.3 / T013 |
@@ -2053,7 +2123,7 @@ links back to the section where it lives.
 | D38 | **Each pipeline run gets an isolated git worktree (§9.C.5).** `run_pipeline_from` calls `git worktree add -b derrick/<run-id> .derrick/worktrees/<run-id> HEAD` before the first step and `git worktree remove --force` on completion. The substrate's `reserve_worktree` / `close_worktree` methods are added to the `Substrate` trait so the `Runner` can track the lifecycle via `Arc<dyn Substrate>`. All host-request CWDs and bash `current_dir` use the worktree path; `relative_to_root` and manifest paths continue to use `repo_root`. Degradation: if `git worktree add` fails (no binary, dirty index), setup logs a warning and the run continues in `repo_root` — no crash. | §9.C.5 |
 | D40 | **Token counts and cost estimates are tracked per pipeline step and per run.** `CompletionResponse.tokens_in/out` are threaded through `StepExecution` → `StepRecord` → `ManifestStep` and accumulated into `RunManifest.tokens_in/out`. `RunOutcome.cost_estimate_usd(model_name)` uses a built-in pricing table (`builtin_cost_hint`) seeded with current list prices for Claude Opus/Sonnet/Haiku, GPT-4o/mini, and Gemini 2.5. Host-subprocess steps (claude CLI, copilot CLI) report zero at this layer; their token counts appear separately in `derrick gain` via Claude Code JSONL. `derrick gain --run <id>` shows a per-step breakdown from the manifest; session-level `gain` shows estimated dollar cost alongside token totals. | §9.B / `derrick-models` |
 | D39 | **Adversarial code review fires before every PR, not after.** `derrick ticket code-review <id> --branch <branch> --round N` diffs `origin/<base>...<branch>` (three-dot), passes the diff + ticket requirements to a configured reviewer role, and exits 0 (pass) or 3 (issues found). Hands must call this and get a pass before calling `derrick ticket review`. Auto-remediation is hand-driven: the hand reads `.derrick/reviews/<id>/round-N.md`, fixes, and retries up to `tools.code_review.rounds` times. Beyond that, the hand surfaces the report to the human. Exit code 3 (not 1) lets hands distinguish "fix needed" from infrastructure errors. Disabled by default (`tools.code_review.enabled: false`). | §8.6 / AGENTS.md hand protocol |
-| D41 | **OpenCode is a first-class host.** `derrick-tools` gains an `OpencodeHost` adapter that invokes `opencode run "<prompt>" --dir <cwd> [--dangerously-skip-permissions]`. `derrick-scrub` gains an `opencode` rule set that strips the startup banner, tool-use progress lines, spinner frames, thinking markers, and cost footers. Specialist sub-agents are published under `.opencode/agents/` with opencode frontmatter (`mode: agent`). The `HostRegistry` default set now includes `opencode` alongside `claude`, `codex`, and `copilot`. | §6.5 / `derrick-tools` / `derrick-scrub` |
+| D41 | **OpenCode is a first-class host.** `derrick-tools` gains an `OpencodeHost` adapter that invokes `opencode run "<prompt>" --dir <cwd> [--dangerously-skip-permissions]`. `derrick-scrub` gains an `opencode` rule set that strips the startup banner, tool-use progress lines, spinner frames, thinking markers, and cost footers. Specialist sub-agents are published under `.opencode/agents/` with opencode frontmatter (`mode: agent`). The `HostRegistry` default set now includes `opencode` alongside `claude`, `codex`, and `copilot`. *Extended by D65*: `aider` is also added as a first-class host (fifth host), giving the full five-host set. | §6.5 / `derrick-tools` / `derrick-scrub` / D65 |
 | D42 | **Full courtroom pattern: adversarial cross-model deliberation with auto-revise loop.** Assay implements the structured Claude-prosecutes / Codex-cross-examines / Claude-rebuts / Codex-deliberates cycle from the courtroom pattern. Default rounds: 10. Constitution violations are parsed and enforced as non-negotiable gates (override requires human approval). When the revise loop exhausts configured rounds, derrick prompts the user to continue or halt. Progress is streamed in real-time (round N/M, verdict, phase name) instead of a spinner. The loop switches from a `for` to a `while` to allow dynamic round extension at user request. | §7 / `derrick-flow/src/assay.rs` |
 | D43 | **Roughneck: LLM output compression via prompt injection.** A new crate `derrick-roughneck` appends a compression instruction to every model request, asking the model to emit a compressed form of its output before handoff. Three levels: `lite` (~30%), `full` (~65%, default), `ultra` (~75%). Config: `tools.roughneck.{enabled,level,compress_memory}`. Per-step manifest field `roughneck_tokens_saved` records estimated savings. TUI Tokens tab surfaces roughneck savings alongside scrub. | §3.1 / §9.B.2a / §10.1 |
 | D44 | **`derrick-scrub` records bytes_raw and bytes_saved per step in the manifest.** The scrub crate already existed; this decision adds structured telemetry so `derrick gain` and the TUI can show per-step context reduction, not just a binary "scrub on/off". Config: `tools.output_compression.enabled`. | §9.B.2 / §10.1 |
@@ -2066,7 +2136,7 @@ links back to the section where it lives.
 | D51 | **Pipeline step order fix: `tasks` runs before `analyze`.** Task generation depends on the accepted plan but not on codebase analysis. `analyze` then has the full task list available as context. Canonical order: `specify → clarify → plan → tasks → analyze → assay → bridge → foreman`. All pipeline config, step descriptions, and the §9.B.1 table updated to match. | §4 pipeline yaml / §9.B.1 / §9.C |
 | D52 | **`derrick switch`: solo → crew upgrade command.** New subcommand upgrades a repo from `mode: solo` to `mode: crew` (or `copilot` via `--mode`). Patches `tools.substrate.mode`, adds `peers:` stanza, writes foreman defaults. Idempotent. `--dry-run` previews the yaml diff. | §5.2.2 / §11 |
 | D53 | **`derrick upgrade` name reserved for binary self-update.** The subcommand is registered in the CLI but not yet implemented. It prints a clear "not yet available" message rather than a "command not found" error, preserving the name for the future self-update feature (check GitHub releases, download, replace running binary). | §11 |
-| D54 | **Native code-graph index (`derrick-survey`): native Rust, own SQLite, MCP agent surface.** A pre-built symbol/reference/call-graph index that AI agents query via MCP instead of fanning out across file reads. Three locked choices: (a) **Native Rust, not a Node wrapper** — preserves the single-static-binary, no-external-runtime ethos and D11 substrate/scope discipline; CodeGraph's data model (symbols + `references` edges + FTS5) is the reference, not its runtime. (b) **MCP server as the agent-facing surface** — `derrick survey serve --mcp`; `derrick-adopt` wires the `mcpServers` stanza into Claude Code settings and documents the gap for other hosts (same posture as D34). This is the first MCP seam in derrick; today the boundary is host CLI subprocess (D30) + hooks (D29). CLI subcommands (`build|search|context|impact|status`) ship for Bash/ad-hoc parity. (c) **Separate SQLite DB at `.derrick/index.db`, not the substrate DB** — different schema, rebuildable-cache lifecycle (gitignored), and read-heavy concurrency profile incompatible with the substrate's single-writer contract. | §3.1 / §9.B.8 |
+| D54 | **Native code-graph index (`derrick-survey`): native Rust, own SQLite, MCP agent surface.** A pre-built symbol/reference/call-graph index that AI agents query via MCP instead of fanning out across file reads. Three locked choices: (a) **Native Rust, not a Node wrapper** — preserves the single-static-binary, no-external-runtime ethos and D11 substrate/scope discipline; CodeGraph's data model (symbols + `references` edges + FTS5) is the reference, not its runtime. (b) **MCP server as the agent-facing surface** — `derrick survey serve --mcp`; `derrick-adopt` wires the `mcpServers` stanza into Claude Code settings and documents the gap for other hosts (same posture as D34). This is the first MCP seam in derrick; today the boundary is host CLI subprocess (D30) + hooks (D29). CLI subcommands (`build|search|context|impact|status`) ship for Bash/ad-hoc parity. *(Superseded by D57 on MCP host-wiring split.)* (c) **Separate SQLite DB at `.derrick/index.db`, not the substrate DB** — different schema, rebuildable-cache lifecycle (gitignored), and read-heavy concurrency profile incompatible with the substrate's single-writer contract. | §3.1 / §9.B.8 |
 | D55 | **Survey v1 language scope and pillar wiring.** Language scope: Rust, TypeScript/JavaScript, Python, Go (extended to C# by D58; to Java and Kotlin by D59). Symbol index + FTS5 full-text search + caller/callee/impact. Framework-aware routing and iOS/RN cross-language bridging deferred. Pillar wiring: Tokens — a `derrick gain` line for survey (`survey_tokens_saved`), owned by the token-economist role so numbers reconcile; Memory — `derrick init` seeds the index location as a reference memory entry; Parallelism — per-file parse fan-out at build time; index DB shared read-only across worktree runs per D38, behind a reader pool (`tools.survey.reader_pool`). Config knob at §9.B.8. | §9.B.8 / §9.A.1 / §9.C |
 | D56 | **Workspace MSRV bump to unlock `derrick-survey` dependencies.** The declared `rust-version = "1.75"` floor (root `Cargo.toml`) blocked the official MCP SDK (`rmcp`, edition 2024 / Rust ≥ 1.85) and current `tree-sitter` (≥ 1.76). The floor was declared but never enforced — CI and release build on `@stable` (1.95 at decision time), with no `rust-toolchain.toml` and no MSRV gate. Resolution: raise `rust-version` to a modern floor (≥ 1.85, the edition-2024 minimum) so survey can depend on `rmcp` and the latest `tree-sitter` grammar line rather than hand-rolling an MCP transport and pinning stale grammars. Supersedes rust-architect's hold-1.75 fallback (which assumed the floor was load-bearing). Other crates' dependencies are upgraded as required by the bump. No MSRV CI gate is added — the floor remains advisory, matching prior practice. | §3.1 / D54 / root `Cargo.toml` |
 | D57 | **MCP host-wiring split: `.mcp.json` for the server stanza, `settings.json` for permissions.** Corrects D54 clause (b), which stated "`derrick-adopt` wires the `mcpServers` stanza into Claude Code's `settings.json`". Claude Code does not honour `mcpServers` in `.claude/settings.json` for project-scoped servers. The correct split: (i) the server declaration is written to `.mcp.json` at the repo root (project-scoped, checked into VCS), shaped as `{ "mcpServers": { "derrick-survey": { "type": "stdio", "command": "derrick", "args": ["survey","serve","--mcp"] } } }`; (ii) per-tool permissions are written to `.claude/settings.json` under `permissions.allow`, using the `mcp__derrick-survey__<tool>` naming convention, to suppress per-call trust prompts for known tools. Known gap: Claude Code still requires a one-time interactive project-trust prompt on first load of `.mcp.json`; no settings key eliminates it (same "document the gap" posture as D34). All other host-wiring statements in D54 and §9.B.8 remain valid. Supersedes D54 clause (b) only. | §9.B.8 / D54 |
@@ -2076,7 +2146,17 @@ links back to the section where it lives.
 | D61 | **Live agent-output streaming (run-feedback Layer 2).** Completes the black-box fix begun in D60. The host process layer (`derrick-tools/process.rs`) previously buffered agent output via `child.wait_with_output()`, so a step ran silently for minutes. Resolution: `run_host` now drains stdout and stderr concurrently on separate tasks (avoiding pipe-buffer deadlock), forwarding each complete line to an optional, UI-free `OutputSink` (a `Arc<dyn Fn(StreamSource, &str)>` newtype on `HostRequest`, default `None`) as it arrives, while still accumulating the raw bytes so the captured `HostResponse` is byte-identical to before. `derrick-flow` adds `ProgressReporter::step_output` and threads a per-step sink (closing over the step id + reporter) through `execute_step`/`execute_role_step`; the runner builds it from `self.reporter`, skipping interactive steps (which own stdin). `derrick-cli`'s `indicatif` reporter renders the latest output line as a condensed, truncated heartbeat in the running step's spinner. The sink stays `None` for non-TTY/`NO_COLOR` and interactive steps, so capture-only behaviour is unchanged there. No schema or token-accounting change. Remaining UX work (init-wizard redesign via `inquire`, shared CLI theme) is still open. | §6.5 / §5.3 / D60 / `derrick-tools` / `derrick-flow` / `derrick-cli` |
 | D62 | **Init wizard redesigned on `inquire` (arrow-key prompts).** Closes the init-wizard item deferred by D60. The wizard previously used hand-rolled numbered-list selects (type a number) and a long chain of separate yes/no prompts read via raw stdin — visually weak and tedious. Resolution: adopt `inquire` (new workspace dep) for all wizard prompts — arrow-key `Select`/`MultiSelect`, `Text` with inline validators (the ticket-prefix re-ask loop becomes a validator), and `Confirm`. The trailing yes/no toggles (conventional commits, append AGENTS.md, hooks, VS Code, JetBrains, force) collapse into a single `MultiSelect` with sensible defaults pre-checked, cutting ~6 prompts to one screen. `Esc`/`Ctrl-C` on any prompt cancels cleanly (→ `WizardSelection::Cancelled`); `prompt_constitution` falls back to default seeds. Safe because `should_run_wizard` already gates on a real TTY (`stdin`+`stdout`), so non-interactive/`--yes`/`--no-wizard`/piped/test paths never reach `inquire` and are unchanged; the `WizardInput`/`WizardOutput` contract and pure helpers/tests are preserved. Contained to `derrick-cli` (`init_wizard.rs`); no cross-crate or schema impact. Shared CLI theme module remains the one open UX item. | `derrick-cli` / D60 / root `Cargo.toml` |
 | D63 | **Shared CLI theme module (`ui`).** Closes the last UX item from D60/D62. Styling was scattered: three duplicated `is_styled()` definitions (`init.rs`, `init_wizard.rs`, `switch.rs`) and ~30 hand-rolled `\x1b[…m` escape literals across commands, with no single authority. Resolution: a new `crate::ui` module is the one place that decides whether output is styled (stdout TTY + `NO_COLOR` unset) and exposes colour/weight primitives (`bold`/`dim`/`cyan`/`green`/`red`/`yellow`, built on `owo_colors`), coloured glyphs (`tick`/`cross`/`warn_glyph`/`arrow`), and semantic line builders (`ready`/`written`/`skipped`/`done`/`hint`/`warn`/`rule`/`section`). The three `is_styled()` copies collapse to `ui::styled()`; `init_wizard`'s `bold`/`dim`/`section_rule` delegate to `ui`; the clean semantic lines in `init.rs`/`switch.rs` migrate to `ui` helpers. `owo_colors` emits the same escape codes as the prior literals and helpers degrade to plain text when unstyled, so output is byte-equivalent — verified by the existing init integration tests (which assert on plain text) plus new `ui` unit tests. Mixed lines with inline code spans keep their `ui::styled()`-gated branches (preserving backtick markers in plain mode) rather than forcing a lossy collapse. Contained to `derrick-cli`. | `derrick-cli` / D60 / D62 |
-| D64 | **Rename `add` → `drill` across the full user surface. Supersedes the command naming in D46 and D50.** `derrick add` drove the entire dark-factory pipeline (spec → clarify → assay → plan → tasks → batch → foreman dispatch → implementation). `add` is the verb of passive list-appending (`git add`, `npm add`) — it framed derrick as a backlog/queue tool rather than the build/execution engine it is. `drill` is the verb the oil-derrick metaphor implies (a derrick drills the well) and fits the existing vocabulary (site / foreman / hand / dispatch). Applied consistently: (a) **CLI** — `derrick drill "<prompt>"` is the canonical command; `add` is retained as a hidden, deprecated alias. (b) **Run subcommand** — `derrick run drill`; the runner also accepts the legacy `pipeline_id` `"add-feature"` as a deprecated alias so existing run manifests remain resumable. (c) **Slash command and skill** — `/drill`; the plugin ships `commands/drill.md` and `skills/drill/SKILL.md`. (d) **`pipeline_id` string** — canonical value is `"drill"`; `"add-feature"` is a deprecated alias accepted at runtime. English prose uses of "add"/"adds" that describe general actions (e.g. "derrick adds the PR URL to the ticket") are unchanged — only command-name references are renamed. | §5.3 / §6 / §10.2 / §11 / D46 / D50 |
+| D64 | **Feature prompt accepted from file or stdin.** The feature brief previously had to be a shell-positional/`--prompt` string, making a large multi-line `/speckit.specify`-style brief (newlines, quotes, `$`) painful to pass. Resolution: add `--prompt-file <path>` to both `derrick add` and `derrick run add-feature`, and read stdin when the prompt is the `-` sentinel, `--prompt-file -` is given, or input is piped with no other source. A new `derrick-cli` `prompt_input` resolver folds the three sources into the single `Option<String>` that feeds `state.prompt`; the "is stdin a terminal" check and reader are injected so the rules are unit-tested without a TTY. More than one explicit source is a usage error; a missing file or empty-after-trim prompt is rejected; one trailing newline is trimmed and interior newlines preserved; terminal-with-nothing returns `None`, preserving the interactive no-prompt fallback. Resolution happens once before the prompt-key auto-resume scan so the key matches. Contained to `derrick-cli`; no `derrick-flow`/schema/token-accounting change. | §5.3 / `derrick-cli` |
+| D65 | **Host-CLI-only model routing — no BYOK.** Derrick routes ALL model inference through exactly five host CLIs: `claude` (Claude Code), `codex`, `copilot` (GitHub Copilot CLI), `opencode`, `aider`. Derrick holds no API keys. Each host CLI manages its own auth; derrick's `AuthStore` shrinks to env-passthrough only (forwarding vars such as `GH_TOKEN` and proxy vars to child processes). Supersedes D12. The `derrick-models` `Model`-trait providers collapse into a single **host-delegated provider** that maps a `ModelDef` to a host, builds a `HostRequest`, calls the `derrick-tools` host adapter, and wraps the `HostResponse` into a one-shot completion stream. `derrick-models` gains a dependency on `derrick-tools` (no cycle — tools is a leaf). The direct-API `anthropic` provider and the API-key mode of `openai-cli` are deleted; `shell` survives as a bespoke-envelope escape hatch. Host–model mapping: anthropic models route via `claude`; OpenAI models via `codex`; `copilot`, `opencode`, and `aider` are multi-model front-ends that authenticate themselves. opencode and aider are first-class pipeline hosts (D41 extended): the `Host` enum gains `Opencode` and `Aider`. Per-host model normalisation: `claude` strips a leading `anthropic/`; `codex` strips `openai/`; `copilot` strips any `provider/` prefix but keeps its own dotted ids (e.g. `claude-sonnet-4.6`) without dot↔dash translation; `opencode` and `aider` pass `provider/model` verbatim. A curated, current per-host catalogue (owned by `derrick-tools/src/catalogue.rs`) drives defaults and `derrick models check`; unknown model ids WARN and still pass through to the CLI — hard-fail on model id is explicitly prohibited. Current catalogue (May 2026): claude → `claude-opus-4-8` / `claude-sonnet-4-6` / `claude-haiku-4-5`; codex → `gpt-5.5` / `gpt-5.4` / `gpt-5.4-mini` / `gpt-5.2-codex`; copilot → `gpt-5.4` / `gpt-5.3-codex` / `claude-sonnet-4.6` / `claude-haiku-4.5` / `gpt-5.4-mini`; opencode and aider use `provider/model` strings (a few curated, else WARN). `derrick models check` is now implemented with the warn-not-fail rule (completes D15). `MissingCredential` and `AuthStore::require()` are removed. `reqwest` drops out of `derrick-models`. D30's host-vs-provider split stands for invocation shape: the `shell` provider and all non-inference subprocess calls are unchanged; inference-path providers are host-delegated wrappers. | §6.5 / D12 / D15 / D30 / D34 / D41 |
+| D66 | **Model forwarding on the run path; opencode/codex/aider as crew executor hands.** Refines D65/§6.5. Four clauses. (1) **Model forwarding**: derrick now forwards the role-bound `ModelDef.model()` as a normalised `--model` to the host CLI on the RUN path when a model is configured; when unset the host keeps its own default. Two surfaces: pipeline `host:` steps (`derrick-flow` `execute_role_step`) resolve the step's role → model and set `HostRequest.model`; crew executor hands (see clause 2) pass the resolved executor model as `--model`. The host still loads all its own context (CLAUDE.md/AGENTS.md, agents, skills, hooks) — only model *selection* becomes derrick-driven when configured. This narrows, not revokes, the §6.5 "conductor not orchestra" principle: model choice is the one thing derrick now asserts. (2) **opencode/codex/aider as crew executor hands**: D65 made them first-class *pipeline* hosts; this decision makes them first-class *crew executor hands* — new `HandKind` variants `Codex`, `Opencode`, `Aider` executed by a generic host-CLI hand dispatcher in new crate `derrick-hand`, which runs an assigned ticket through the `derrick-tools` host adapter (so the D65 `--model` normalisation and headless flags apply uniformly). The existing `claude` and `copilot` dispatchers are left unchanged for now; folding them onto the generic path is a deferred follow-up. (3) **Copilot crew hand is excluded from `--model`**: the crew `copilot` dispatcher targets GitHub's *cloud* Copilot agent via the API (creates an issue and polls the PR); there is no local CLI and the model is server-side. Model forwarding does NOT apply to the cloud copilot hand. The pipeline `host: copilot` step is a separate local-CLI path and does forward `--model`. (4) **Schema migration**: the `hands.kind` SQLite column currently has `CHECK (kind IN ('claude','copilot','human'))`. Adding the new kinds requires migration 0003, which recreates the `hands` table with the expanded CHECK set (or drops the CHECK and relies on the Rust `HandKind` `FromStr` as the sole source of truth), preserving `owner`/events foreign keys. No config-version bump. **Deferred**: per-host `tools.{codex,opencode,aider}` config blocks (MVP uses hardcoded poll defaults); refactoring the Claude/Copilot dispatchers onto the generic host-CLI path. | §6.5 / §8.1 / §8.2 / D30 / D41 / D65 |
+| D67 | **Foreman-driven adaptive model selection.** Refines D65/D66/§6.5. Five clauses. (1) **`auto` sentinel**: a role's model id may be a concrete PIN (always used as-is) or one of the sentinels `auto` / `auto:light` / `auto:standard` / `auto:heavy`. `auto:*` is a hard tier override that ignores the ticket's complexity; plain `auto` maps to the tier that matches the ticket's complexity. The executor role defaults to `auto`. `auto` is never passed to a host CLI — it is resolved to a concrete model id (or omitted to let the host default) before `HostRequest` is built. `derrick models check` treats only the exact sentinels (`auto` / `auto:light` / `auto:standard` / `auto:heavy`) as PASS once the host CLI is present; lookalikes such as `auto-foo` are validated as ordinary pinned model ids. (2) **Per-host model tiers** live in the D65 catalogue (`derrick-tools/src/catalogue.rs`): each host gains an ordered light / standard / heavy tier mapping — claude: haiku-4-5 / sonnet-4-6 / opus-4-8; codex: gpt-5.4-mini / gpt-5.4 / gpt-5.5; copilot: claude-haiku-4.5 / gpt-5.4 / gpt-5.3-codex; opencode and aider: the `provider/model` string from their curated catalogue entry at the matching tier. Complexity→tier: Low→light, Standard→standard, Heavy→heavy; missing complexity → standard. (3) **`Ticket.complexity`**: a new `Option<Complexity{Low,Standard,Heavy}>` field on the `Ticket` struct, persisted via migration 0004 (a clean `ADD COLUMN complexity TEXT` on the `tickets` table). Complexity is produced by the `tasks` generation step: each task heading carries an HTML-comment marker `<!-- complexity: low|standard|heavy -->`; the tasks→tickets bridge parses and stores it. Missing or garbled values are treated as Standard. Complexity is advisory — it never blocks dispatch. (4) **All crew hands are local CLIs and all participate**: clarifies D66 clause 3, which incorrectly characterised the copilot crew hand as a cloud API path and excluded it from `--model`. The crew wires the LOCAL copilot CLI (`LocalCopilotHandDispatcher`); the cloud GitHub-issue dispatcher is intentionally not wired as a crew hand. The local copilot CLI, like codex / opencode / aider / claude, receives `--model` and participates in tier selection. Model selection for each ticket is resolved inside the three crew dispatchers (`derrick-hand` generic, `LocalCopilotHandDispatcher`, `ClaudeHandDispatcher`) via a shared selector reading `ctx.ticket.complexity`. (5) **Host selection vs model selection**: D66 narrowed §6.5 so derrick asserts model *identity* when configured; D67 refines that to: the user picks the HOST (the executor role's `ModelDef.provider`); the foreman picks the best MODEL within that host per ticket, by tier. An explicit model PIN in `derrick.yaml` always wins over tier selection. | §6.5 / D30 / D41 / D65 / D66 |
+| D68 | **Per-ticket hand worktree lifecycle (hybrid).** Supersedes the D66 deferral that left success-path hand-worktree cleanup out of scope. Both local hand dispatchers (`LocalCopilotHandDispatcher`, `HostCliHandDispatcher`) create a per-ticket `git worktree add` checkout but previously only removed it on a failure path, leaking `.derrick/{copilot,host}-worktrees/<id>` dirs the foreman TTL pass never reclaimed (untracked by any `worktrees` row). Resolution is hybrid: **(a)** each per-ticket worktree is tracked as a ticket-keyed `worktrees` row — `run_id` namespaced `ticket:<id>`, storing the dispatcher's explicit caller-chosen path (distinct from run-keyed rows whose path `reserve_worktree` derives from `worktree_root`) — via two new inherent `pub` methods on `NativeSubstrate`, `register_ticket_worktree(ticket_id, branch, path)` / `forget_ticket_worktree(ticket_id)`; this reuses the existing table (no migration, `SCHEMA_VERSION` unchanged) and needs no `Substrate` trait change (dispatchers hold `Arc<NativeSubstrate>`), and the cleanup pass reclaims abandoned ticket rows unchanged since it keys on `path`+`run_id`. **(b)** A shared helper `foreman::prune_ticket_worktree_dir(repo_root, path)` plus `forget_ticket_worktree` removes the checkout the moment a ticket reaches a terminal hand state (`InReview`/`Done`) or its hand is released/fails — applied identically to both dispatchers (the copilot `PollTask` previously leaked on every non-success path too). Policy: register on create; prune dir + forget row on terminal-success or release/failure; KEEP both (TTL backstop) when left for an operator (`auto_dispatch` off) or when the CLI exited without reaching `InReview`. Safe because the verify/merge flow (`verify_in_review_ticket`, copilot `open_stacked_pr`) observes merges via `gh`/SHAs on `repo_root` and never touches the per-ticket checkout. Accepted caveat: a hand running past `worktree_ttl` (24h) could have its tracked worktree pruned mid-run — identical to the existing run-worktree risk and far beyond the 1h default `poll_timeout`. | §8.2 / §8.6 / D66 |
+| D69 | **Codex PreToolUse/PostToolUse hooks implemented; D34 deferred stance resolved.** `derrick init` now writes `.codex/settings.toml` with scrub and caveman hooks mirroring the Claude Code D29 path. Hook format is the same JSON-equivalent structure: `PreToolUse` (derrick:scrub, `derrick scrub --tool bash`) and `PostToolUse` (derrick:caveman, `derrick caveman --intensity lite`) both on matcher `Bash|Read|Write|Edit|Glob|Grep`. `CodexHost::run()` passes `--dangerously-bypass-hook-trust` so hooks fire in non-interactive automation. The "Codex tool I/O not scrubbed" warning on `derrick init` is removed. *Supersedes D34.* | §9.B.2 / §9.B.3 / T011 |
+| D70 | **Assay reviewer-instruction envelope.** The assay prepends reviewer instructions (`assay_system_prompt`) to the prompt it sends through the host CLI. This is a deliberate, narrow exception to §6.5 "hosts own their own context" — the same narrowing pattern as D66's `--model` clause. Derrick asserts the reviewer's task framing because the assay IS derrick's own feature, not a user pipeline step; the host's broader AGENTS.md / skills are still respected. The verdict contract is now a strict final `**Verdict:** accept\|revise\|reject` line, parsed fail-closed: a response that lacks this exact line is treated as `reject`. Full reviewer quorum is required in multi-reviewer mode — a reviewer that fails to emit the verdict line counts as a `reject` against the quorum. | §7 / §9.C.2 |
+| D71 | **Stacking backends implemented.** The graphite (`gt`) and git-spice (`gs`) backends in `derrick-stack` are real, tested implementations — not v1 stubs. Restack-conflict policy (D19) is unchanged. `derrick doctor` checks the configured backend's binary (`gt` for graphite, `gs` for git-spice, `git`+`gh` for native) and fails the doctor check if the configured backend binary is absent. Supersedes any prose implying these backends were future work. *Superseded by D72* (graphite and git-spice backends deliberately removed). | §8.5 / D19 |
+| D72 | **Native-only stacking: derrick owns its stacking engine.** The graphite (`gt`) and git-spice (`gs`) third-party backend adapters are removed from `derrick-stack`; the native backend (plain git + `gh`) is the sole `StackBackend` implementation. Legacy configs naming `graphite` or `git-spice` fail with an actionable error pointing the user at `native`. Owning the stacking engine beats adapting to third-party CLIs whose semantics derrick cannot guarantee: restack correctness (D19 conflict-bail, D20 branch ownership) depends on derrick observing and controlling the exact git operations. D19, D20, D21, and D22 are unchanged — they govern the native engine. The `StackBackend` trait remains as the §8.6 extension seam for future backends. Supersedes the adapter clauses of D17 and D71. | §8.5 / D17 / D71 |
+| D73 | **Native stacking engine v2: topological cascade restack, whole-stack submit, merge-cascade PR retarget, stack navigation table.** Owning the engine (D72) obligates feature parity with the removed third-party tools where derrick's pipeline needs it; D19/D20/D21/D22 are unchanged. Four capabilities added: (1) `derrick stack restack` processes the `blocks` DAG in deterministic topological order (tie-break: ordinal then ticket id); a D19 conflict blocks only the conflicting ticket and poisons its transitive descendants — independent subtrees continue. (2) `derrick stack submit` walks the batch in stack order, opens missing PRs with the correct base (parent branch for non-roots, `main` for roots), and retargets existing PRs whose base is stale via `gh pr edit --base`. Submit retargets unconditionally rather than reading the current base first — `gh` treats a no-op base change idempotently, and one extra gh call beats a read-then-write race. (3) The foreman's merge-cascade (`restack_dependents`) also retargets the child PR's base after rebase+force-push; `NotSupported` is tolerated (warn + Note), same posture as the force-push gate. (4) `derrick stack submit` maintains an idempotent marked section (`<!-- derrick-stack-nav … -->`) in each stacked PR body listing the stack with the current PR highlighted; replace-if-present, append-if-absent. `derrick stack show` renders a PARENT column with tree indentation by DAG depth in topological order. `StackBackend` gains three additive default methods (`retarget_pr`, `set_pr_body`, `pr_body`) that return `NotSupported`; the native backend overrides all three; `NoneStackBackend` inherits the defaults. §8.6 seam preserved. | §8.5 / D72 |
+| D74 | **Rename \`add\` → \`drill\` across the full user surface. Supersedes the command naming in D46 and D50.** \`derrick add\` drove the entire dark-factory pipeline (spec → clarify → assay → plan → tasks → batch → foreman dispatch). \`add\` is the verb of passive list-appending (\`git add\`, \`npm add\`) — it framed derrick as a backlog/queue tool rather than the build/execution engine it is. \`drill\` is the verb the oil-derrick metaphor implies and fits the existing vocabulary (site / foreman / hand / dispatch). Applied consistently: (a) **CLI** — \`derrick drill "<prompt>"\` is the canonical command; \`add\` is retained as a hidden, deprecated alias. (b) **Run subcommand** — \`derrick run drill\`; the runner also accepts the legacy \`pipeline_id\` \`"add-feature"\` as a deprecated alias so existing run manifests remain resumable. (c) **Slash command and skill** — \`/drill\`; the plugin ships \`commands/drill.md\` and \`skills/drill/SKILL.md\`. (d) **\`pipeline_id\` string** — canonical value is \`"drill"\`; \`"add-feature"\` is a deprecated alias accepted at runtime. (e) The D64 \`--prompt-file\`/stdin surface moves with the rename — \`derrick drill --prompt-file\` and \`derrick run drill --prompt-file\`. English prose uses of "add"/"adds" for general actions are unchanged — only command-name references are renamed. | §5.3 / §6 / §10.2 / §11 / D46 / D50 / D64 |
 
 ### Remaining open questions
 

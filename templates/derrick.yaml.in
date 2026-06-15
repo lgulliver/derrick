@@ -4,27 +4,28 @@ site:
   prefix: {{prefix}}
 models:
   claude-opus:
-    provider: shell
-    cli: "claude"
-    model: claude-opus
+    provider: claude
+    model: claude-opus-4-8
   claude-sonnet:
-    provider: shell
-    cli: "claude"
-    model: claude-sonnet
+    provider: claude
+    model: claude-sonnet-4-6
+  claude-haiku:
+    provider: claude
+    model: claude-haiku-4-5
   codex-gpt5:
-    provider: shell
-    cli: "codex"
-    model: codex-gpt5
+    provider: codex
+    model: gpt-5.5
   copilot:
-    provider: shell
-    cli: "copilot"
-    model: copilot
+    provider: copilot
+    # `auto` (D67): the foreman picks the best copilot model per ticket by
+    # complexity. Pin a specific id here to override.
+    model: auto
 roles:
-  proposer: claude-sonnet
+  proposer: claude-opus
   drafter: claude-sonnet
   reviewer: codex-gpt5
   executor: copilot
-  summariser: claude-sonnet
+  summariser: claude-haiku
 tools:
   speckit:
     enabled: true

@@ -355,11 +355,7 @@ pub fn prescaffold_feature_dir(wd: &Path, prompt: &str) -> Result<std::path::Pat
             let s = name.to_string_lossy().into_owned();
             // Match `NNN-<slug>` exactly (slug after first hyphen).
             let (_prefix, rest) = s.split_once('-')?;
-            if rest == slug.as_str() {
-                Some(s)
-            } else {
-                None
-            }
+            if rest == slug.as_str() { Some(s) } else { None }
         })
         .min(); // deterministic: earliest numeric prefix wins
     let dir_name = match existing {

@@ -6,15 +6,18 @@ use chrono::Utc;
 use derrick_config::{PipelineStep, Runner as StepRunner};
 use derrick_models::AuthStore;
 use derrick_substrate::{
-    BatchName, Hand, HandId, HandKind, NewTicket, TicketFilter, TicketId, TicketState,
+    BatchName, Complexity, Hand, HandId, HandKind, NewTicket, TicketFilter, TicketId, TicketState,
 };
-use derrick_tools::{CopilotToolPermission, HostRegistry, HostRequest};
+use derrick_tools::{
+    CopilotToolPermission, HostRegistry, HostRequest, ModelChoice, Tier, catalogue,
+    parse_model_choice,
+};
 use owo_colors::OwoColorize;
 
 use crate::clarify;
 use derrick_assay::io::write_log;
 use derrick_assay::names::host_name;
-use derrick_assay::template::{render_template, TemplateContext};
+use derrick_assay::template::{TemplateContext, render_template, template_value};
 use derrick_assay::types::{RunError, StepExecution, StepRecord, StepStatus};
 use derrick_assay::{self as assay, ExecutionState};
 
@@ -206,6 +209,25 @@ async fn execute_role_step(
         let mut request = HostRequest::new(prompt, working_dir(state, repo_root));
         request.headless = true;
         request.output_sink = output_sink;
+        // Forward the model bound to this step's role so the host adapter can
+        // pass `--model`. The value is RAW (provider/model or bare id) — the
+        // adapter calls `catalogue::normalize` per-host (D65), so we must not
+        // normalise here. A configured `auto` resolves to the host's Standard
+        // tier here (pipeline steps have no ticket complexity to bias on) — we
+        // never forward the literal `auto` (D67).
+        let model_id = step
+            .role()
+            .and_then(|role| config.roles().get(role))
+            .and_then(|model_name| config.models().get(model_name))
+            .and_then(|def| match parse_model_choice(def.model()) {
+                ModelChoice::Pinned(id) if !id.trim().is_empty() => Some(id),
+                ModelChoice::Pinned(_) => None,
+                ModelChoice::Auto { bias } => catalogue::builtin()
+                    .host(host_name)
+                    .and_then(|h| h.model_for_tier(bias.unwrap_or(Tier::Standard)))
+                    .map(str::to_owned),
+            });
+        request.model = model_id;
         if host_name == "copilot" {
             request.copilot_tools = CopilotToolPermission::AllowAll;
         }
@@ -263,10 +285,11 @@ async fn execute_role_step(
             })?;
         }
         let roughneck_saved = if config.tools().roughneck().enabled() {
-            derrick_roughneck::estimate_tokens_saved(
-                step_tokens_out,
+            derrick_roughneck::estimate_savings(
+                &response.stdout,
                 config.tools().roughneck().level(),
             )
+            .tokens_saved
         } else {
             0
         };
@@ -305,10 +328,8 @@ async fn execute_role_step(
             .max((prompt_len as u32).saturating_div(4));
         write_log(log_path, &response.text, "")?;
         let roughneck_saved = if config.tools().roughneck().enabled() {
-            derrick_roughneck::estimate_tokens_saved(
-                response.tokens_out,
-                config.tools().roughneck().level(),
-            )
+            derrick_roughneck::estimate_savings(&response.text, config.tools().roughneck().level())
+                .tokens_saved
         } else {
             0
         };
@@ -583,12 +604,7 @@ async fn execute_foreman(
         ))
     })?;
     let hand_kind = hand_kind_for_executor(model.provider(), model.cli());
-    let hand_suffix = match hand_kind {
-        HandKind::Copilot => "copilot",
-        HandKind::Claude => "claude",
-        HandKind::Human => "human",
-        _ => "human",
-    };
+    let hand_suffix = hand_kind.to_string();
     let hand_id = HandId::new(format!("{}-{hand_suffix}-hand", config.site().prefix()))
         .map_err(|e| RunError::Config(format!("foreman: invalid hand id: {e}")))?;
 
@@ -694,6 +710,33 @@ async fn execute_foreman(
     Ok(StepExecution::success(vec![]))
 }
 
+/// Strip a trailing `<!-- complexity: low|standard|heavy -->` marker from a
+/// task heading, returning the cleaned title and the parsed [`Complexity`]
+/// (D67). The match is permissive and case-insensitive; an unrecognised value
+/// yields `None` and the marker is still stripped from the title.
+fn parse_complexity_marker(title: &str) -> (String, Option<Complexity>) {
+    let trimmed = title.trim_end();
+    let lower = trimmed.to_ascii_lowercase();
+    let Some(open) = lower.rfind("<!--") else {
+        return (trimmed.to_owned(), None);
+    };
+    if !lower[open..].ends_with("-->") {
+        return (trimmed.to_owned(), None);
+    }
+    let inner = &lower[open + 4..lower.len() - 3];
+    let Some(value) = inner.trim().strip_prefix("complexity:") else {
+        return (trimmed.to_owned(), None);
+    };
+    let complexity = match value.trim() {
+        "low" => Some(Complexity::Low),
+        "standard" => Some(Complexity::Standard),
+        "heavy" => Some(Complexity::Heavy),
+        _ => None,
+    };
+    let cleaned = trimmed[..open].trim_end().to_owned();
+    (cleaned, complexity)
+}
+
 fn parse_tasks_from_markdown(
     text: &str,
     batch: &derrick_substrate::BatchName,
@@ -717,20 +760,21 @@ fn parse_tasks_from_markdown(
                 let body = body_lines.join("\n").trim().to_owned();
                 let id_str = format!("{sanitized_prefix}-{ordinal}");
                 if let Ok(id) = TicketId::new(&id_str) {
-                    tickets.push(
-                        NewTicket::new(
-                            id,
-                            Some(batch.clone()),
-                            Some(ordinal),
-                            prev_title,
-                            body,
-                            vec!["task".to_owned()],
-                        )
-                        .map_err(|e| RunError::StepFailed {
-                            id: "bridge".to_owned(),
-                            message: format!("invalid ticket {id_str}: {e}"),
-                        })?,
-                    );
+                    let (clean_title, complexity) = parse_complexity_marker(&prev_title);
+                    let mut nt = NewTicket::new(
+                        id,
+                        Some(batch.clone()),
+                        Some(ordinal),
+                        clean_title,
+                        body,
+                        vec!["task".to_owned()],
+                    )
+                    .map_err(|e| RunError::StepFailed {
+                        id: "bridge".to_owned(),
+                        message: format!("invalid ticket {id_str}: {e}"),
+                    })?;
+                    nt.complexity = complexity;
+                    tickets.push(nt);
                 }
                 ordinal += 1;
             }
@@ -745,31 +789,43 @@ fn parse_tasks_from_markdown(
         let body = body_lines.join("\n").trim().to_owned();
         let id_str = format!("{sanitized_prefix}-{ordinal}");
         if let Ok(id) = TicketId::new(&id_str) {
-            tickets.push(
-                NewTicket::new(
-                    id,
-                    Some(batch.clone()),
-                    Some(ordinal),
-                    title,
-                    body,
-                    vec!["task".to_owned()],
-                )
-                .map_err(|e| RunError::StepFailed {
-                    id: "bridge".to_owned(),
-                    message: format!("invalid ticket: {e}"),
-                })?,
-            );
+            let (clean_title, complexity) = parse_complexity_marker(&title);
+            let mut nt = NewTicket::new(
+                id,
+                Some(batch.clone()),
+                Some(ordinal),
+                clean_title,
+                body,
+                vec!["task".to_owned()],
+            )
+            .map_err(|e| RunError::StepFailed {
+                id: "bridge".to_owned(),
+                message: format!("invalid ticket: {e}"),
+            })?;
+            nt.complexity = complexity;
+            tickets.push(nt);
         }
     }
 
     Ok(tickets)
 }
 
-fn hand_kind_for_executor(provider: &str, cli: Option<&str>) -> HandKind {
-    if provider == "copilot-cli" || cli.is_some_and(|value| value.starts_with("copilot")) {
+/// Maps a model's `provider` / `cli` to the [`HandKind`] that should own its
+/// crew-mode tickets. Copilot now runs through the local `copilot` CLI (which
+/// DOES take `--model`, D67); claude, codex, opencode, and aider are likewise
+/// host-CLI executors; everything else falls back to a human hand.
+pub fn hand_kind_for_executor(provider: &str, cli: Option<&str>) -> HandKind {
+    let matches = |name: &str| provider == name || cli.is_some_and(|value| value.starts_with(name));
+    if matches("copilot") {
         HandKind::Copilot
-    } else if provider == "anthropic" || cli.is_some_and(|value| value.starts_with("claude")) {
+    } else if matches("claude") {
         HandKind::Claude
+    } else if matches("codex") {
+        HandKind::Codex
+    } else if matches("opencode") {
+        HandKind::Opencode
+    } else if matches("aider") {
+        HandKind::Aider
     } else {
         HandKind::Human
     }
@@ -827,7 +883,12 @@ async fn execute_bash_step(
 ) -> Result<StepExecution, RunError> {
     use tokio::process::Command;
     let command = derrick_assay::io::required_step_text(step.command(), step.id(), "command")?;
-    let command = render_template(command, &template_context(config, state)?)?;
+    // SECURITY: bash steps run through `bash -lc`, so every substituted
+    // template value (notably the user-controlled `{{prompt}}`) must be
+    // shell-escaped to prevent command injection. The host-CLI path renders
+    // via `render_template` and passes argv directly, so it must NOT be
+    // escaped — keep that path byte-identical.
+    let command = render_template_shell(command, &template_context(config, state)?)?;
 
     // Derive a tool name from the first word of the command for scrubbing.
     // Strip any path prefix so "cargo test" → "cargo" and "/usr/bin/git" → "git".
@@ -934,6 +995,47 @@ fn template_context(
         feature_dir: state.feature_dir.clone(),
         run_id: state.run_id.clone(),
     })
+}
+
+/// Render a template for execution inside a `bash -lc` command line.
+///
+/// Identical substitution semantics to [`render_template`], except every
+/// substituted value is wrapped in POSIX single quotes so it arrives at the
+/// shell as a single literal word. This is the only rendering path that must
+/// escape values; argv-passed host-CLI commands stay byte-identical.
+fn render_template_shell(template: &str, context: &TemplateContext) -> Result<String, RunError> {
+    let mut rendered = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let (prefix, after_prefix) = rest.split_at(start);
+        rendered.push_str(prefix);
+        let end = after_prefix
+            .find("}}")
+            .ok_or_else(|| RunError::Config("unterminated template var".to_owned()))?;
+        let name = after_prefix[2..end].trim();
+        let value = template_value(name, context)?;
+        rendered.push_str(&shell_single_quote(&value));
+        rest = &after_prefix[end + 2..];
+    }
+    rendered.push_str(rest);
+    Ok(rendered)
+}
+
+/// POSIX single-quote escaping: wrap the value in `'...'` and replace each
+/// embedded `'` with `'\''`. The result is a single shell word whose contents
+/// are exactly `value` (newlines, `$()`, backticks, `;` all literal).
+fn shell_single_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 pub(crate) fn inject_clarify_answers_for_plan(
@@ -1210,6 +1312,34 @@ Update version_matches_cargo_pkg_version.
     }
 
     #[test]
+    fn parse_tasks_reads_complexity_marker() {
+        let batch = BatchName::new("feat-batch").unwrap();
+        let text = "## Small fix <!-- complexity: low -->\nbody\n\
+                    ## Big rework <!-- COMPLEXITY: HEAVY -->\nbody\n\
+                    ## Plain task\nbody\n\
+                    ## Bogus marker <!-- complexity: enormous -->\nbody\n";
+        let tickets = super::parse_tasks_from_markdown(text, &batch, "tsk").unwrap();
+        assert_eq!(tickets.len(), 4);
+        // Marker is stripped from the title and parsed (case-insensitive).
+        assert_eq!(tickets[0].title, "Small fix");
+        assert_eq!(
+            tickets[0].complexity,
+            Some(derrick_substrate::Complexity::Low)
+        );
+        assert_eq!(tickets[1].title, "Big rework");
+        assert_eq!(
+            tickets[1].complexity,
+            Some(derrick_substrate::Complexity::Heavy)
+        );
+        // No marker -> None.
+        assert_eq!(tickets[2].title, "Plain task");
+        assert_eq!(tickets[2].complexity, None);
+        // Unknown value -> None, but the marker is still stripped.
+        assert_eq!(tickets[3].title, "Bogus marker");
+        assert_eq!(tickets[3].complexity, None);
+    }
+
+    #[test]
     fn parse_tasks_no_headings_returns_empty() {
         let batch = BatchName::new("test-batch").unwrap();
         let text = "Just some text\nwithout any headings.\n";
@@ -1227,7 +1357,7 @@ Update version_matches_cargo_pkg_version.
 
     #[test]
     fn hand_kind_uses_provider_for_copilot() {
-        let kind = super::hand_kind_for_executor("copilot-cli", None);
+        let kind = super::hand_kind_for_executor("copilot", None);
         assert_eq!(kind, derrick_substrate::HandKind::Copilot);
     }
 
@@ -1239,7 +1369,62 @@ Update version_matches_cargo_pkg_version.
 
     #[test]
     fn hand_kind_uses_provider_for_claude() {
-        let kind = super::hand_kind_for_executor("anthropic", None);
+        let kind = super::hand_kind_for_executor("claude", None);
         assert_eq!(kind, derrick_substrate::HandKind::Claude);
+    }
+
+    fn ctx_with_prompt(prompt: &str) -> derrick_assay::template::TemplateContext {
+        derrick_assay::template::TemplateContext {
+            prompt: prompt.to_owned(),
+            site_name: "site".to_owned(),
+            site_prefix: "st".to_owned(),
+            feature_dir: None,
+            run_id: "20250101-000000".to_owned(),
+        }
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quotes() {
+        assert_eq!(super::shell_single_quote("abc"), "'abc'");
+        assert_eq!(super::shell_single_quote("a'b"), "'a'\\''b'");
+        assert_eq!(super::shell_single_quote(""), "''");
+    }
+
+    #[test]
+    fn render_template_shell_wraps_value_in_single_quotes() {
+        let ctx = ctx_with_prompt("hello world");
+        let rendered = super::render_template_shell("printf '%s' {{prompt}}", &ctx).unwrap();
+        assert_eq!(rendered, "printf '%s' 'hello world'");
+    }
+
+    /// End-to-end: a malicious prompt must arrive at the bash step as literal
+    /// text, never as shell metacharacters. We render through the shell path
+    /// and actually execute the result, then compare what bash wrote.
+    fn assert_bash_receives_literal(prompt: &str) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let out = tmp.path().join("out.txt");
+        let ctx = ctx_with_prompt(prompt);
+        // The template printf-writes {{prompt}} verbatim to a file.
+        let template = format!("printf '%s' {{{{prompt}}}} > {}", out.display());
+        let rendered = super::render_template_shell(&template, &ctx).unwrap();
+        let status = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(&rendered)
+            .status()
+            .expect("run bash");
+        assert!(status.success(), "bash failed for prompt {prompt:?}");
+        let written = std::fs::read_to_string(&out).expect("read out");
+        // The bytes printf wrote equal the original prompt verbatim: no
+        // command substitution, word splitting, or statement separation ran.
+        assert_eq!(written, prompt, "rendered: {rendered}");
+    }
+
+    #[test]
+    fn bash_step_receives_injection_attempts_as_literal_text() {
+        assert_bash_receives_literal("'; echo pwned; '");
+        assert_bash_receives_literal("$(touch pwned)");
+        assert_bash_receives_literal("`touch pwned`");
+        assert_bash_receives_literal("line1\nline2");
+        assert_bash_receives_literal("a && rm -rf / ; b");
     }
 }

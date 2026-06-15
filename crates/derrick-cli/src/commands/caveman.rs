@@ -4,7 +4,7 @@
 use std::io::{self, Read};
 
 use anyhow::{Context, Result};
-use derrick_caveman::{compress, Intensity};
+use derrick_caveman::{Intensity, compress};
 
 use crate::commands::{CavemanArgs, CavemanIntensity};
 
@@ -41,7 +41,7 @@ pub(crate) async fn run(args: CavemanArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use derrick_caveman::{compress, Intensity};
+    use derrick_caveman::{Intensity, compress};
 
     use super::*;
 

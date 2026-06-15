@@ -7,19 +7,21 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use derrick_config::Site;
 use derrick_substrate::{
-    Batch, BatchName, BlockReason, Event, EventId, EventKind, EventScope, ForemanMode,
+    Batch, BatchName, BlockReason, Complexity, Event, EventId, EventKind, EventScope, ForemanMode,
     ForemanStatus, Hand, HandId, HandKind, InReviewMetadata, Link, LinkKind, ManualDoneAttestation,
     NewEvent, NewTicket, Substrate, SubstrateError, Ticket, TicketFilter, TicketId, TicketState,
     TypedEvent,
 };
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use tokio::task;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 4;
 const READER_POOL_SIZE: usize = 4;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_state_machine_integrity.sql");
+const MIGRATION_0003: &str = include_str!("../migrations/0003_hand_kinds.sql");
+const MIGRATION_0004: &str = include_str!("../migrations/0004_ticket_complexity.sql");
 
 /// Configuration for opening the native substrate.
 #[derive(Clone, Debug)]
@@ -250,6 +252,82 @@ impl NativeSubstrate {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(sql_error)?;
             Ok(rows)
+        })
+        .await
+    }
+
+    /// Track a per-ticket hand worktree so the foreman TTL cleanup pass can
+    /// reclaim it if it is ever abandoned (crash before terminal-state removal).
+    ///
+    /// Unlike [`reserve_worktree`](Self::reserve_worktree) — which derives the
+    /// path from the substrate's `worktree_root` and is keyed on a run id — hand
+    /// dispatchers choose their own worktree root and use the ticket id as the
+    /// directory name, so the caller supplies the explicit `path`. The row reuses
+    /// the `worktrees` table with a `ticket:`-namespaced key to avoid colliding
+    /// with run-keyed rows. Re-dispatch (same ticket) reopens the existing row.
+    pub async fn register_ticket_worktree(
+        &self,
+        ticket_id: &str,
+        branch: &str,
+        path: &Path,
+    ) -> Result<(), SubstrateError> {
+        let key = ticket_worktree_key(ticket_id);
+        let branch = branch.to_owned();
+        let path = path.to_string_lossy().into_owned();
+        self.run_write(move |connection| {
+            // Reopen an existing row for this ticket first (re-dispatch case).
+            let updated = connection
+                .execute(
+                    "UPDATE worktrees SET branch = ?1, path = ?2, created_at = ?3, closed_at = NULL
+                     WHERE run_id = ?4",
+                    params![branch, path, now_text(), key],
+                )
+                .map_err(sql_error)?;
+            if updated == 0 {
+                connection
+                    .execute(
+                        "INSERT INTO worktrees (run_id, branch, path, created_at, closed_at)
+                         VALUES (?1, ?2, ?3, ?4, NULL)",
+                        params![key, branch, path, now_text()],
+                    )
+                    .map_err(conflict_or_sql)?;
+            }
+            insert_typed_event_raw(
+                connection,
+                &EventScope::Worktree {
+                    run_id: key.clone(),
+                },
+                &EventKind::WorktreeReserved {
+                    run_id: key.clone(),
+                    branch: branch.clone(),
+                },
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Forget a per-ticket hand worktree row after the dispatcher has removed the
+    /// on-disk checkout (ticket reached a terminal state or the hand was
+    /// released). No-op if the row was never registered.
+    pub async fn forget_ticket_worktree(&self, ticket_id: &str) -> Result<(), SubstrateError> {
+        let key = ticket_worktree_key(ticket_id);
+        self.run_write(move |connection| {
+            let deleted = connection
+                .execute("DELETE FROM worktrees WHERE run_id = ?1", params![key])
+                .map_err(sql_error)?;
+            if deleted > 0 {
+                insert_typed_event_raw(
+                    connection,
+                    &EventScope::Worktree {
+                        run_id: key.clone(),
+                    },
+                    &EventKind::WorktreeFinalized {
+                        run_id: key.clone(),
+                    },
+                )?;
+            }
+            Ok(())
         })
         .await
     }
@@ -549,14 +627,13 @@ impl NativeSubstrate {
     {
         let guard = Arc::clone(&self.writer).lock_owned().await;
         let db_path = self.db_path.clone();
-        let result = task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             let _guard = guard;
             let mut connection = open_writer_connection(&db_path)?;
             operation(&mut connection)
         })
         .await
-        .map_err(join_error)?;
-        result
+        .map_err(join_error)?
     }
 
     #[cfg(test)]
@@ -635,15 +712,17 @@ impl Substrate for NativeSubstrate {
                 .execute(
                     "INSERT INTO tickets
                      (id, batch, ordinal, title, body, state, owner, merge_sha,
-                      block_reason, block_reason_detail, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, 'ready', NULL, NULL, NULL, NULL, ?6, ?6)",
+                      block_reason, block_reason_detail, created_at, updated_at,
+                      complexity)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'ready', NULL, NULL, NULL, NULL, ?6, ?6, ?7)",
                     params![
                         ticket.id.as_str(),
                         ticket.batch.as_ref().map(BatchName::as_str),
                         ticket.ordinal.map(i64::from),
                         ticket.title,
                         ticket.body,
-                        now
+                        now,
+                        ticket.complexity.map(|c| c.to_string())
                     ],
                 )
                 .map_err(conflict_or_sql)?;
@@ -742,13 +821,32 @@ impl Substrate for NativeSubstrate {
                 });
             }
             ensure_hand_exists(&transaction, &hand)?;
-            transaction
+            // The state predicate makes the claim atomic at the SQLite level.
+            // The in-Rust check above only protects against same-process
+            // callers; the writer mutex does not span processes (foreman
+            // daemon + CLI, or two foremen in crew mode). Another writer can
+            // flip this ticket to `in_flight` between our SELECT and UPDATE,
+            // so we gate the UPDATE on `state = 'ready'` and treat a zero-row
+            // result as a lost-update conflict. (D-substrate single-writer.)
+            let affected = transaction
                 .execute(
                     "UPDATE tickets SET state = 'in_flight', owner = ?1, updated_at = ?2
-                     WHERE id = ?3",
+                     WHERE id = ?3 AND state = 'ready'",
                     params![hand.as_str(), now_text(), id.as_str()],
                 )
                 .map_err(conflict_or_sql)?;
+            if affected == 0 {
+                // Our SELECT saw `Ready`, but the UPDATE matched no rows: a
+                // concurrent writer claimed the ticket first. Do not write the
+                // assignment events; abort the whole transaction so nothing is
+                // persisted.
+                return Err(SubstrateError::Conflict {
+                    message: format!(
+                        "ticket {} was claimed concurrently; assign_to_hand lost the race",
+                        id.as_str()
+                    ),
+                });
+            }
             insert_typed_event_raw(
                 &transaction,
                 &EventScope::Ticket(id.clone()),
@@ -1718,7 +1816,7 @@ impl Substrate for NativeSubstrate {
                             scope_hand, scope_run_id
                      FROM events
                      WHERE (?1 IS NULL OR at > ?1)
-                     ORDER BY rowid ASC
+                     ORDER BY at DESC, rowid DESC
                      LIMIT ?2",
                 )
                 .map_err(sql_error)?;
@@ -1994,6 +2092,29 @@ fn migrate(connection: &mut Connection) -> Result<(), SubstrateError> {
     if version < 2 {
         run_migration_0002(connection)?;
     }
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    if version < 3 {
+        run_migration_0003(connection)?;
+    }
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    if version < 4 {
+        run_migration_0004(connection)?;
+    }
+    Ok(())
+}
+
+fn run_migration_0004(connection: &mut Connection) -> Result<(), SubstrateError> {
+    // A plain additive column: no table rebuild, so no foreign_keys toggle and
+    // no foreign_key_check (nothing references `tickets.complexity`).
+    let transaction = connection.transaction().map_err(sql_error)?;
+    transaction
+        .execute_batch(MIGRATION_0004)
+        .map_err(sql_error)?;
+    transaction.commit().map_err(sql_error)?;
     Ok(())
 }
 
@@ -2023,6 +2144,48 @@ fn run_migration_0002(connection: &mut Connection) -> Result<(), SubstrateError>
         if !violations.is_empty() {
             return Err(SubstrateError::Invalid {
                 field: "migration_0002".to_owned(),
+                message: format!("foreign_key_check violations: {violations:?}"),
+            });
+        }
+        transaction.commit().map_err(sql_error)?;
+        Ok(())
+    })();
+
+    // Re-enable FKs regardless of success — leaving them off would silently
+    // disable downstream integrity checks.
+    let restore = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration_result?;
+    restore.map_err(sql_error)?;
+    Ok(())
+}
+
+fn run_migration_0003(connection: &mut Connection) -> Result<(), SubstrateError> {
+    // PRAGMA foreign_keys = OFF must run OUTSIDE any transaction. The hands
+    // table-rebuild relies on FKs being off so DROP TABLE hands succeeds
+    // while tickets.owner and events.scope_hand still reference hands(id).
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(sql_error)?;
+
+    let migration_result = (|| -> Result<(), SubstrateError> {
+        let transaction = connection.transaction().map_err(sql_error)?;
+        transaction
+            .execute_batch(MIGRATION_0003)
+            .map_err(sql_error)?;
+        let mut statement = transaction
+            .prepare("PRAGMA foreign_key_check;")
+            .map_err(sql_error)?;
+        let violations: Vec<(String, i64, String, i64)> = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(sql_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_error)?;
+        drop(statement);
+        if !violations.is_empty() {
+            return Err(SubstrateError::Invalid {
+                field: "migration_0003".to_owned(),
                 message: format!("foreign_key_check violations: {violations:?}"),
             });
         }
@@ -2245,7 +2408,7 @@ fn select_optional_ticket(
     let row = connection
         .query_row(
             "SELECT id, batch, ordinal, title, body, state, owner, merge_sha,
-                    block_reason_detail, created_at, updated_at
+                    block_reason_detail, created_at, updated_at, complexity
              FROM tickets WHERE id = ?1",
             params![id.as_str()],
             ticket_base_from_row,
@@ -2425,6 +2588,7 @@ fn ticket_base_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ticket> {
     let block_reason_detail: Option<String> = row.get(8)?;
     let created_at: String = row.get(9)?;
     let updated_at: String = row.get(10)?;
+    let complexity: Option<String> = row.get(11)?;
 
     let block_reason = match block_reason_detail {
         Some(detail) => Some(parse_in_row(detail, |s| serde_json::from_str(&s))?),
@@ -2442,6 +2606,7 @@ fn ticket_base_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ticket> {
         owner: parse_optional_in_row(owner, HandId::new)?,
         merge_sha,
         block_reason,
+        complexity: parse_optional_in_row(complexity, |value| Complexity::from_str(&value))?,
         created_at: parse_time_in_row(created_at)?,
         updated_at: parse_time_in_row(updated_at)?,
     })
@@ -2740,6 +2905,12 @@ fn absolute_path(path: PathBuf) -> Result<PathBuf, SubstrateError> {
 
 fn now_text() -> String {
     format_time(Utc::now())
+}
+
+/// Namespaced `worktrees.run_id` key for a per-ticket hand worktree, kept
+/// distinct from run-keyed rows reserved by [`NativeSubstrate::reserve_worktree`].
+fn ticket_worktree_key(ticket_id: &str) -> String {
+    format!("ticket:{ticket_id}")
 }
 
 fn format_time(time: DateTime<Utc>) -> String {

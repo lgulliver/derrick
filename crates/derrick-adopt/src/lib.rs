@@ -14,11 +14,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
-use derrick_config::{render_init_template, Config, InitTemplateVars, SubstrateMode};
-use derrick_models::{resolve_role, AuthStore, CompletionRequest};
+use derrick_config::{Config, InitTemplateVars, SubstrateMode, render_init_template};
+use derrick_models::{AuthStore, CompletionRequest, resolve_role};
 use derrick_substrate_native::{NativeConfig, NativeSubstrate};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -48,6 +48,10 @@ const POST_TOOL_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../templates/hooks/claude-post-tool-use.json"
 ));
+const CODEX_SETTINGS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../templates/hooks/codex-settings.toml"
+));
 
 /// Contents of the generated `.derrick/.gitignore`. Entries are relative to
 /// the `.derrick/` directory, so they are bare (e.g. `copilot-worktrees/`, not
@@ -59,6 +63,8 @@ pub const DERRICK_GITIGNORE: &str = "runs/\nstate.json\nforeman.log\nderrick.db*
 
 const DERRICK_BLOCK_START: &str = "<!-- derrick:start -->";
 const DERRICK_BLOCK_END: &str = "<!-- derrick:end -->";
+const DERRICK_TOML_BLOCK_START: &str = "# derrick:start";
+const DERRICK_TOML_BLOCK_END: &str = "# derrick:end";
 const DRAFT_BANNER_PREFIX: &str = "<!-- DERRICK-DRAFT:";
 const CLAUDE_MATCHERS: [&str; 6] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"];
 const COMMAND_NAMES: [&str; 10] = [
@@ -128,6 +134,7 @@ impl Adopter {
         report.codex_config = self
             .relative_if_file(".codex/config.toml")
             .or_else(|| self.relative_if_file(".codex/settings.json"));
+        report.codex_settings_toml = self.relative_if_file(".codex/settings.toml");
         report.github_copilot_instructions =
             self.relative_if_file(".github/copilot-instructions.md");
         report.codeowners = self
@@ -264,6 +271,9 @@ impl Adopter {
         self.add_append_writes(detection, opts, &mut plan);
         self.add_commands_and_agents(detection, opts, &mut plan, &mut warnings);
         self.add_codex_instructions(detection, &mut plan);
+        if !opts.no_hooks {
+            self.add_codex_settings(detection, &mut plan);
+        }
         self.add_mcp_write(detection, &mut plan)?;
         if !opts.no_hooks {
             self.add_hook_write(detection, opts, &mut plan, &mut blockers, &mut warnings)?;
@@ -466,6 +476,7 @@ impl Adopter {
             &report.claude_settings,
             &report.mcp_json,
             &report.codex_instructions,
+            &report.codex_settings_toml,
             &report.readme,
             &report.contributing,
         ]
@@ -726,7 +737,28 @@ impl Adopter {
             path,
             content,
             mode: WriteMode::Append,
-            rationale: "Codex host context reference; hooks deferred per D34".to_owned(),
+            rationale: "Codex host context reference (D29/D34)".to_owned(),
+        });
+    }
+
+    fn add_codex_settings(&self, detection: &DetectionReport, plan: &mut AdoptionPlan) {
+        let path = PathBuf::from(".codex/settings.toml");
+        let existing = detection
+            .codex_settings_toml
+            .as_ref()
+            .and_then(|p| detection.file_contents.get(p))
+            .cloned()
+            .unwrap_or_default();
+        let content = if existing.is_empty() {
+            CODEX_SETTINGS_TEMPLATE.to_owned()
+        } else {
+            replace_or_append_toml_block(&existing, CODEX_SETTINGS_TEMPLATE)
+        };
+        plan.writes.push(PlannedWrite {
+            path,
+            content,
+            mode: WriteMode::Append,
+            rationale: "Codex D29 scrub and caveman hooks (D34)".to_owned(),
         });
     }
 
@@ -840,12 +872,6 @@ impl Adopter {
                     .to_owned(),
             );
         }
-        if matches!(opts.mode, SubstrateMode::Copilot | SubstrateMode::Crew) {
-            warnings.insert(
-                "Codex host hook installation is deferred; Codex tool I/O is not scrubbed in v1. See D34."
-                    .to_owned(),
-            );
-        }
     }
 
     fn preflight(&self, plan: &AdoptionPlan) -> Result<(), AdoptError> {
@@ -918,8 +944,10 @@ pub struct DetectionReport {
     pub codex_dir: Option<PathBuf>,
     /// Existing `.codex/instructions.md`.
     pub codex_instructions: Option<PathBuf>,
-    /// Existing Codex config.
+    /// Existing Codex config (`.codex/config.toml` or `.codex/settings.json`).
     pub codex_config: Option<PathBuf>,
+    /// Existing `.codex/settings.toml` (D29/D34 hook config).
+    pub codex_settings_toml: Option<PathBuf>,
     /// Existing GitHub Copilot instructions.
     pub github_copilot_instructions: Option<PathBuf>,
     /// Existing CODEOWNERS.
@@ -1847,9 +1875,27 @@ fn strip_derrick_block(text: &str) -> String {
 }
 
 fn replace_or_append_block(existing: &str, block: &str) -> String {
-    if let Some(start) = existing.find(DERRICK_BLOCK_START) {
-        if let Some(end_relative) = existing[start..].find(DERRICK_BLOCK_END) {
-            let end = start + end_relative + DERRICK_BLOCK_END.len();
+    replace_or_append_block_with_markers(existing, block, DERRICK_BLOCK_START, DERRICK_BLOCK_END)
+}
+
+fn replace_or_append_toml_block(existing: &str, block: &str) -> String {
+    replace_or_append_block_with_markers(
+        existing,
+        block,
+        DERRICK_TOML_BLOCK_START,
+        DERRICK_TOML_BLOCK_END,
+    )
+}
+
+fn replace_or_append_block_with_markers(
+    existing: &str,
+    block: &str,
+    start_marker: &str,
+    end_marker: &str,
+) -> String {
+    if let Some(start) = existing.find(start_marker) {
+        if let Some(end_relative) = existing[start..].find(end_marker) {
+            let end = start + end_relative + end_marker.len();
             let mut rendered = String::new();
             rendered.push_str(&existing[..start]);
             rendered.push_str(block.trim_end());
@@ -2049,9 +2095,11 @@ mod tests {
         );
         assert_eq!(report.codeowners, Some(PathBuf::from(".github/CODEOWNERS")));
         assert_eq!(report.adrs_dir, Some(PathBuf::from("docs/adrs")));
-        assert!(report
-            .file_contents
-            .contains_key(&PathBuf::from("docs/adrs/0001.md")));
+        assert!(
+            report
+                .file_contents
+                .contains_key(&PathBuf::from("docs/adrs/0001.md"))
+        );
     }
 
     #[test]
@@ -2095,16 +2143,22 @@ mod tests {
             .find(|write| write.path == Path::new(".claude/settings.json"))
             .unwrap_or_else(|| panic!("missing settings write"));
         for matcher in CLAUDE_MATCHERS {
-            assert!(settings
-                .content
-                .contains(&format!("\"matcher\": \"{matcher}\"")));
+            assert!(
+                settings
+                    .content
+                    .contains(&format!("\"matcher\": \"{matcher}\""))
+            );
         }
-        assert!(settings
-            .content
-            .contains("\"description\": \"derrick:scrub\""));
-        assert!(settings
-            .content
-            .contains("\"description\": \"derrick:caveman\""));
+        assert!(
+            settings
+                .content
+                .contains("\"description\": \"derrick:scrub\"")
+        );
+        assert!(
+            settings
+                .content
+                .contains("\"description\": \"derrick:caveman\"")
+        );
     }
 
     #[test]
@@ -2124,10 +2178,11 @@ mod tests {
             .propose(&report, &opts(), None)
             .unwrap_or_else(|error| panic!("propose failed: {error}"));
 
-        assert!(plan
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("PreToolUse already has an entry on matcher `Bash`")));
+        assert!(
+            plan.blockers.iter().any(
+                |blocker| blocker.contains("PreToolUse already has an entry on matcher `Bash`")
+            )
+        );
     }
 
     #[test]
@@ -2143,19 +2198,21 @@ mod tests {
         let plan = Adopter::new(".")
             .propose(&report, &options, None)
             .unwrap_or_else(|error| panic!("propose failed: {error}"));
-        assert!(plan
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("specify")));
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|blocker| blocker.contains("specify"))
+        );
 
         report.speckit_cli_available = false;
         let plan = Adopter::new(".")
             .propose(&report, &options, None)
             .unwrap_or_else(|error| panic!("propose failed: {error}"));
-        assert!(plan
-            .writes
-            .iter()
-            .any(|write| write.path == Path::new(".specify/memory/constitution.md")));
+        assert!(
+            plan.writes
+                .iter()
+                .any(|write| write.path == Path::new(".specify/memory/constitution.md"))
+        );
     }
 
     #[test]
@@ -2181,34 +2238,43 @@ mod tests {
             .propose(&report, &options, None)
             .unwrap_or_else(|error| panic!("propose failed: {error}"));
 
-        assert!(plan
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("inside a git repo")));
-        assert!(plan
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("derrick.yaml already exists")));
-        assert!(plan
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("existing Claude command")));
-        assert!(plan
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("constitution-like doc")));
-        assert!(plan
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("external-tracker adoption")));
-        assert!(plan
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("Codex host hook")));
-        assert!(plan
-            .references
-            .iter()
-            .any(|reference| reference.path == Path::new("CODEOWNERS")));
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|blocker| blocker.contains("inside a git repo"))
+        );
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|blocker| blocker.contains("derrick.yaml already exists"))
+        );
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|blocker| blocker.contains("existing Claude command"))
+        );
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|blocker| blocker.contains("constitution-like doc"))
+        );
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("external-tracker adoption"))
+        );
+        // Codex hook warning removed — hooks are now installed via .codex/settings.toml (D34).
+        assert!(
+            !plan
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("Codex host hook"))
+        );
+        assert!(
+            plan.references
+                .iter()
+                .any(|reference| reference.path == Path::new("CODEOWNERS"))
+        );
     }
 
     #[test]
@@ -2252,10 +2318,11 @@ mod tests {
             .find(|write| write.path == Path::new(".codex/instructions.md"))
             .unwrap_or_else(|| panic!("missing codex write"));
         assert!(codex.content.contains("Derrick project context"));
-        assert!(plan
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("skipped existing Claude agent")));
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("skipped existing Claude agent"))
+        );
     }
 
     #[test]
@@ -2279,19 +2346,21 @@ mod tests {
             .unwrap_or_else(|error| panic!("propose failed: {error}"));
         assert!(plan.writes.iter().any(|write| write.content == "draft"
             && write.path == Path::new(".specify/memory/constitution.md")));
-        assert!(plan
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("unreviewed LLM prose")));
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("unreviewed LLM prose"))
+        );
 
         report.speckit_cli_available = true;
         let plan = Adopter::new(".")
             .propose(&report, &options, Some("draft"))
             .unwrap_or_else(|error| panic!("propose failed: {error}"));
-        assert!(plan
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("constitution-from-docs")));
+        assert!(
+            plan.blockers
+                .iter()
+                .any(|blocker| blocker.contains("constitution-from-docs"))
+        );
     }
 
     #[test]
@@ -2318,10 +2387,11 @@ mod tests {
             .unwrap_or_else(|| panic!("missing settings"));
         assert!(settings.content.contains("\"custom\": true"));
         assert!(settings.content.contains("\"matcher\": \"Notebook\""));
-        assert!(plan
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("force-prepended")));
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|warning| warning.contains("force-prepended"))
+        );
 
         report
             .file_contents
@@ -2364,12 +2434,16 @@ mod tests {
             .iter()
             .find(|write| write.path == Path::new(".claude/settings.json"))
             .unwrap_or_else(|| panic!("missing settings write"));
-        assert!(settings
-            .content
-            .contains("mcp__derrick-survey__derrick_survey_search"));
-        assert!(settings
-            .content
-            .contains("mcp__derrick-survey__derrick_survey_status"));
+        assert!(
+            settings
+                .content
+                .contains("mcp__derrick-survey__derrick_survey_search")
+        );
+        assert!(
+            settings
+                .content
+                .contains("mcp__derrick-survey__derrick_survey_status")
+        );
     }
 
     #[test]
@@ -2457,9 +2531,11 @@ mod tests {
         let allow = value["permissions"]["allow"]
             .as_array()
             .unwrap_or_else(|| panic!("missing permissions.allow"));
-        assert!(allow
-            .iter()
-            .any(|v| v.as_str() == Some("mcp__derrick-survey__derrick_survey_search")));
+        assert!(
+            allow
+                .iter()
+                .any(|v| v.as_str() == Some("mcp__derrick-survey__derrick_survey_search"))
+        );
 
         options.site_prefix = "TOOLONG".to_owned();
         let error = Adopter::new(".")
@@ -2520,10 +2596,12 @@ mod tests {
 
         assert!(dir.path().join("derrick.yaml").is_file());
         assert!(dir.path().join(".derrick/derrick.db").is_file());
-        assert!(outcome
-            .written
-            .iter()
-            .any(|path| path == Path::new("derrick.yaml")));
+        assert!(
+            outcome
+                .written
+                .iter()
+                .any(|path| path == Path::new("derrick.yaml"))
+        );
 
         let report = adopter
             .detect()

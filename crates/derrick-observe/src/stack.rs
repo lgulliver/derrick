@@ -6,25 +6,39 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use derrick_config::StackBackendKind;
-use derrick_tui::StackNode;
+use derrick_tui::{StackLoadResult, StackNode};
+
+/// Write `result` into the shared load-state arc.
+fn set_load_result(arc: &Arc<RwLock<StackLoadResult>>, result: StackLoadResult) {
+    match arc.write() {
+        Ok(mut g) => *g = result,
+        Err(p) => *p.into_inner() = result,
+    }
+}
 
 /// Refresh the shared `nodes` vec by shelling out to `gh pr list`.
 ///
-/// Called once on startup in a background `tokio::task`. Silently logs
-/// errors and leaves `nodes` unchanged on failure so the UI shows
-/// "loading…" until data arrives or fails.
+/// Called once on startup in a background `tokio::task`.
+///
+/// On success the shared `nodes` vec is replaced and `load_result` is set to
+/// [`StackLoadResult::Loaded`].  On any failure `load_result` is set to
+/// [`StackLoadResult::Error`] with a short human-readable message so the
+/// Stack tab can render an explicit error rather than an eternal spinner. The
+/// error is also emitted via `tracing::warn!`.
 pub async fn refresh_stack_nodes(
     backend: StackBackendKind,
     repo_root: &Path,
     nodes: Arc<RwLock<Vec<StackNode>>>,
+    load_result: Arc<RwLock<StackLoadResult>>,
 ) {
     if backend == StackBackendKind::None {
-        // Stacking disabled — leave the list empty; the Stack tab will show
-        // "no stack data" rather than "loading…".
+        // Stacking disabled — mark as loaded with an empty list so the Stack
+        // tab shows "no open PRs found" rather than "loading…".
         match nodes.write() {
             Ok(mut g) => g.clear(),
             Err(p) => p.into_inner().clear(),
         }
+        set_load_result(&load_result, StackLoadResult::Loaded);
         return;
     }
 
@@ -43,21 +57,30 @@ pub async fn refresh_stack_nodes(
     {
         Ok(o) => o,
         Err(e) => {
-            tracing::warn!("stack refresh: gh pr list failed: {e}");
+            let reason = format!("gh not found or could not be executed: {e}");
+            tracing::warn!("stack refresh: {reason}");
+            set_load_result(&load_result, StackLoadResult::Error(reason));
             return;
         }
     };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!("stack refresh: gh pr list non-zero exit: {stderr}");
+        let reason = format!(
+            "gh pr list exited non-zero: {}",
+            stderr.lines().next().unwrap_or("(no stderr)")
+        );
+        tracing::warn!("stack refresh: {reason}");
+        set_load_result(&load_result, StackLoadResult::Error(reason));
         return;
     }
 
     let values: Vec<serde_json::Value> = match serde_json::from_slice(&output.stdout) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("stack refresh: parse error: {e}");
+            let reason = format!("failed to parse gh pr list output: {e}");
+            tracing::warn!("stack refresh: {reason}");
+            set_load_result(&load_result, StackLoadResult::Error(reason));
             return;
         }
     };
@@ -85,4 +108,5 @@ pub async fn refresh_stack_nodes(
         Ok(mut g) => *g = fresh,
         Err(p) => *p.into_inner() = fresh,
     }
+    set_load_result(&load_result, StackLoadResult::Loaded);
 }

@@ -8,12 +8,12 @@ use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
+use crate::SurveyError;
 use crate::model::{BuildOptions, BuildReport};
 use crate::parse::{self, ParsedFile};
 use crate::walk::{self, Discovered};
-use crate::SurveyError;
 
 /// A discovered file with its content and freshness metadata.
 struct FileMeta {
@@ -110,6 +110,16 @@ pub(crate) fn run(
         }
     }
     tx.commit()?;
+
+    // Record the build timestamp so freshness queries can surface it.
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    connection.execute(
+        "INSERT INTO meta (key, value) VALUES ('last_build_ts', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![now],
+    )?;
 
     let (symbols, refs) = counts(connection)?;
     Ok(BuildReport {

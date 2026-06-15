@@ -10,7 +10,9 @@ pub(crate) mod foreman;
 pub(crate) mod gain;
 pub(crate) mod init;
 pub(crate) mod init_wizard;
+pub(crate) mod models;
 pub(crate) mod observe;
+pub(crate) mod prompt_input;
 pub(crate) mod run;
 pub(crate) mod scrub;
 pub(crate) mod stack;
@@ -36,6 +38,8 @@ pub(crate) enum Command {
     Init(InitArgs),
     Status(StatusArgs),
     Doctor(DoctorArgs),
+    /// Inspect and validate model/role/host configuration.
+    Models(ModelsArgs),
     Run(RunArgs),
     Completions(CompletionsArgs),
     Ticket(TicketArgs),
@@ -59,6 +63,12 @@ pub(crate) enum Command {
 pub(crate) struct DrillArgs {
     /// Feature description. Equivalent to `run drill --prompt "..."`.
     pub(crate) prompt: Option<String>,
+    #[arg(
+        long = "prompt-file",
+        value_name = "PATH",
+        help = "Read the feature prompt from a file (use - for stdin)"
+    )]
+    pub(crate) prompt_file: Option<String>,
     #[arg(long = "resume-from")]
     pub(crate) resume_from: Option<String>,
     #[arg(long = "run")]
@@ -225,6 +235,24 @@ pub(crate) struct DoctorArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct ModelsArgs {
+    #[command(subcommand)]
+    pub(crate) command: ModelsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ModelsCommand {
+    /// Validate configured models and role bindings against the host catalogue.
+    Check(ModelsCheckArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ModelsCheckArgs {
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct RunArgs {
     #[command(subcommand)]
     pub(crate) command: RunCommand,
@@ -241,6 +269,12 @@ pub(crate) enum RunCommand {
 pub(crate) struct DrillRunArgs {
     #[arg(long)]
     pub(crate) prompt: Option<String>,
+    #[arg(
+        long = "prompt-file",
+        value_name = "PATH",
+        help = "Read the feature prompt from a file (use - for stdin)"
+    )]
+    pub(crate) prompt_file: Option<String>,
     #[arg(long)]
     pub(crate) resume_from: Option<String>,
     #[arg(long = "run")]
@@ -498,6 +532,12 @@ pub(crate) enum SurveyCommand {
     Status(SurveyStatusArgs),
     /// Run the MCP server over stdio (what coding-agent hosts launch).
     Serve(SurveyServeArgs),
+    /// Wire the survey MCP server into this repo without running `derrick init`.
+    ///
+    /// Creates `.derrick/` (with a `.gitignore` for the index DB) and merges
+    /// the `derrick-survey` stdio server into `.mcp.json`. Safe to run on any
+    /// git repo — does not require a `derrick.yaml` or a substrate database.
+    Setup(SurveySetupArgs),
 }
 
 #[derive(Debug, Args)]
@@ -545,6 +585,9 @@ pub(crate) struct SurveyServeArgs {
     #[arg(long, default_value_t = true)]
     pub(crate) mcp: bool,
 }
+
+#[derive(Debug, Args)]
+pub(crate) struct SurveySetupArgs {}
 
 impl From<CompletionShell> for clap_complete::Shell {
     fn from(shell: CompletionShell) -> Self {

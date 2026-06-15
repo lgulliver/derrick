@@ -20,6 +20,8 @@ derrick-caveman = { path = "../derrick-caveman" }
 derrick-claude = { path = "../derrick-claude" }
 derrick-copilot = { path = "../derrick-copilot" }
 derrick-flow = { path = "../derrick-flow" }
+derrick-hand = { path = "../derrick-hand" }
+derrick-memory = { path = "../derrick-memory" }
 derrick-models = { path = "../derrick-models" }
 derrick-stack = { path = "../derrick-stack" }
 derrick-substrate = { path = "../derrick-substrate" }
@@ -39,6 +41,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 which = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

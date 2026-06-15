@@ -8,8 +8,8 @@
 
 use std::path::Path;
 
-use crate::commands::init::{available_model_ids, nested_mapping, recommended_role_bindings};
 use crate::commands::InitMode;
+use crate::commands::init::{available_model_ids, nested_mapping, recommended_role_bindings};
 use crate::exit_code::CliExitCode;
 use crate::ui;
 use crate::{current_repo_root, message, write_file};

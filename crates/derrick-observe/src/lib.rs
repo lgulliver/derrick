@@ -17,7 +17,8 @@ use derrick_config::Config;
 use derrick_substrate::Substrate;
 use derrick_substrate_native::{NativeConfig, NativeSubstrate};
 use derrick_tui::{
-    install_panic_hook, run_event_loop, App, DataModel, EventLoopPaths, MemoryEntry, StackNode, Tab,
+    App, DataModel, EventLoopPaths, MemoryEntry, StackLoadResult, StackNode, Tab,
+    install_panic_hook, run_event_loop,
 };
 
 const MEMORY_PREVIEW_CHARS: usize = 200;
@@ -44,17 +45,22 @@ pub async fn observe(initial_tab: Tab, _site: Option<String>) -> anyhow::Result<
     let memory = read_memory_entries(&memory_dir).unwrap_or_default();
     let memory_entries = Arc::new(std::sync::RwLock::new(memory.clone()));
 
-    // Stack nodes: populated asynchronously in the background. v1 starts
-    // empty; the renderer shows a "loading" sentinel.
+    // Stack nodes: populated asynchronously in the background. Starts
+    // empty; the load-result starts as Loading so the Stack tab renders
+    // a spinner rather than an empty list.
     let stack_nodes = Arc::new(std::sync::RwLock::new(Vec::<StackNode>::new()));
+    let stack_load_result = Arc::new(std::sync::RwLock::new(StackLoadResult::Loading));
 
     // Spawn a background task to populate stack nodes from the gh CLI.
+    // Errors are captured in `stack_load_result` so the Stack tab can
+    // render an explicit message instead of an eternal spinner.
     {
         let backend = config.tools().git().stacking().backend();
         let root = repo_root.clone();
         let sn_clone = Arc::clone(&stack_nodes);
+        let slr_clone = Arc::clone(&stack_load_result);
         tokio::spawn(async move {
-            stack::refresh_stack_nodes(backend, &root, sn_clone).await;
+            stack::refresh_stack_nodes(backend, &root, sn_clone, slr_clone).await;
         });
     }
 
@@ -70,8 +76,12 @@ pub async fn observe(initial_tab: Tab, _site: Option<String>) -> anyhow::Result<
         Ok(g) => g.clone(),
         Err(p) => p.into_inner().clone(),
     };
+    let slr = match stack_load_result.read() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    };
     let runs_dir = state_dir.join("runs");
-    let data = DataModel::refresh(&*substrate, &sn, &memory, Some(runs_dir.as_path()))
+    let data = DataModel::refresh(&*substrate, &sn, slr, &memory, Some(runs_dir.as_path()))
         .await
         .context("initial data refresh")?;
     let mut app = App::new(initial_tab, data);
@@ -88,6 +98,7 @@ pub async fn observe(initial_tab: Tab, _site: Option<String>) -> anyhow::Result<
         &mut app,
         Arc::clone(&substrate),
         stack_nodes,
+        stack_load_result,
         memory_entries,
         EventLoopPaths {
             watch_paths,

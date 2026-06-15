@@ -13,14 +13,14 @@ use chrono::Utc;
 use derrick_substrate::{
     EventKind, EventScope, Hand, HandId, HandKind, InReviewMetadata, Substrate, Ticket,
 };
+use derrick_substrate_native::NativeSubstrate;
 use derrick_substrate_native::foreman::{
     DispatchContext, DispatchError, DispatchResult, HandDispatcher,
 };
-use derrick_substrate_native::NativeSubstrate;
 use tokio::time::Instant;
 use tracing::{error, info, instrument, warn};
 
-use crate::branch::{branch_name, BranchCreator, BranchError};
+use crate::branch::{BranchCreator, BranchError, branch_name};
 use crate::client::{CopilotDispatchClient, CopilotDispatchError, PrInfo};
 
 /// Runtime configuration for [`CopilotHandDispatcher`]. Sourced from

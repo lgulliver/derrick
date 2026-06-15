@@ -179,6 +179,18 @@ pub struct IndexStatus {
     pub schema_version: u32,
     /// Files that differ from the working tree (stale or untracked).
     pub pending: Vec<PendingFile>,
+    /// Unix timestamp (seconds since epoch) of the last completed build.
+    /// `None` when the index has never been built.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_build_ts: Option<i64>,
+    /// Human-readable freshness label for agents.
+    ///
+    /// One of:
+    /// - `"fresh"` — index matches the working tree
+    /// - `"rebuilding"` — a rebuild is in progress (watcher fired)
+    /// - `"stale since <ISO-8601>"` — pending files exist; includes the
+    ///   timestamp of the last completed build when available
+    pub freshness: String,
 }
 
 /// Summary of a `build` run.

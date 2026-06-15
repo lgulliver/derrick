@@ -196,24 +196,68 @@ pub fn prior_feature_dir(steps: &[ManifestStep]) -> Option<std::path::PathBuf> {
         })
 }
 
+/// Write the run manifest atomically.
+///
+/// The manifest is rewritten between every step, so a crash mid-write must
+/// never leave a truncated/corrupt JSON file that would poison resume. We
+/// write to a temp file in the same directory, fsync its contents, then
+/// rename it over the target (rename is atomic on the same filesystem). On
+/// any failure the temp file is removed so it never lingers.
 pub fn write_manifest(path: &Path, manifest: &RunManifest) -> Result<(), RunError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| RunError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    std::fs::write(
-        path,
-        &serde_json::to_string_pretty(manifest).map_err(|source| RunError::Json {
-            path: path.to_path_buf(),
-            source,
-        })?,
-    )
-    .map_err(|source| RunError::Io {
+    use std::io::Write as _;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|source| RunError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+
+    let body = serde_json::to_string_pretty(manifest).map_err(|source| RunError::Json {
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+
+    // Temp file lives in the same directory so the rename stays on one
+    // filesystem (cross-device renames are not atomic and would fail).
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("manifest.json");
+    let tmp_path = parent.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+
+    // Closure so we can clean up the temp file on any early error.
+    let write_and_sync = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp_path)?;
+        file.write_all(body.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    };
+
+    if let Err(source) = write_and_sync() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(RunError::Io {
+            path: tmp_path,
+            source,
+        });
+    }
+
+    if let Err(source) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(RunError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -285,6 +329,52 @@ mod tests {
         );
         m.resume_of = Some("run-1".to_owned());
         assert_eq!(m.resume_of.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn write_manifest_round_trips_and_leaves_no_temp_file() {
+        use chrono::Utc;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join(".derrick/runs/20250101T000000Z");
+        let path = run_dir.join("manifest.json");
+
+        let manifest = RunManifest::new(
+            "20250101T000000Z".to_owned(),
+            "drill".to_owned(),
+            "Build a thing".to_owned(),
+            FlagsManifest {
+                skip: vec![],
+                unskip: vec![],
+                dry_run: false,
+            },
+            "sha256:abc".to_owned(),
+            Utc::now(),
+        );
+
+        // Write twice to exercise the rewrite-between-steps path.
+        write_manifest(&path, &manifest).expect("write 1");
+        write_manifest(&path, &manifest).expect("write 2");
+
+        let read_back = read_manifest(&path).expect("read back");
+        assert_eq!(read_back.run_id, manifest.run_id);
+        assert_eq!(read_back.prompt, manifest.prompt);
+
+        // No `.manifest.json.tmp.*` sidecar should remain in the run dir.
+        let lingering: Vec<_> = std::fs::read_dir(&run_dir)
+            .expect("read run dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp."))
+            .collect();
+        assert!(lingering.is_empty(), "temp files lingered: {lingering:?}");
+
+        let entries: Vec<_> = std::fs::read_dir(&run_dir)
+            .expect("read run dir")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["manifest.json".to_owned()]);
     }
 
     #[test]

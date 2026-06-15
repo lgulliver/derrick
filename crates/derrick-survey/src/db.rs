@@ -13,9 +13,10 @@ use rusqlite::{Connection, OpenFlags};
 use crate::SurveyError;
 
 /// Highest schema version this binary understands.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 const MIGRATION_0001: &str = include_str!("../migrations/0001_initial.sql");
+const MIGRATION_0002: &str = include_str!("../migrations/0002_meta_table.sql");
 
 /// A pool of read-only connections handed out under lease.
 pub(crate) struct ReaderPool {
@@ -118,6 +119,11 @@ fn migrate(connection: &mut Connection) -> Result<(), SurveyError> {
     }
     if version == 0 {
         connection.execute_batch(MIGRATION_0001)?;
+    }
+    // Re-read version after v0001 may have set it to 1.
+    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < 2 {
+        connection.execute_batch(MIGRATION_0002)?;
     }
     Ok(())
 }

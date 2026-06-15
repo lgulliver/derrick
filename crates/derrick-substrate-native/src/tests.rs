@@ -140,8 +140,8 @@ async fn set_ticket_state_rejected_refused_with_d31_message() -> Result<(), Subs
 }
 
 #[tokio::test]
-async fn set_ticket_state_in_review_refused_pointing_at_transition_to_in_review(
-) -> Result<(), SubstrateError> {
+async fn set_ticket_state_in_review_refused_pointing_at_transition_to_in_review()
+-> Result<(), SubstrateError> {
     let tempdir = tempfile::tempdir().map_err(io_error)?;
     let substrate = open_substrate(&tempdir).await?;
     substrate.create_ticket(new_ticket("drk-1")?).await?;
@@ -334,8 +334,8 @@ async fn transition_to_in_review_records_metadata_in_event() -> Result<(), Subst
 }
 
 #[tokio::test]
-async fn stack_submit_idempotent_re_records_metadata_for_in_review_ticket(
-) -> Result<(), SubstrateError> {
+async fn stack_submit_idempotent_re_records_metadata_for_in_review_ticket()
+-> Result<(), SubstrateError> {
     // Reproduces the `derrick stack submit` idempotent path: a ticket
     // is already InReview without a PR URL; submit publishes the PR
     // and re-records `TicketTransitionedToInReview` with the fresh
@@ -491,6 +491,66 @@ async fn assign_to_hand_refuses_when_not_ready() -> Result<(), SubstrateError> {
     Ok(())
 }
 
+/// BUG 2 regression: two independent `NativeSubstrate` instances opened on the
+/// same DB file (the foreman-daemon + CLI, or two foremen in crew mode) must
+/// not both claim the same `Ready` ticket. The in-process writer mutex does
+/// not span instances, so the atomic `state = 'ready'` UPDATE predicate is the
+/// only thing preventing a lost-update overwrite.
+#[tokio::test]
+async fn assign_to_hand_rejects_cross_instance_double_claim() -> Result<(), SubstrateError> {
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    // Two separate instances on the same DB file → separate writer mutexes,
+    // exactly the cross-process scenario.
+    let first = open_substrate(&tempdir).await?;
+    let second = open_substrate(&tempdir).await?;
+
+    let h1 = register_hand_fixture(&first, "h1").await?;
+    let h2 = register_hand_fixture(&second, "h2").await?;
+    first.create_ticket(new_ticket("drk-1")?).await?;
+
+    // First instance claims the ticket.
+    let claimed = first.assign_to_hand(&ticket_id("drk-1")?, &h1).await?;
+    assert_eq!(claimed.state, TicketState::InFlight);
+    assert_eq!(claimed.owner.as_ref(), Some(&h1));
+
+    // Second instance tries to claim the same ticket. It must fail cleanly
+    // rather than silently overwriting the owner. Which error it gets depends
+    // on when it observes the first claim: `Invalid` when the pre-check reads
+    // the committed in_flight state, `Conflict` when the pre-check still read
+    // Ready and the atomic UPDATE predicate caught the race. Both reject.
+    let result = second.assign_to_hand(&ticket_id("drk-1")?, &h2).await;
+    assert!(
+        matches!(
+            result,
+            Err(SubstrateError::Conflict { .. }) | Err(SubstrateError::Invalid { .. })
+        ),
+        "second claim should be rejected, got {result:?}"
+    );
+
+    // The ticket must still be owned by the first hand — no lost update.
+    let after = second
+        .list_tickets(TicketFilter::default())
+        .await?
+        .into_iter()
+        .find(|t| t.id == ticket_id("drk-1").unwrap())
+        .expect("ticket present");
+    assert_eq!(after.state, TicketState::InFlight);
+    assert_eq!(after.owner.as_ref(), Some(&h1));
+
+    // The failed claim must not have written assignment events for h2. Exactly
+    // one TicketAssigned event should exist, naming h1.
+    let events = second.tail_typed_events(None, 100).await?;
+    let assigned: Vec<&HandId> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::TicketAssigned { hand } => Some(hand),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assigned, vec![&h1], "only the winning claim writes events");
+    Ok(())
+}
+
 #[tokio::test]
 async fn release_from_hand_is_atomic_state_and_owner() -> Result<(), SubstrateError> {
     let tempdir = tempfile::tempdir().map_err(io_error)?;
@@ -582,9 +642,45 @@ async fn tail_typed_events_returns_deserialised_kinds() -> Result<(), SubstrateE
         )
         .await?;
     let events = substrate.tail_typed_events(None, 50).await?;
-    assert!(events
-        .iter()
-        .any(|e| matches!(&e.kind, EventKind::Note { body } if body == "ping")));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::Note { body } if body == "ping"))
+    );
+    Ok(())
+}
+
+/// BUG 1 regression: the `Substrate` trait documents `tail_typed_events` as
+/// returning events newest-first (mirroring the legacy `tail_events`). A prior
+/// `ORDER BY rowid ASC` returned them oldest-first, breaking the TUI activity
+/// feed and the assay-step scan that relies on the first match being the most
+/// recent.
+#[tokio::test]
+async fn tail_typed_events_returns_newest_first() -> Result<(), SubstrateError> {
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+    for n in 0..5 {
+        substrate
+            .record_typed_event(
+                EventScope::Site,
+                EventKind::Note {
+                    body: format!("note-{n}"),
+                },
+            )
+            .await?;
+    }
+    let events = substrate.tail_typed_events(None, 50).await?;
+    let ids: Vec<i64> = events.iter().map(|e| e.id.0).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_by(|a, b| b.cmp(a));
+    assert_eq!(ids, sorted, "tail_typed_events must be newest-first");
+
+    // The most recently recorded note must be the first element.
+    let first_note = events.iter().find_map(|e| match &e.kind {
+        EventKind::Note { body } => Some(body.as_str()),
+        _ => None,
+    });
+    assert_eq!(first_note, Some("note-4"));
     Ok(())
 }
 
@@ -704,7 +800,7 @@ async fn migration_0002_upgrades_v1_db_in_place() -> Result<(), SubstrateError> 
     let v: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(sql_error)?;
-    assert_eq!(v, 2);
+    assert_eq!(v, SCHEMA_VERSION);
     Ok(())
 }
 
@@ -753,14 +849,282 @@ async fn migration_0002_idempotent_on_v2_db() -> Result<(), SubstrateError> {
 }
 
 #[tokio::test]
-async fn migration_refuses_v3_db() -> Result<(), SubstrateError> {
+async fn migration_0003_admits_host_cli_hand_kinds() -> Result<(), SubstrateError> {
+    // After 0003 the hands.kind CHECK admits codex/opencode/aider (D66).
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+
+    for (id, kind) in [
+        ("codex-1", HandKind::Codex),
+        ("opencode-1", HandKind::Opencode),
+        ("aider-1", HandKind::Aider),
+    ] {
+        substrate
+            .register_hand(Hand {
+                id: hand_id(id)?,
+                kind,
+                last_seen: None,
+            })
+            .await?;
+    }
+
+    let hands = substrate.list_hands().await?;
+    let codex = hands
+        .iter()
+        .find(|h| h.id.as_str() == "codex-1")
+        .expect("codex hand registered");
+    assert_eq!(codex.kind, HandKind::Codex);
+    assert!(hands.iter().any(|h| h.kind == HandKind::Opencode));
+    assert!(hands.iter().any(|h| h.kind == HandKind::Aider));
+    Ok(())
+}
+
+/// Build a v2 DB (user_version = 2) by running 0001 + 0002 and seeding a
+/// site row. Used to prove that 0003's `hands` table rebuild preserves
+/// referencing rows (tickets.owner, events.scope_hand) and their FK targets.
+fn write_v2_db(db_path: &Path) -> Result<(), SubstrateError> {
+    let mut connection = open_writer_connection(db_path)?;
+    connection
+        .execute_batch(MIGRATION_0001)
+        .map_err(sql_error)?;
+    // Seed a site row matching the default Config site so open() accepts it.
+    let s = site_for_v1();
+    connection
+        .execute(
+            "INSERT INTO site (name, prefix, created_at) VALUES (?1, ?2, ?3)",
+            params![s.name(), s.prefix(), now_text()],
+        )
+        .map_err(sql_error)?;
+    run_migration_0002(&mut connection)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, 2, "write_v2_db must leave the DB at user_version = 2");
+    Ok(())
+}
+
+#[tokio::test]
+async fn migration_0003_preserves_hand_references_from_v2() -> Result<(), SubstrateError> {
+    // Regression for D66's 0003 hands-table rebuild: a v2 DB with hand-owned
+    // tickets (tickets.owner -> hands.id) and hand-scoped events
+    // (events.scope_hand -> hands.id) must survive the rebuild with the
+    // referencing rows AND their FK targets intact.
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let config = native_config_fixture(&tempdir);
+    write_v2_db(&config.db_path)?;
+
+    // Seed a hand, a hand-owned in_flight ticket, and a hand-scoped event
+    // into the v2 schema (kind 'claude' is valid under the v1/v2 CHECK).
+    {
+        let connection = open_writer_connection(&config.db_path)?;
+        connection
+            .execute(
+                "INSERT INTO hands (id, kind, last_seen) VALUES (?1, ?2, ?3)",
+                params!["claude-1", "claude", now_text()],
+            )
+            .map_err(sql_error)?;
+        connection
+            .execute(
+                "INSERT INTO tickets (id, batch, ordinal, title, body, state, owner,
+                                      merge_sha, block_reason, block_reason_detail,
+                                      created_at, updated_at)
+                 VALUES (?1, NULL, NULL, 'title', 'body', 'in_flight', ?2,
+                         NULL, NULL, NULL, ?3, ?3)",
+                params!["drk-700", "claude-1", now_text()],
+            )
+            .map_err(sql_error)?;
+        let event_id = Uuid::new_v4();
+        connection
+            .execute(
+                "INSERT INTO events (id, at, kind, ticket, body, scope_kind, scope_hand)
+                 VALUES (?1, ?2, 'note', NULL, 'hand-scoped note', 'hand', ?3)",
+                params![event_id.as_bytes().as_slice(), now_text(), "claude-1"],
+            )
+            .map_err(sql_error)?;
+    }
+
+    // open() runs migrate() -> 0003 rebuilds the hands table.
+    let substrate = NativeSubstrate::open(config.clone(), site_for_v1()).await?;
+
+    // The owning hand survived the rebuild.
+    let hands = substrate.list_hands().await?;
+    let hand = hands
+        .iter()
+        .find(|h| h.id.as_str() == "claude-1")
+        .expect("owning hand survived 0003 rebuild");
+    assert_eq!(hand.kind, HandKind::Claude);
+
+    // The hand-owned ticket survived and still points at the hand.
+    let ticket = substrate
+        .get_ticket(&ticket_id("drk-700")?)
+        .await?
+        .expect("hand-owned ticket survived");
+    assert_eq!(ticket.state, TicketState::InFlight);
+    assert_eq!(ticket.owner.as_ref().map(HandId::as_str), Some("claude-1"));
+
+    // Direct schema assertions: the referencing rows + FK targets are intact,
+    // and `PRAGMA foreign_key_check` reports no violations after the rebuild.
+    let connection = open_writer_connection(&config.db_path)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, SCHEMA_VERSION);
+
+    let owner: Option<String> = connection
+        .query_row(
+            "SELECT owner FROM tickets WHERE id = ?1",
+            params!["drk-700"],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    assert_eq!(owner.as_deref(), Some("claude-1"));
+
+    let scope_hand: Option<String> = connection
+        .query_row(
+            "SELECT scope_hand FROM events WHERE scope_kind = 'hand'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    assert_eq!(scope_hand.as_deref(), Some("claude-1"));
+
+    let hand_exists: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM hands WHERE id = ?1",
+            params!["claude-1"],
+            |row| row.get(0),
+        )
+        .map_err(sql_error)?;
+    assert_eq!(
+        hand_exists, 1,
+        "FK target hand row must survive the rebuild"
+    );
+
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check;")
+        .map_err(sql_error)?;
+    let violations: Vec<(String, i64, String, i64)> = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    assert!(
+        violations.is_empty(),
+        "no FK violations after 0003 rebuild, got: {violations:?}"
+    );
+    Ok(())
+}
+
+/// Build a v3 DB (user_version = 3) by running 0001 + 0002 + 0003 and seeding
+/// a site row. Used to prove 0004 adds the `complexity` column without losing
+/// data or breaking referential integrity.
+fn write_v3_db(db_path: &Path) -> Result<(), SubstrateError> {
+    let mut connection = open_writer_connection(db_path)?;
+    connection
+        .execute_batch(MIGRATION_0001)
+        .map_err(sql_error)?;
+    let s = site_for_v1();
+    connection
+        .execute(
+            "INSERT INTO site (name, prefix, created_at) VALUES (?1, ?2, ?3)",
+            params![s.name(), s.prefix(), now_text()],
+        )
+        .map_err(sql_error)?;
+    run_migration_0002(&mut connection)?;
+    run_migration_0003(&mut connection)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, 3, "write_v3_db must leave the DB at user_version = 3");
+    Ok(())
+}
+
+#[tokio::test]
+async fn migration_0004_adds_complexity_column_and_round_trips() -> Result<(), SubstrateError> {
+    // A v3 DB (no complexity column) seeded with a ticket must migrate to v4
+    // and then accept/read-back every Complexity value plus NULL, with no FK
+    // violations and user_version == 4.
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let config = native_config_fixture(&tempdir);
+    write_v3_db(&config.db_path)?;
+
+    // Seed a pre-existing ticket into the v3 schema (no complexity column).
+    {
+        let connection = open_writer_connection(&config.db_path)?;
+        connection
+            .execute(
+                "INSERT INTO tickets (id, batch, ordinal, title, body, state, owner,
+                                      merge_sha, block_reason, block_reason_detail,
+                                      created_at, updated_at)
+                 VALUES (?1, NULL, NULL, 'title', 'body', 'ready', NULL,
+                         NULL, NULL, NULL, ?2, ?2)",
+                params!["drk-900", now_text()],
+            )
+            .map_err(sql_error)?;
+    }
+
+    // open() runs migrate() -> 0004 adds the complexity column.
+    let substrate = NativeSubstrate::open(config.clone(), site_for_v1()).await?;
+
+    // The pre-existing ticket survives with NULL complexity.
+    let legacy = substrate
+        .get_ticket(&ticket_id("drk-900")?)
+        .await?
+        .expect("legacy ticket survived 0004");
+    assert_eq!(legacy.complexity, None);
+
+    // Insert tickets carrying each Complexity value plus an explicit None.
+    for (id, complexity) in [
+        ("drk-901", Some(Complexity::Low)),
+        ("drk-902", Some(Complexity::Standard)),
+        ("drk-903", Some(Complexity::Heavy)),
+        ("drk-904", None),
+    ] {
+        let mut nt = new_ticket(id)?;
+        nt.complexity = complexity;
+        let created = substrate.create_ticket(nt).await?;
+        assert_eq!(created.complexity, complexity);
+        let read_back = substrate
+            .get_ticket(&ticket_id(id)?)
+            .await?
+            .expect("ticket persisted");
+        assert_eq!(read_back.complexity, complexity);
+    }
+
+    let connection = open_writer_connection(&config.db_path)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, 4);
+
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check;")
+        .map_err(sql_error)?;
+    let violations: Vec<(String, i64, String, i64)> = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    assert!(
+        violations.is_empty(),
+        "no FK violations after 0004, got: {violations:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn migration_refuses_newer_than_supported_db() -> Result<(), SubstrateError> {
     let tempdir = tempfile::tempdir().map_err(io_error)?;
     let config = native_config_fixture(&tempdir);
     let s = NativeSubstrate::open(config.clone(), site_fixture()).await?;
     drop(s);
     let connection = open_writer_connection(&config.db_path)?;
     connection
-        .pragma_update(None, "user_version", 3u32)
+        .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
         .map_err(sql_error)?;
     drop(connection);
     let result = NativeSubstrate::open(config, site_fixture()).await;
@@ -1198,10 +1562,12 @@ async fn link_and_unlink_round_trip() -> Result<(), SubstrateError> {
     substrate
         .unlink(&ticket_id("drk-1")?, &ticket_id("drk-2")?, LinkKind::Blocks)
         .await?;
-    assert!(substrate
-        .outgoing_links(&ticket_id("drk-1")?)
-        .await?
-        .is_empty());
+    assert!(
+        substrate
+            .outgoing_links(&ticket_id("drk-1")?)
+            .await?
+            .is_empty()
+    );
     Ok(())
 }
 
@@ -1251,6 +1617,48 @@ async fn worktree_lifecycle_round_trip() -> Result<(), SubstrateError> {
     substrate.finalize_worktree("run-1").await?;
     substrate.close_worktree("run-1").await?;
     assert!(substrate.list_worktrees(false).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn ticket_worktree_register_and_forget() -> Result<(), SubstrateError> {
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+
+    // Hand dispatchers pick their own root + ticket-id dir, so the row stores
+    // the caller-supplied path verbatim (NOT worktree_root.join(...)).
+    let explicit = tempdir.path().join("host-worktrees").join("drk-1");
+    substrate
+        .register_ticket_worktree("drk-1", "derrick/ad-hoc/drk-1", &explicit)
+        .await?;
+
+    let rows = substrate.list_worktrees(false).await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].run_id, "ticket:drk-1");
+    assert_eq!(rows[0].path, explicit);
+
+    // Re-dispatch reopens the same row rather than duplicating it.
+    substrate
+        .register_ticket_worktree("drk-1", "derrick/ad-hoc/drk-1", &explicit)
+        .await?;
+    assert_eq!(substrate.list_worktrees(false).await?.len(), 1);
+
+    // Backdated rows are eligible for the foreman TTL backstop.
+    let stale_text = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+    let conn = rusqlite::Connection::open(tempdir.path().join("derrick.db")).map_err(sql_error)?;
+    conn.execute(
+        "UPDATE worktrees SET created_at = ?1 WHERE run_id = ?2",
+        rusqlite::params![stale_text, "ticket:drk-1"],
+    )
+    .map_err(sql_error)?;
+    drop(conn);
+    let stale = substrate.list_stale_open_worktrees(Utc::now()).await?;
+    assert!(stale.iter().any(|w| w.run_id == "ticket:drk-1"));
+
+    // Forget removes the row; a second forget is a no-op.
+    substrate.forget_ticket_worktree("drk-1").await?;
+    assert!(substrate.list_worktrees(true).await?.is_empty());
+    substrate.forget_ticket_worktree("drk-1").await?;
     Ok(())
 }
 

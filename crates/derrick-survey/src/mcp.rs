@@ -5,15 +5,15 @@
 //! rebuild, (2) a per-response staleness banner emitted only while the index is
 //! dirty, and (3) a connect-time incremental build before the first query.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::service::ServiceExt;
 use rmcp::transport::stdio;
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -106,10 +106,17 @@ impl SurveyServer {
 
     #[tool(
         description = "Index freshness and size summary, including files that \
-        differ from the working tree."
+        differ from the working tree. The response includes a `freshness` field \
+        (\"fresh\" | \"rebuilding\" | \"stale since <ts>\") and an optional \
+        `last_build_ts` (Unix seconds)."
     )]
     async fn derrick_survey_status(&self) -> Result<CallToolResult, McpError> {
-        let status = self.survey.status().await.map_err(internal)?;
+        let rebuilding = self.dirty.load(Ordering::Relaxed);
+        let status = self
+            .survey
+            .status_with_flag(rebuilding)
+            .await
+            .map_err(internal)?;
         self.respond(&status).await
     }
 
@@ -117,8 +124,9 @@ impl SurveyServer {
     /// watcher has flagged the index dirty (so the common path stays cheap).
     async fn respond<T: serde::Serialize>(&self, value: &T) -> Result<CallToolResult, McpError> {
         let mut contents = Vec::new();
-        if self.dirty.load(Ordering::Relaxed) {
-            if let Ok(status) = self.survey.status().await {
+        let rebuilding = self.dirty.load(Ordering::Relaxed);
+        if rebuilding {
+            if let Ok(status) = self.survey.status_with_flag(true).await {
                 if !status.pending.is_empty() {
                     let sample: Vec<&str> = status
                         .pending
@@ -274,9 +282,10 @@ mod tests {
 
         // `get_info` is delivered to the client during initialize.
         let info = client.peer_info();
-        assert!(info
-            .and_then(|i| i.instructions.as_deref())
-            .is_some_and(|i| i.contains("derrick_survey_search")));
+        assert!(
+            info.and_then(|i| i.instructions.as_deref())
+                .is_some_and(|i| i.contains("derrick_survey_search"))
+        );
 
         client.cancel().await.unwrap();
         handle.abort();
@@ -321,6 +330,54 @@ mod tests {
         let status = call_text(&client, "derrick_survey_status", json!({})).await;
         assert!(status.contains("\"files\""), "status: {status}");
         assert!(status.contains("\"symbols\""), "status: {status}");
+
+        client.cancel().await.unwrap();
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_status_includes_freshness_field() -> Result<(), SurveyError> {
+        let (_tmp, survey) = temp_survey().await;
+        let server = SurveyServer::new(survey, Arc::new(AtomicBool::new(false)));
+        let (client, handle) = connect(server).await;
+
+        let status = call_text(&client, "derrick_survey_status", json!({})).await;
+        // After a build, freshness must be "fresh" (no pending files).
+        assert!(
+            status.contains("\"freshness\""),
+            "status response must contain freshness field: {status}"
+        );
+        assert!(
+            status.contains("\"fresh\""),
+            "freshness must be fresh after a clean build: {status}"
+        );
+        // last_build_ts is optional but should be present after a build.
+        assert!(
+            status.contains("last_build_ts"),
+            "status should include last_build_ts after build: {status}"
+        );
+
+        client.cancel().await.unwrap();
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_status_freshness_rebuilding_when_dirty() -> Result<(), SurveyError> {
+        let (tmp, survey) = temp_survey().await;
+        // Add an unindexed file so pending is non-empty.
+        std::fs::write(tmp.path().join("new.rs"), "pub fn added() {}\n").unwrap();
+        // Flag dirty=true to simulate an in-progress rebuild.
+        let dirty = Arc::new(AtomicBool::new(true));
+        let server = SurveyServer::new(survey, dirty);
+        let (client, handle) = connect(server).await;
+
+        let status = call_text(&client, "derrick_survey_status", json!({})).await;
+        assert!(
+            status.contains("\"rebuilding\""),
+            "freshness must be rebuilding when dirty flag is set: {status}"
+        );
 
         client.cancel().await.unwrap();
         handle.abort();

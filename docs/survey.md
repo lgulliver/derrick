@@ -74,7 +74,31 @@ When the MCP server is running, a `notify`-based file watcher debounces filesyst
 
 ## Setup
 
-`derrick init` handles all wiring automatically. After running it:
+There are two ways to wire up the survey MCP server.
+
+### Option A — `derrick survey setup` (standalone, no pipeline required)
+
+If you only want the code-graph index and MCP server and do not need the full derrick pipeline, run:
+
+```bash
+derrick survey setup
+```
+
+This is safe on any git repository. It does not require a `derrick.yaml` or a substrate database. It:
+
+1. Creates `.derrick/` if it does not exist.
+2. Writes `.derrick/.gitignore` (excludes `index.db*` from VCS).
+3. Merges the `derrick-survey` server into `.mcp.json` at the repo root, preserving any other servers already registered there.
+
+Then build the initial index and restart your editor / agent host:
+
+```bash
+derrick survey build
+```
+
+### Option B — `derrick init` (full pipeline setup)
+
+`derrick init` handles all wiring as part of the full setup. After running it:
 
 - **`.mcp.json`** (repo root, checked into VCS) declares the MCP server:
   ```json
@@ -102,15 +126,11 @@ When the MCP server is running, a `notify`-based file watcher debounces filesyst
   }
   ```
 
+For existing repos adopted before survey was added, run `derrick init` again — it is brownfield-safe.
+
+### After either option
+
 **One-time trust prompt:** Claude Code requires an interactive project-trust confirmation the first time it loads `.mcp.json`. This prompt appears in the Claude Code UI and cannot be bypassed programmatically. Accept it once; subsequent sessions start without prompting.
-
-For existing repos that were adopted before survey was added, run `derrick init` again — it is brownfield-safe and will add the missing files without touching what is already there.
-
-After setup, build the initial index:
-
-```bash
-derrick survey build
-```
 
 Subsequent builds are incremental. The watcher keeps the index fresh while the MCP server is running.
 
@@ -166,7 +186,15 @@ Prints index freshness: total files indexed, total symbols, last build time, and
 derrick survey serve --mcp
 ```
 
-Runs the MCP server over stdio. This is what `derrick init` registers in `.mcp.json`; you do not normally run it manually. Launched by Claude Code on connection and terminated when the session ends.
+Runs the MCP server over stdio. This is what `derrick init` and `derrick survey setup` register in `.mcp.json`; you do not normally run it manually. Launched by Claude Code (or another MCP-capable host) on connection and terminated when the session ends.
+
+### `derrick survey setup`
+
+```
+derrick survey setup
+```
+
+Standalone setup — wires the survey MCP server into any git repo without running `derrick init`. Creates `.derrick/` and `.derrick/.gitignore`, then merges the `derrick-survey` server into `.mcp.json`. Safe to run on repos that use Cursor, Windsurf, or other MCP-capable hosts that are not managing a full derrick pipeline. Idempotent: running it twice leaves the same state.
 
 ---
 
@@ -252,4 +280,7 @@ This is the one-time interactive `.mcp.json` trust prompt. Accept it in the Clau
 Check that `derrick survey build` has been run at least once (`derrick survey status` will report `files: 0` if not). Confirm the files you expect are in a supported language and not in a skipped directory.
 
 **`derrick survey serve --mcp` fails to start.**
-Ensure `derrick` is on `PATH` (the MCP server is launched by Claude Code using the binary name, not a full path). Run `which derrick` and `derrick --version` to confirm.
+Ensure `derrick` is on `PATH` (the MCP server is launched by the agent host using the binary name, not a full path). Run `which derrick` and `derrick --version` to confirm.
+
+**Using survey without a `derrick.yaml`.**
+Run `derrick survey setup` instead of `derrick init`. Survey does not require the pipeline config or the substrate database — only a git repo root and the `derrick` binary on `PATH`.

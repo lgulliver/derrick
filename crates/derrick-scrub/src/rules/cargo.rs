@@ -1,6 +1,6 @@
 //! Rules for Cargo output.
 
-use crate::{add_regex_rule, Action, Replacement, RuleSet};
+use crate::{Action, Replacement, RuleSet, add_regex_rule};
 
 /// Return the default Cargo rules.
 pub fn rules() -> RuleSet {

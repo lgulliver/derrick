@@ -8,14 +8,17 @@ use std::time::{Duration, Instant};
 use derrick_claude::{ClaudeHandDispatcher, ClaudeHandDispatcherConfig};
 use derrick_config::{Config, StackBackendKind, SubstrateBackendKind};
 use derrick_copilot::{LocalCopilotHandDispatcher, LocalCopilotHandDispatcherConfig};
-use derrick_stack::{GraphiteStackBackend, NativeStackBackend, NoneStackBackend, StackBackend};
-use derrick_substrate::Substrate;
+use derrick_flow::hand_kind_for_executor;
+use derrick_hand::{HostCliHandDispatcher, HostCliHandDispatcherConfig};
+use derrick_stack::{NativeStackBackend, NoneStackBackend, StackBackend};
+use derrick_substrate::{HandKind, Substrate};
+use derrick_substrate_native::NativeSubstrate;
 #[allow(deprecated)]
 use derrick_substrate_native::foreman::CopilotStubDispatcher;
 use derrick_substrate_native::foreman::{
     Foreman, ForemanTtls, GhRepoState, HandDispatcher, MultiDispatcher,
 };
-use derrick_substrate_native::NativeSubstrate;
+use derrick_tools::{HostRegistry, ModelChoice, parse_model_choice};
 
 use crate::commands::{
     ForemanArgs, ForemanCommand, ForemanStartArgs, ForemanStartMode, ForemanStopArgs,
@@ -61,7 +64,7 @@ async fn start_attached(repo_root: &Path, config: &Config) -> Result<CliExitCode
     let substrate = open_substrate(repo_root, config).await?;
     let pid = std::process::id();
     substrate.record_foreman_attached(pid).await?;
-    let foreman = build_foreman(repo_root, config, Arc::clone(&substrate));
+    let foreman = build_foreman(repo_root, config, Arc::clone(&substrate))?;
     let result = foreman.run_attached().await;
     let _ignored = substrate.record_foreman_stopped().await;
     drop(foreman);
@@ -77,7 +80,7 @@ async fn foreman_tick(_args: ForemanTickArgs) -> Result<CliExitCode, crate::CliE
     let config = read_config(&repo_root)?;
     require_native(&config)?;
     let substrate = open_substrate(&repo_root, &config).await?;
-    let foreman = build_foreman(&repo_root, &config, Arc::clone(&substrate));
+    let foreman = build_foreman(&repo_root, &config, Arc::clone(&substrate))?;
     let report = foreman
         .tick()
         .await
@@ -92,7 +95,11 @@ async fn foreman_tick(_args: ForemanTickArgs) -> Result<CliExitCode, crate::CliE
     Ok(CliExitCode::Success)
 }
 
-fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstrate>) -> Foreman {
+fn build_foreman(
+    repo_root: &Path,
+    config: &Config,
+    substrate: Arc<NativeSubstrate>,
+) -> Result<Foreman, crate::CliError> {
     let ttls = ForemanTtls {
         poll_interval: config.tools().foreman().poll_interval(),
         in_review_ttl: chrono::Duration::from_std(config.tools().foreman().in_review_ttl())
@@ -108,12 +115,11 @@ fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstra
             repo_root.to_path_buf(),
             stack_cfg.force_push(),
         )),
-        StackBackendKind::Graphite | StackBackendKind::GitSpice => Arc::new(GraphiteStackBackend),
         StackBackendKind::None => Arc::new(NoneStackBackend),
     };
     let dispatcher: Box<dyn HandDispatcher> =
         build_dispatcher(repo_root, config, &substrate, Arc::clone(&stack_backend));
-    Foreman::new(
+    Ok(Foreman::new(
         substrate,
         config.clone(),
         Box::new(GhRepoState::new(repo_root.to_path_buf())),
@@ -122,7 +128,7 @@ fn build_foreman(repo_root: &Path, config: &Config, substrate: Arc<NativeSubstra
     )
     .with_ttls(ttls)
     .with_exit_when_idle(config.tools().foreman().exit_when_idle())
-    .with_stack_backend(stack_backend, stack_cfg)
+    .with_stack_backend(stack_backend, stack_cfg))
 }
 
 fn build_dispatcher(
@@ -133,9 +139,31 @@ fn build_dispatcher(
 ) -> Box<dyn HandDispatcher> {
     let copilot_enabled = config.tools().copilot().enabled();
     let claude_enabled = config.tools().claude().enabled();
-    // Default to copilot when enabled, otherwise claude; falls back to the
-    // copilot stub below when neither is on.
-    let default_kind = if copilot_enabled {
+
+    // Resolve the crew executor model the same way the pipeline's foreman
+    // step does (steps.rs): foreman step's `executor_role` (default
+    // "executor") -> roles -> models -> ModelDef. When that resolves to a
+    // host-CLI executor (codex/opencode/aider), the foreman should default
+    // to that hand kind and forward the model id (RAW) into the request.
+    let executor = resolve_executor(config);
+
+    // Default to the resolved host-CLI executor when one is configured;
+    // otherwise copilot when enabled, then claude; falls back to the copilot
+    // stub below when nothing is wired.
+    let executor_host = executor
+        .as_ref()
+        .and_then(|(kind, _)| host_name_for_kind(*kind));
+    // Per-dispatcher model choice: the executor's choice when the dispatcher's
+    // hand kind matches the resolved executor, else foreman-selected Auto (D67).
+    let model_choice_for = |kind: HandKind| -> ModelChoice {
+        match &executor {
+            Some((executor_kind, choice)) if *executor_kind == kind => choice.clone(),
+            _ => ModelChoice::Auto { bias: None },
+        }
+    };
+    let default_kind = if let Some(host_name) = executor_host {
+        host_name
+    } else if copilot_enabled {
         "copilot"
     } else if claude_enabled {
         "claude"
@@ -143,6 +171,33 @@ fn build_dispatcher(
         "copilot"
     };
     let mut multi = MultiDispatcher::new(default_kind);
+
+    if let Some((kind, choice)) = &executor {
+        let kind = *kind;
+        let choice = choice.clone();
+        if let Some(host_name) = host_name_for_kind(kind) {
+            // Shared registry of the five host CLIs. HostRegistry is !Clone,
+            // so construct once and share via Arc.
+            let hosts = Arc::new(HostRegistry::with_defaults());
+            let host_config = HostCliHandDispatcherConfig {
+                agent_identity: format!("derrick-{host_name}-hand"),
+                branch_prefix: config.tools().git().branch_prefix().to_owned(),
+                repo_root: repo_root.to_path_buf(),
+                worktree_root: repo_root.join(format!(".derrick/{host_name}-worktrees")),
+                roughneck_enabled: config.tools().roughneck().enabled(),
+                roughneck_level: config.tools().roughneck().level().to_owned(),
+                ..HostCliHandDispatcherConfig::default()
+            };
+            multi = multi.register(Box::new(HostCliHandDispatcher::new(
+                Arc::clone(substrate),
+                hosts,
+                host_name,
+                kind,
+                choice,
+                host_config,
+            )));
+        }
+    }
 
     if copilot_enabled {
         // Local CLI dispatcher: spawns `copilot -p <prompt> --add-dir <worktree>`
@@ -163,10 +218,12 @@ fn build_dispatcher(
             roughneck_enabled: config.tools().roughneck().enabled(),
             roughneck_level: config.tools().roughneck().level().to_owned(),
             stack_draft: config.tools().git().stacking().draft(),
+            lesson_index: None,
         };
         multi = multi.register(Box::new(
             LocalCopilotHandDispatcher::new(Arc::clone(substrate), copilot_config)
-                .with_stack_backend(Arc::clone(&stack_backend)),
+                .with_stack_backend(Arc::clone(&stack_backend))
+                .with_model_choice(model_choice_for(HandKind::Copilot)),
         ));
     }
 
@@ -182,11 +239,12 @@ fn build_dispatcher(
             base_branch: "main".to_owned(),
             roughneck_enabled: config.tools().roughneck().enabled(),
             roughneck_level: config.tools().roughneck().level().to_owned(),
+            lesson_index: None,
         };
-        multi = multi.register(Box::new(ClaudeHandDispatcher::new(
-            Arc::clone(substrate),
-            dispatcher_config,
-        )));
+        multi = multi.register(Box::new(
+            ClaudeHandDispatcher::new(Arc::clone(substrate), dispatcher_config)
+                .with_model_choice(model_choice_for(HandKind::Claude)),
+        ));
     }
 
     if multi.is_empty() {
@@ -199,6 +257,40 @@ fn build_dispatcher(
         Box::new(stub)
     } else {
         Box::new(multi)
+    }
+}
+
+/// Resolve the crew executor `(HandKind, ModelChoice)` from config, mirroring
+/// the pipeline foreman step's resolution. Returns `None` when the role or
+/// model is missing so the foreman falls back to copilot/claude/stub.
+///
+/// The configured model id is parsed via [`parse_model_choice`] (D67): the
+/// literal `auto` (and `auto:<tier>`) becomes [`ModelChoice::Auto`], so the
+/// foreman selects the best model per ticket within the host; anything else is
+/// an explicit pin that always wins.
+fn resolve_executor(config: &Config) -> Option<(HandKind, ModelChoice)> {
+    let executor_role = config
+        .pipeline()
+        .iter()
+        .find(|step| step.id() == "foreman")
+        .and_then(derrick_config::PipelineStep::executor_role)
+        .unwrap_or("executor");
+    let model_name = config.roles().get(executor_role)?;
+    let model = config.models().get(model_name)?;
+    let kind = hand_kind_for_executor(model.provider(), model.cli());
+    let choice = parse_model_choice(model.model().trim());
+    Some((kind, choice))
+}
+
+/// Maps a host-CLI [`HandKind`] to the registry host name. Returns `None` for
+/// kinds that are not host CLIs (claude/copilot/human are handled by their own
+/// dispatchers).
+fn host_name_for_kind(kind: HandKind) -> Option<&'static str> {
+    match kind {
+        HandKind::Codex => Some("codex"),
+        HandKind::Opencode => Some("opencode"),
+        HandKind::Aider => Some("aider"),
+        _ => None,
     }
 }
 
@@ -348,7 +440,7 @@ async fn run_daemon_child(
     // Child path: do NOT write to the foreman row (parent already did).
     // Just run the loop until SIGTERM/SIGINT.
     let substrate = open_substrate(repo_root, config).await?;
-    let foreman = build_foreman(repo_root, config, Arc::clone(&substrate));
+    let foreman = build_foreman(repo_root, config, Arc::clone(&substrate))?;
     let result = foreman.run_attached().await;
     let _ignored = substrate.record_foreman_stopped().await;
     match result {

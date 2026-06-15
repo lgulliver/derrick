@@ -1,0 +1,19 @@
+# derrick:start
+
+[[hooks.PreToolUse]]
+matcher = "Bash|Read|Write|Edit|Glob|Grep"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "derrick scrub --tool bash"
+description = "derrick:scrub"
+
+[[hooks.PostToolUse]]
+matcher = "Bash|Read|Write|Edit|Glob|Grep"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "derrick caveman --intensity lite"
+description = "derrick:caveman"
+
+# derrick:end

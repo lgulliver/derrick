@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use derrick_tools::{
-    ClaudeHost, CodexHost, CopilotHost, CopilotToolPermission, HostAdapter, HostError,
-    HostRegistry, HostRequest,
+    AiderHost, ClaudeHost, CodexHost, CopilotHost, CopilotToolPermission, HostAdapter, HostError,
+    HostRegistry, HostRequest, OpencodeHost,
 };
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 use tokio::sync::{Mutex, MutexGuard};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -41,6 +41,8 @@ enum HostKind {
     Claude,
     Codex,
     Copilot,
+    Opencode,
+    Aider,
 }
 
 impl HostKind {
@@ -49,6 +51,8 @@ impl HostKind {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Copilot => "copilot",
+            Self::Opencode => "opencode",
+            Self::Aider => "aider",
         }
     }
 
@@ -57,6 +61,8 @@ impl HostKind {
             Self::Claude => Box::new(ClaudeHost::with_binary(binary)),
             Self::Codex => Box::new(CodexHost::with_binary(binary)),
             Self::Copilot => Box::new(CopilotHost::with_binary(binary)),
+            Self::Opencode => Box::new(OpencodeHost::with_binary(binary)),
+            Self::Aider => Box::new(AiderHost::with_binary(binary)),
         }
     }
 
@@ -65,6 +71,8 @@ impl HostKind {
             Self::Claude => Box::new(ClaudeHost::new()),
             Self::Codex => Box::new(CodexHost::new()),
             Self::Copilot => Box::new(CopilotHost::new()),
+            Self::Opencode => Box::new(OpencodeHost::new()),
+            Self::Aider => Box::new(AiderHost::new()),
         }
     }
 }
@@ -120,9 +128,11 @@ async fn output_sink_streams_lines_while_capturing_full_output() -> TestResult {
         .map(|(_, l)| l.as_str())
         .collect();
     assert_eq!(stdout_lines, vec!["line one", "line two"]);
-    assert!(lines
-        .iter()
-        .any(|(s, l)| *s == StreamSource::Stderr && l == "oops"));
+    assert!(
+        lines
+            .iter()
+            .any(|(s, l)| *s == StreamSource::Stderr && l == "oops")
+    );
     Ok(())
 }
 
@@ -187,6 +197,7 @@ printf 'ok'
         HostKind::Codex => vec![
             "exec".to_owned(),
             "--skip-git-repo-check".to_owned(),
+            "--dangerously-bypass-hook-trust".to_owned(),
             req.prompt.clone(),
         ],
         HostKind::Copilot => vec![
@@ -194,6 +205,22 @@ printf 'ok'
             req.prompt.clone(),
             "--add-dir".to_owned(),
             cwd.path().to_string_lossy().into_owned(),
+        ],
+        HostKind::Opencode => vec![
+            "run".to_owned(),
+            req.prompt.clone(),
+            "--dir".to_owned(),
+            cwd.path().to_string_lossy().into_owned(),
+        ],
+        HostKind::Aider => vec![
+            "--message".to_owned(),
+            req.prompt.clone(),
+            "--yes-always".to_owned(),
+            "--no-auto-commits".to_owned(),
+            "--no-dirty-commits".to_owned(),
+            "--no-stream".to_owned(),
+            "--no-pretty".to_owned(),
+            "--no-show-release-notes".to_owned(),
         ],
     };
 
@@ -206,10 +233,38 @@ printf 'ok'
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     assert_eq!(stderr, expected);
-    assert!(
-        !stderr.iter().any(|arg| arg == "--model"),
-        "--model must never be passed: {stderr:?}"
-    );
+    Ok(())
+}
+
+/// Asserts that `--model <normalized>` is forwarded for the given host when the
+/// request sets a model, and that the normalisation matches the catalogue rule
+/// for that host (BareId hosts strip a leading `provider/`; ProviderModel hosts
+/// pass the id through verbatim).
+async fn assert_model_forwarded(kind: HostKind, input: &str, expected_norm: &str) -> TestResult {
+    let _guard = process_lock().await;
+    let host = mock_host(
+        kind.name(),
+        r#"#!/bin/sh
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--model" ]; then
+    printf '%s' "$arg"
+    exit 0
+  fi
+  prev="$arg"
+done
+printf 'no --model passed' >&2
+exit 7
+"#,
+    )?;
+    let cwd = tempdir()?;
+    let adapter = kind.adapter(host.path().join(kind.name()));
+    let mut req = request(cwd.path());
+    req.model = Some(input.to_owned());
+
+    let response = adapter.run(req).await?;
+
+    assert_eq!(response.stdout, expected_norm);
     Ok(())
 }
 
@@ -222,7 +277,7 @@ case "$1:$2:$3:$4" in
   --print:--output-format:json:/speckit.specify\ hello\ world* )
     printf 'prompt-ok'
     ;;
-  exec:--skip-git-repo-check:/speckit.specify\ hello\ world*:* )
+  exec:--skip-git-repo-check:--dangerously-bypass-hook-trust:/speckit.specify\ hello\ world* )
     printf 'prompt-ok'
     ;;
   -p:/speckit.specify\ hello\ world*:*:* )
@@ -335,7 +390,8 @@ exit 0
 "#,
     )?;
     let old_path = std::env::var_os("PATH");
-    std::env::set_var("PATH", path_with(host.path())?);
+    // SAFETY: single-threaded test; process_lock() serialises all PATH mutations.
+    unsafe { std::env::set_var("PATH", path_with(host.path())?) };
     let adapter = kind.default_adapter();
 
     let available = adapter.is_available();
@@ -349,7 +405,8 @@ async fn assert_unavailable_when_absent(kind: HostKind) -> TestResult {
     let _guard = process_lock().await;
     let empty = tempdir()?;
     let old_path = std::env::var_os("PATH");
-    std::env::set_var("PATH", empty.path());
+    // SAFETY: single-threaded test; process_lock() serialises all PATH mutations.
+    unsafe { std::env::set_var("PATH", empty.path()) };
     let adapter = kind.default_adapter();
 
     let available = adapter.is_available();
@@ -360,39 +417,23 @@ async fn assert_unavailable_when_absent(kind: HostKind) -> TestResult {
 }
 
 fn restore_path(path: Option<std::ffi::OsString>) {
-    if let Some(path) = path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
+    // SAFETY: called only inside process_lock() critical section.
+    unsafe {
+        if let Some(path) = path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
     }
 }
 
-async fn assert_no_model_override(kind: HostKind) -> TestResult {
-    let response = run_with_script(
-        kind,
-        r#"#!/bin/sh
-for arg in "$@"; do
-  if [ "$arg" = "--model" ]; then
-    printf 'unexpected --model' >&2
-    exit 7
-  fi
-done
-printf 'no-model'
-"#,
-    )
-    .await?;
-
-    assert_eq!(response.stdout, "no-model");
-    Ok(())
-}
-
 #[test]
-fn registry_with_defaults_has_four_hosts() {
+fn registry_with_defaults_has_five_hosts() {
     let registry = HostRegistry::with_defaults();
 
     assert_eq!(
         registry.names(),
-        vec!["claude", "codex", "copilot", "opencode"]
+        vec!["aider", "claude", "codex", "copilot", "opencode"]
     );
 }
 
@@ -428,6 +469,7 @@ fn host_default_constructors_have_names() {
     assert_eq!(ClaudeHost::default().name(), "claude");
     assert_eq!(CodexHost::default().name(), "codex");
     assert_eq!(CopilotHost::default().name(), "copilot");
+    assert_eq!(AiderHost::default().name(), "aider");
 }
 
 #[test]
@@ -457,6 +499,18 @@ async fn codex_invokes_with_correct_args() -> TestResult {
 #[tokio::test]
 async fn copilot_invokes_with_correct_args() -> TestResult {
     assert_correct_args(HostKind::Copilot).await
+}
+
+#[tokio::test]
+async fn aider_invokes_with_correct_args() -> TestResult {
+    // Asserts the headless flag set, including `--no-dirty-commits` so aider
+    // never commits pre-existing dirty work in derrick's worktrees.
+    assert_correct_args(HostKind::Aider).await
+}
+
+#[tokio::test]
+async fn opencode_invokes_with_correct_args() -> TestResult {
+    assert_correct_args(HostKind::Opencode).await
 }
 
 #[tokio::test]
@@ -565,18 +619,45 @@ async fn copilot_is_available_returns_false_when_absent() -> TestResult {
 }
 
 #[tokio::test]
-async fn claude_does_not_pass_model_override() -> TestResult {
-    assert_no_model_override(HostKind::Claude).await
+async fn claude_forwards_normalized_model() -> TestResult {
+    // BareId: a leading provider/ prefix is stripped.
+    assert_model_forwarded(
+        HostKind::Claude,
+        "anthropic/claude-opus-4-8",
+        "claude-opus-4-8",
+    )
+    .await
 }
 
 #[tokio::test]
-async fn codex_does_not_pass_model_override() -> TestResult {
-    assert_no_model_override(HostKind::Codex).await
+async fn codex_forwards_normalized_model() -> TestResult {
+    assert_model_forwarded(HostKind::Codex, "openai/gpt-5.5", "gpt-5.5").await
 }
 
 #[tokio::test]
-async fn copilot_does_not_pass_model_override() -> TestResult {
-    assert_no_model_override(HostKind::Copilot).await
+async fn copilot_forwards_normalized_model() -> TestResult {
+    // Keeps its own dotted id; only the prefix is stripped (no dot↔dash).
+    assert_model_forwarded(
+        HostKind::Copilot,
+        "anything/claude-sonnet-4.6",
+        "claude-sonnet-4.6",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn opencode_forwards_provider_model_verbatim() -> TestResult {
+    assert_model_forwarded(
+        HostKind::Opencode,
+        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-sonnet-4-6",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn aider_forwards_provider_model_verbatim() -> TestResult {
+    assert_model_forwarded(HostKind::Aider, "openai/gpt-5.5", "openai/gpt-5.5").await
 }
 
 #[tokio::test]

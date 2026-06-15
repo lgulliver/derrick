@@ -1,0 +1,24 @@
+[package]
+name = "derrick-hand"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+derrick-config = { path = "../derrick-config" }
+derrick-memory = { path = "../derrick-memory" }
+derrick-roughneck = { path = "../derrick-roughneck" }
+derrick-scrub = { path = "../derrick-scrub" }
+derrick-substrate = { path = "../derrick-substrate" }
+derrick-substrate-native = { path = "../derrick-substrate-native" }
+derrick-tools = { path = "../derrick-tools" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+derrick-config = { path = "../derrick-config" }
+tempfile = { workspace = true }
