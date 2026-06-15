@@ -1,0 +1,9 @@
+set the local git config for this repo to be my github username and github noreply email
+
+---
+
+for everything we do in claude, I want to keep our memory in my obsidian vault
+
+---
+
+I'm not sure "derrick add" is the right command to get something done. I don't think it feels right for the purpose of the tool.

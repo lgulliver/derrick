@@ -1,0 +1,70 @@
+{
+  "cli_version": "0.5.4",
+  "checkpoint_id": "ed5b4e963b8b",
+  "session_id": "01809c5e-06c3-419c-a93a-15afc31747a6",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-15T13:54:57.039872Z",
+  "branch": "rename-add-to-drill",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".claude/agents/flow-engineer.md",
+    ".claude/commands/add-feature.md",
+    ".claude/commands/derrick-resume.md",
+    ".claude/commands/drill.md",
+    "AGENTS.md",
+    "DESIGN.md",
+    "README.md",
+    "crates/derrick-adopt/src/lib.rs",
+    "crates/derrick-assay/src/types.rs",
+    "crates/derrick-cli/src/commands/add.rs",
+    "crates/derrick-cli/src/commands/drill.rs",
+    "crates/derrick-cli/src/commands/init.rs",
+    "crates/derrick-cli/src/commands/mod.rs",
+    "crates/derrick-cli/src/commands/run.rs",
+    "crates/derrick-cli/src/lib.rs",
+    "crates/derrick-cli/tests/cli.rs",
+    "crates/derrick-config/src/lib.rs",
+    "crates/derrick-flow/src/lib.rs",
+    "crates/derrick-flow/src/manifest.rs",
+    "crates/derrick-flow/src/progress.rs",
+    "crates/derrick-flow/src/runner.rs",
+    "crates/derrick-tui/src/tabs.rs",
+    "marketplace.json",
+    "scripts/install.sh",
+    "templates/.vscode/tasks.json"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "66ef66fa2c03",
+  "token_usage": {
+    "input_tokens": 75286,
+    "cache_creation_tokens": 384222,
+    "cache_read_tokens": 8318538,
+    "output_tokens": 50805,
+    "api_call_count": 66
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-15T13:54:56.497618Z",
+    "agent_lines": 624,
+    "agent_removed": 569,
+    "human_added": 66,
+    "human_modified": 75,
+    "human_removed": 0,
+    "total_committed": 765,
+    "total_lines_changed": 1340,
+    "agent_percentage": 89.02985074626866,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}
