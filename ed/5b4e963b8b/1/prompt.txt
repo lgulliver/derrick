@@ -1,0 +1,25 @@
+I believe you were awaiting a codex review
+
+---
+
+is it done?
+
+---
+
+stop it, and try again. I think it got stuck on waiting for me to run upgrade.
+
+---
+
+stop it, and try again. I think it got stuck on waiting for me to run upgrade.
+
+---
+
+fiz all issues found
+
+---
+
+fix that too - also do a security scan of the repository, remove any secrets, etc
+
+---
+
+ok do it

@@ -3,12 +3,17 @@
   "checkpoint_id": "ed5b4e963b8b",
   "strategy": "manual-commit",
   "branch": "rename-add-to-drill",
-  "checkpoints_count": 1,
+  "checkpoints_count": 6,
   "files_touched": [
     ".claude/agents/flow-engineer.md",
     ".claude/commands/add-feature.md",
     ".claude/commands/derrick-resume.md",
     ".claude/commands/drill.md",
+    ".claude/skills/drill/SKILL.md",
+    ".codex/agents/flow-engineer.md",
+    ".github/agents/flow-engineer.md",
+    ".gitignore",
+    ".opencode/agents/flow-engineer.md",
     "AGENTS.md",
     "DESIGN.md",
     "README.md",
@@ -37,13 +42,19 @@
       "transcript": "/ed/5b4e963b8b/0/full.jsonl",
       "content_hash": "/ed/5b4e963b8b/0/content_hash.txt",
       "prompt": "/ed/5b4e963b8b/0/prompt.txt"
+    },
+    {
+      "metadata": "/ed/5b4e963b8b/1/metadata.json",
+      "transcript": "/ed/5b4e963b8b/1/full.jsonl",
+      "content_hash": "/ed/5b4e963b8b/1/content_hash.txt",
+      "prompt": "/ed/5b4e963b8b/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 75286,
-    "cache_creation_tokens": 384222,
-    "cache_read_tokens": 8318538,
-    "output_tokens": 50805,
-    "api_call_count": 66
+    "input_tokens": 122435,
+    "cache_creation_tokens": 596276,
+    "cache_read_tokens": 18054477,
+    "output_tokens": 120483,
+    "api_call_count": 147
   }
 }
