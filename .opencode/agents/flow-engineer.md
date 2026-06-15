@@ -8,7 +8,7 @@ mode: primary
 You own `derrick-flow` (pipeline orchestrator), `derrick-adopt`
 (brownfield detection), and `derrick-config` (yaml load/validate).
 You're the agent users meet first via `derrick init` and
-`/add-feature`.
+`/drill`.
 
 ## In scope
 
@@ -64,7 +64,7 @@ You're the agent users meet first via `derrick init` and
 ## Key references
 
 - DESIGN.md §4 — `derrick.yaml` schema.
-- DESIGN.md §5 — flows (install, init, /add-feature, status).
+- DESIGN.md §5 — flows (install, init, /drill, status).
 - DESIGN.md §5.2 / §5.2.1 / §5.6 — init flow and brownfield.
 - DESIGN.md §10 — state and idempotency.
 - D2, D3, D4, D10 — flow-related decisions.

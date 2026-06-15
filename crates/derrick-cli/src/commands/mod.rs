@@ -2,10 +2,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::output::OutputFormat;
 
-pub(crate) mod add;
 pub(crate) mod caveman;
 pub(crate) mod completions;
 pub(crate) mod doctor;
+pub(crate) mod drill;
 pub(crate) mod foreman;
 pub(crate) mod gain;
 pub(crate) mod init;
@@ -30,8 +30,9 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Shorthand for `run add-feature` — prompt is a positional argument.
-    Add(AddArgs),
+    /// Shorthand for `run drill` — prompt is a positional argument.
+    #[command(alias = "add")]
+    Drill(DrillArgs),
     Init(InitArgs),
     Status(StatusArgs),
     Doctor(DoctorArgs),
@@ -53,10 +54,10 @@ pub(crate) enum Command {
     Survey(SurveyArgs),
 }
 
-/// Arguments for `derrick add` — positional prompt shorthand for `run add-feature`.
+/// Arguments for `derrick drill` — positional prompt shorthand for `run drill`.
 #[derive(Debug, Args)]
-pub(crate) struct AddArgs {
-    /// Feature description. Equivalent to `run add-feature --prompt "..."`.
+pub(crate) struct DrillArgs {
+    /// Feature description. Equivalent to `run drill --prompt "..."`.
     pub(crate) prompt: Option<String>,
     #[arg(long = "resume-from")]
     pub(crate) resume_from: Option<String>,
@@ -231,13 +232,13 @@ pub(crate) struct RunArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum RunCommand {
-    AddFeature(AddFeatureArgs),
+    Drill(DrillRunArgs),
     /// Resume the latest incomplete or failed run.
     Resume(ResumeArgs),
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AddFeatureArgs {
+pub(crate) struct DrillRunArgs {
     #[arg(long)]
     pub(crate) prompt: Option<String>,
     #[arg(long)]
@@ -256,7 +257,7 @@ pub(crate) struct AddFeatureArgs {
     pub(crate) no_assay: bool,
     #[arg(long, help = "Skip the GitHub Issues creation offer")]
     pub(crate) no_github_issues: bool,
-    /// Internal routing flag set by `add.rs` when it detects an incomplete run
+    /// Internal routing flag set by `drill.rs` when it detects an incomplete run
     /// with a matching prompt key. Not exposed as a CLI flag.
     #[arg(skip)]
     pub(crate) auto_resume: bool,

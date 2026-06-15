@@ -49,12 +49,20 @@ const POST_TOOL_TEMPLATE: &str = include_str!(concat!(
     "/../../templates/hooks/claude-post-tool-use.json"
 ));
 
+/// Contents of the generated `.derrick/.gitignore`. Entries are relative to
+/// the `.derrick/` directory, so they are bare (e.g. `copilot-worktrees/`, not
+/// `.derrick/copilot-worktrees/`). Covers every runtime artifact the foreman
+/// and substrate create under `.derrick/` so a `git add -A` never commits
+/// worktrees, queues, logs, or local state. Shared by `derrick init` and the
+/// adoption pass to keep the two codegen sites identical.
+pub const DERRICK_GITIGNORE: &str = "runs/\nstate.json\nforeman.log\nderrick.db*\nindex.db*\nworktrees/\ncopilot-queue/\ncopilot-worktrees/\n.adopt-stage-*/\n";
+
 const DERRICK_BLOCK_START: &str = "<!-- derrick:start -->";
 const DERRICK_BLOCK_END: &str = "<!-- derrick:end -->";
 const DRAFT_BANNER_PREFIX: &str = "<!-- DERRICK-DRAFT:";
 const CLAUDE_MATCHERS: [&str; 6] = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"];
 const COMMAND_NAMES: [&str; 10] = [
-    "add-feature.md",
+    "drill.md",
     "derrick-status.md",
     "derrick-doctor.md",
     "derrick-resume.md",
@@ -569,8 +577,7 @@ impl Adopter {
         });
         plan.writes.push(PlannedWrite {
             path: PathBuf::from(".derrick/.gitignore"),
-            content: "runs/\nstate.json\nderrick.db*\nindex.db*\nworktrees/\n.adopt-stage-*/\n"
-                .to_owned(),
+            content: DERRICK_GITIGNORE.to_owned(),
             mode: WriteMode::Create,
             rationale: "keep local derrick state out of git".to_owned(),
         });
@@ -1392,13 +1399,11 @@ fn colliding_commands(commands: &[PathBuf]) -> Vec<PathBuf> {
 
 fn command_template(name: &str) -> String {
     match name {
-        "add-feature.md" => {
-            "# /add-feature\n\nRun `derrick run add-feature --prompt \"$ARGUMENTS\"`.\n"
-        }
+        "drill.md" => "# /drill\n\nRun `derrick run drill --prompt \"$ARGUMENTS\"`.\n",
         "derrick-status.md" => "# /derrick-status\n\nRun `derrick status`.\n",
         "derrick-doctor.md" => "# /derrick-doctor\n\nRun `derrick doctor`.\n",
         "derrick-resume.md" => {
-            "# /derrick-resume\n\nRun `derrick run add-feature --resume-from \"$ARGUMENTS\"`.\n"
+            "# /derrick-resume\n\nRun `derrick run drill --resume-from \"$ARGUMENTS\"`.\n"
         }
         "speckit.specify.md" => include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1945,6 +1950,43 @@ mod tests {
     }
 
     #[test]
+    fn gitignore_covers_foreman_runtime_artifacts() {
+        let entries: Vec<&str> = DERRICK_GITIGNORE.lines().collect();
+        // Regression guard: the foreman writes `.derrick/copilot-worktrees/`
+        // (27GB seen in the wild). It must be ignored or a `git add -A` commits
+        // every worktree. Same for the dispatch queue and the foreman log.
+        assert!(
+            entries.contains(&"copilot-worktrees/"),
+            "copilot-worktrees/ missing from .derrick/.gitignore: {DERRICK_GITIGNORE:?}"
+        );
+        assert!(entries.contains(&"copilot-queue/"));
+        assert!(entries.contains(&"foreman.log"));
+        // Entries are relative to `.derrick/`, so they must be bare, not
+        // prefixed with `.derrick/`.
+        assert!(
+            entries.iter().all(|line| !line.starts_with(".derrick/")),
+            "gitignore entries must be relative to .derrick/: {DERRICK_GITIGNORE:?}"
+        );
+    }
+
+    #[test]
+    fn gitignore_matches_planned_adopt_write() {
+        let report = DetectionReport {
+            git_repo: true,
+            ..DetectionReport::default()
+        };
+        let plan = Adopter::new(".")
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+        let gitignore = plan
+            .writes
+            .iter()
+            .find(|write| write.path == Path::new(".derrick/.gitignore"))
+            .unwrap_or_else(|| panic!("no .derrick/.gitignore write in adopt plan"));
+        assert_eq!(gitignore.content, DERRICK_GITIGNORE);
+    }
+
+    #[test]
     fn detect_finds_agents_and_constitution_candidates() {
         let dir = git_repo();
         write(&dir.path().join("AGENTS.md"), "Ticket ABC-123\n");
@@ -1966,7 +2008,7 @@ mod tests {
         write(&dir.path().join(".claude/settings.json"), "{}");
         write(&dir.path().join(".claude/agents/zeta.md"), "z");
         write(&dir.path().join(".claude/agents/alpha.md"), "a");
-        write(&dir.path().join(".claude/commands/add-feature.md"), "user");
+        write(&dir.path().join(".claude/commands/drill.md"), "user");
         write(&dir.path().join(".claude/skills/demo/SKILL.md"), "skill");
         write(&dir.path().join(".codex/instructions.md"), "codex");
         write(&dir.path().join(".codex/config.toml"), "");
@@ -2121,7 +2163,7 @@ mod tests {
         let mut report = DetectionReport {
             git_repo: false,
             existing_derrick_yaml: Some(PathBuf::from("derrick.yaml")),
-            claude_commands: vec![PathBuf::from(".claude/commands/add-feature.md")],
+            claude_commands: vec![PathBuf::from(".claude/commands/drill.md")],
             constitution: Some(PathBuf::from("CONTRIBUTING.md")),
             specify_extensions_derrick: Some(PathBuf::from(".specify/extensions/derrick")),
             tracker_prefixes: vec!["LIN-".to_owned()],

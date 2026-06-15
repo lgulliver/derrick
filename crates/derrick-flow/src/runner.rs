@@ -24,7 +24,10 @@ use derrick_assay::types::{
 };
 use derrick_assay::ExecutionState;
 
-const ADD_FEATURE_PIPELINE: &str = "add-feature";
+const DRILL_PIPELINE: &str = "drill";
+/// Pipeline id written by derrick before the `add`→`drill` rename. Accepted on
+/// resume so pre-rename `.derrick/runs/*/manifest.json` still load.
+const LEGACY_DRILL_PIPELINE: &str = "add-feature";
 
 /// Executes derrick pipelines against a repository.
 ///
@@ -110,7 +113,7 @@ impl Runner {
         run_id: Option<&str>,
         from_step: Option<&str>,
     ) -> Result<RunOutcome, RunError> {
-        self.validate_pipeline_id(ADD_FEATURE_PIPELINE)?;
+        self.validate_pipeline_id(DRILL_PIPELINE)?;
         self.validate_config()?;
 
         let run_id = match run_id {
@@ -142,13 +145,8 @@ impl Runner {
             input.prompt = None;
         }
         let prior = manifest.steps.into_iter().take(from_index).collect();
-        self.run_pipeline_from(
-            ADD_FEATURE_PIPELINE,
-            input,
-            Some(prior),
-            Some(run_id.clone()),
-        )
-        .await
+        self.run_pipeline_from(DRILL_PIPELINE, input, Some(prior), Some(run_id.clone()))
+            .await
     }
 
     async fn run_pipeline_from(
@@ -588,7 +586,7 @@ impl Runner {
                                                         "\u{2502}".bright_cyan()
                                                     );
                                                     eprintln!(
-                                                        "  {}   derrick add \"{}. {}\"",
+                                                        "  {}   derrick drill \"{}. {}\"",
                                                         "\u{2514}".bright_cyan(),
                                                         state.prompt.replace('"', "\\\""),
                                                         correction.replace('"', "\\\"")
@@ -998,10 +996,11 @@ impl Runner {
     }
 
     fn validate_pipeline_id(&self, pipeline_id: &str) -> Result<(), RunError> {
-        if pipeline_id == ADD_FEATURE_PIPELINE {
-            Ok(())
-        } else {
-            Err(RunError::UnknownPipeline(pipeline_id.to_owned()))
+        match pipeline_id {
+            DRILL_PIPELINE => Ok(()),
+            // deprecated alias: pre-rename manifests
+            LEGACY_DRILL_PIPELINE => Ok(()),
+            _ => Err(RunError::UnknownPipeline(pipeline_id.to_owned())),
         }
     }
 

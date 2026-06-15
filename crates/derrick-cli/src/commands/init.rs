@@ -292,7 +292,7 @@ async fn greenfield_init(
     let config = read_config(repo_root)?;
     create_dir_all(&repo_root.join(config.state().dir()))?;
     let gitignore = repo_root.join(config.state().dir()).join(".gitignore");
-    write_file(&gitignore, "runs/\nstate.json\nindex.db*\nworktrees/\n")?;
+    write_file(&gitignore, derrick_adopt::DERRICK_GITIGNORE)?;
 
     let substrate =
         NativeSubstrate::open(native_paths(repo_root, &config), config.site().clone()).await?;
@@ -336,7 +336,7 @@ async fn greenfield_init(
     seed_constitution(repo_root, &config, resolved.yes)?;
 
     // Make an initial commit so `git worktree add ... HEAD` succeeds on the
-    // first `derrick add`. Only runs when the repo has no commits yet.
+    // first `derrick drill`. Only runs when the repo has no commits yet.
     maybe_initial_commit(repo_root)?;
 
     print_summary(&config, resolved.ai_style);
@@ -909,13 +909,13 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
         );
         println!("  \x1b[36m›\x1b[0m  start your first feature:");
         println!();
-        println!("      \x1b[1mderrick add\x1b[0m \x1b[2m\"describe your feature\"\x1b[0m");
+        println!("      \x1b[1mderrick drill\x1b[0m \x1b[2m\"describe your feature\"\x1b[0m");
     } else {
         println!("  ›  run `derrick doctor` to verify the install");
         println!("  ›  refine your constitution at .specify/memory/constitution.md");
         println!("  ›  start your first feature:");
         println!();
-        println!("      derrick add \"describe your feature\"");
+        println!("      derrick drill \"describe your feature\"");
     }
     println!();
 }
@@ -924,7 +924,7 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
 ///
 /// Overwrites any unedited speckit `[PROJECT_NAME]` placeholder so that
 /// `constitution_needs_setup` returns `false` and assay is not silently
-/// skipped on the first `derrick add`.
+/// skipped on the first `derrick drill`.
 fn seed_constitution(
     repo_root: &Path,
     config: &derrick_config::Config,
@@ -948,7 +948,7 @@ fn seed_constitution(
 ///
 /// `git worktree add ... HEAD` (called by the pipeline runner) fails with
 /// "fatal: invalid reference: HEAD" when the repo has no commits. This
-/// function creates a single initial commit so the first `derrick add`
+/// function creates a single initial commit so the first `derrick drill`
 /// always works.
 ///
 /// Does nothing if the repo already has at least one commit.
@@ -976,9 +976,9 @@ fn maybe_initial_commit(repo_root: &Path) -> Result<(), crate::CliError> {
     if !add_status.success() {
         // Non-fatal: the user can commit manually if something is odd.
         if ui::styled() {
-            eprintln!("  \x1b[33m⚠\x1b[0m  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`.");
+            eprintln!("  \x1b[33m⚠\x1b[0m  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick drill`.");
         } else {
-            eprintln!("  ⚠  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick add`.");
+            eprintln!("  ⚠  git add failed — run `git add -A && git commit -m \"chore: derrick init\"` before `derrick drill`.");
         }
         return Ok(());
     }
@@ -993,9 +993,9 @@ fn maybe_initial_commit(repo_root: &Path) -> Result<(), crate::CliError> {
         })?;
     if !commit_status.success() {
         if ui::styled() {
-            eprintln!("  \x1b[33m⚠\x1b[0m  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`.");
+            eprintln!("  \x1b[33m⚠\x1b[0m  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick drill`.");
         } else {
-            eprintln!("  ⚠  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick add`.");
+            eprintln!("  ⚠  initial commit failed — run `git commit -m \"chore: derrick init\"` before `derrick drill`.");
         }
         return Ok(());
     }

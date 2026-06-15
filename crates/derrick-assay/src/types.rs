@@ -89,7 +89,7 @@ impl StepExecution {
 /// Input values and flags for a pipeline run.
 #[derive(Clone, Debug, Default)]
 pub struct PipelineInput {
-    /// The `/add-feature` prompt.
+    /// The `/drill` prompt.
     pub prompt: Option<String>,
     /// Step IDs explicitly skipped for this run.
     pub skip: std::collections::BTreeSet<String>,

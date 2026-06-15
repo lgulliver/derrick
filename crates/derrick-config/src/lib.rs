@@ -1029,7 +1029,7 @@ pub enum ForcePush {
     Off,
 }
 
-/// One pipeline step in the `/add-feature` flow.
+/// One pipeline step in the `/drill` flow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PipelineStep {
     id: String,

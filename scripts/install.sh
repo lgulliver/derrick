@@ -145,7 +145,7 @@ main() {
   info "Get started:"
   echo "  cd ~/repos/my-project"
   echo "  derrick init"
-  echo "  derrick add \"describe your feature\""
+  echo "  derrick drill \"describe your feature\""
   echo ""
   info "Docs: https://github.com/${REPO}#readme"
 }

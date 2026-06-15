@@ -1,17 +1,17 @@
-//! `derrick add` — positional-prompt shorthand for `derrick run add-feature`.
+//! `derrick drill` — positional-prompt shorthand for `derrick run drill`.
 //!
 //! All flags are identical; the only difference is that the feature description
 //! is a positional argument rather than `--prompt "..."`, making one-liners
 //! feel natural:
 //!
 //! ```text
-//! derrick add "build a webhook ingest endpoint with idempotent dedupe"
+//! derrick drill "build a webhook ingest endpoint with idempotent dedupe"
 //! ```
 //!
 //! ## Auto-resume
 //!
 //! When a prompt is given and no explicit `--resume-from` or `--force` is
-//! passed, `add` normalises the prompt to a stable SHA256 key and scans
+//! passed, `drill` normalises the prompt to a stable SHA256 key and scans
 //! `.derrick/runs/` for an incomplete run with the same key.  If one is
 //! found the run is resumed from its last successful step rather than
 //! starting fresh (which would cause ticket-ID collisions in bridge).
@@ -30,11 +30,11 @@ use std::path::Path;
 
 use owo_colors::OwoColorize;
 
-use crate::commands::{AddArgs, AddFeatureArgs, RunArgs, RunCommand};
+use crate::commands::{DrillArgs, DrillRunArgs, RunArgs, RunCommand};
 use crate::exit_code::CliExitCode;
 use crate::{current_repo_root, read_config, CliError};
 
-pub(crate) async fn execute(args: AddArgs) -> Result<CliExitCode, CliError> {
+pub(crate) async fn execute(args: DrillArgs) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root()?;
 
     // ── No-prompt fallback ────────────────────────────────────────────────
@@ -78,7 +78,7 @@ pub(crate) async fn execute(args: AddArgs) -> Result<CliExitCode, CliError> {
         (false, None, None)
     };
 
-    let add_feature = AddFeatureArgs {
+    let drill_run = DrillRunArgs {
         prompt: args.prompt,
         resume_from: args.resume_from,
         run_id: run_id_override.or(args.run_id),
@@ -92,7 +92,7 @@ pub(crate) async fn execute(args: AddArgs) -> Result<CliExitCode, CliError> {
         force_prior_run_id,
     };
     super::run::execute(RunArgs {
-        command: RunCommand::AddFeature(add_feature),
+        command: RunCommand::Drill(drill_run),
     })
     .await
 }
@@ -178,10 +178,10 @@ fn scan_runs(
 
 #[cfg(test)]
 mod tests {
-    use crate::commands::AddArgs;
+    use crate::commands::DrillArgs;
 
-    fn default_args() -> AddArgs {
-        AddArgs {
+    fn default_args() -> DrillArgs {
+        DrillArgs {
             prompt: None,
             resume_from: None,
             run_id: None,
@@ -196,8 +196,8 @@ mod tests {
     }
 
     #[test]
-    fn add_args_converts_prompt() {
-        let args = AddArgs {
+    fn drill_args_converts_prompt() {
+        let args = DrillArgs {
             prompt: Some("build a webhook endpoint".to_owned()),
             ..default_args()
         };
@@ -205,8 +205,8 @@ mod tests {
     }
 
     #[test]
-    fn add_args_skip_flags_independent() {
-        let args = AddArgs {
+    fn drill_args_skip_flags_independent() {
+        let args = DrillArgs {
             no_clarify: true,
             no_assay: true,
             ..default_args()
@@ -267,7 +267,7 @@ mod tests {
             "null"
         };
         let json = format!(
-            r#"{{"run_id":"{run_id}","pipeline_id":"add-feature","prompt":"x","prompt_key":"{prompt_key}","flags":{{"skip":[],"unskip":[],"dry_run":false}},"config_hash":"sha256:abc","started_at":"2026-05-24T09:00:00Z","finished_at":{finished_at},"status":"{status}","steps":[]}}"#,
+            r#"{{"run_id":"{run_id}","pipeline_id":"drill","prompt":"x","prompt_key":"{prompt_key}","flags":{{"skip":[],"unskip":[],"dry_run":false}},"config_hash":"sha256:abc","started_at":"2026-05-24T09:00:00Z","finished_at":{finished_at},"status":"{status}","steps":[]}}"#,
         );
         std::fs::write(run_dir.join("manifest.json"), json).unwrap();
     }
