@@ -7,7 +7,7 @@
 **Derrick** is a Rust CLI that turns a single command into a full dark-factory
 feature pipeline — spec, adversarial review, tickets, dispatch, PR stacking —
 without asking you to wire each underlying tool by hand. One install, one
-config (`derrick.yaml`), one primary command (`/add-feature`).
+config (`derrick.yaml`), one primary command (`/drill`).
 
 > *Lineage note: derrick's pipeline pattern descends from the
 > speckit → courtroom → gastown toolchain it replaces. courtroom is the
@@ -31,7 +31,7 @@ flow running in a new repo previously meant:
 This is bespoke per repo. Every part is **glued to a specific toolchain** —
 its phase labels, its rules, its config path.
 
-We want: **any user, any repo, single command, `/add-feature` UX.**
+We want: **any user, any repo, single command, `/drill` UX.**
 
 ---
 
@@ -57,7 +57,7 @@ Plus the product surface:
 - **One-line init**: `derrick init` in a repo writes the config, the
   templates, the hooks, the constitution skeleton, and registers the
   site with the native substrate.
-- **One primary command**: `/add-feature <prompt>` runs the full
+- **One primary command**: `/drill <prompt>` runs the full
   dark factory pipeline — spec → assay → plan → tasks → batch →
   foreman / Copilot agents.
 - **One front door for observability**: `derrick status` is the
@@ -83,12 +83,12 @@ Plus the product surface:
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                      User (in any repo)                          │
-│   $ derrick init        $ /add-feature "build the X service"     │
+│   $ derrick init        $ /drill "build the X service"           │
 └─────────────────┬───────────────────────────┬────────────────────┘
                   │                           │
                   ▼                           ▼
         ┌──────────────────┐        ┌───────────────────────┐
-        │   derrick CLI    │        │  /add-feature command │
+        │   derrick CLI    │        │  /drill command       │
         │   (Rust binary)  │        │  (Claude Code plugin) │
         └────────┬─────────┘        └───────────┬───────────┘
                  │                              │
@@ -138,7 +138,7 @@ modules can be tested, profiled, and (later) ported in isolation.
 | Observe | `crates/derrick-observe` | Aggregated read-only view (talks to substrate trait) |
 | Config | `crates/derrick-config` | Load + validate `derrick.yaml` (serde) |
 | Repo templates | `templates/` | What `derrick init` copies in |
-| Plugin | `templates/.claude/` | `/add-feature` command + skill |
+| Plugin | `templates/.claude/` | `/drill` command + skill |
 | Install script | `scripts/install.sh` | Curlable bootstrap |
 
 Why Rust?
@@ -218,7 +218,7 @@ tools:
   output_compression:
     enabled: true                # derrick-scrub subprocess filters (see §9.B.2)
 
-# /add-feature pipeline. Steps run in order; any can be skipped via flag.
+# /drill pipeline. Steps run in order; any can be skipped via flag.
 # Each step names a role (resolved via `roles:` above) or runner: derrick / human.
 pipeline:
   - id: specify
@@ -310,7 +310,7 @@ Script does, in order:
    - Verifies `claude`, `codex`, `gt`, `bd`, `git` are present.
    - If a tool is missing, prints the canonical install command (does
      **not** install it silently — these are auth-bearing tools).
-   - Installs the `derrick` Claude Code plugin (`/add-feature`,
+   - Installs the `derrick` Claude Code plugin (`/drill`,
      `/derrick-doctor`) into `~/.claude/plugins/`.
    - Writes `~/.derrick/config.yaml` with sensible defaults.
 3. Prints next-step: `cd your/repo && derrick init`.
@@ -429,7 +429,7 @@ Only after the user confirms the full plan:
 
 - `derrick.yaml` from template, pointing at existing paths wherever found.
 - `.specify/extensions/derrick/scripts/tasks-to-tickets.sh`.
-- `.claude/commands/add-feature.md` — refuses to overwrite without `--force`.
+- `.claude/commands/drill.md` — refuses to overwrite without `--force`.
 - `.claude/agents/` additions only — names that collide with existing agents
   are skipped and reported.
 - `CLAUDE.md` block appended only with `--append-agents-md` or explicit
@@ -447,13 +447,13 @@ Only after the user confirms the full plan:
 Print a success screen showing what was written, then show the next step:
 
 ```
-  derrick add "your first feature"
+  derrick drill "your first feature"
 ```
 
 **Initial commit**: after writing all files, if the repo has no commits yet
 (no `HEAD` ref), the wizard runs `git add -A && git commit -m "chore: derrick
 init"` automatically. This ensures the repo has a valid `HEAD` before the
-first `derrick add` run, which requires a commit to create a worktree. The
+first `derrick drill` run, which requires a commit to create a worktree. The
 commit message follows the conventional-commits setting chosen in step 4.
 
 Run `derrick doctor` automatically to confirm the environment is healthy before
@@ -500,25 +500,25 @@ without wiping the existing config. It:
 `--dry-run` previews the yaml diff without writing it.
 `--mode copilot` switches to `copilot` mode instead of `crew`.
 
-### 5.3 `derrick add` — the feature pipeline
+### 5.3 `derrick drill` — the feature pipeline
 
 ```
-derrick add "build a webhook ingest endpoint with idempotent dedupe"
+derrick drill "build a webhook ingest endpoint with idempotent dedupe"
 ```
 
 Or via Claude Code:
 
 ```
-/add-feature build a webhook ingest endpoint with idempotent dedupe
+/drill build a webhook ingest endpoint with idempotent dedupe
 ```
 
-The slash command resolves to `derrick run add-feature --prompt "..."`. The
+The slash command resolves to `derrick run drill --prompt "..."`. The
 user never sees the underlying tools. All output and questions are in
 **derrick's voice**.
 
 The feature prompt may also be supplied from a file (`--prompt-file <path>`)
-or from stdin (`-` sentinel, or piped) on both `derrick add` and
-`derrick run add-feature`, so a large multi-line `/speckit.specify`-style brief
+or from stdin (`-` sentinel, or piped) on both `derrick drill` and
+`derrick run drill`, so a large multi-line `/speckit.specify`-style brief
 can be passed without shell-escaping (D64). The three sources fold into the one
 prompt string that feeds the `specify` step; supplying more than one explicit
 source is a usage error.
@@ -532,7 +532,11 @@ Every step logs to `.derrick/runs/<utc-ts>/step-<id>.log`. On host-backed
 steps, the host adapter in `derrick-tools` shells to the host CLI with the
 step's command and current working directory (D30). The host loads its own
 context. Failure of any step halts the pipeline with a numbered error and the
-exact resume command (`derrick run add-feature --resume-from <step>`).
+exact resume command (`derrick run drill --resume-from <step>`).
+
+The `add` subcommand is a hidden, deprecated alias for `drill`; the runner
+also accepts `"add-feature"` as a deprecated `pipeline_id` so existing run
+manifests stay resumable. See D64.
 
 #### Stage 1 — Specify
 
@@ -689,7 +693,7 @@ Design rules for the observability surface:
   `--raw` opts out.
 - **Caveman-aware.** `derrick status --caveman` produces a
   one-screen summary good for pasting into stand-ups or feeding back
-  into `/add-feature` resume contexts.
+  into `/drill` resume contexts.
 - **Mode-aware.** In `mode: solo` most of these collapse — `derrick
   status` shows the current spec dir and tasks.md progress, no
   tickets. In `mode: copilot` it shows Copilot agent dispatch
@@ -750,7 +754,7 @@ Concrete behaviours:
 | `AGENTS.md` | Reference it from `guardrails.agents_md`. Do not overwrite. Append a short derrick block at the bottom (opt-in via `--append-agents-md`). |
 | `CLAUDE.md` | Same — referenced, optionally appended. |
 | `.claude/agents/<name>.md` | Treat as authoritative. Do not create `hand-default.md`, `foreman.md` etc. if names overlap. |
-| `.claude/commands/` | Add `/add-feature` and friends *alongside*. Refuse to overwrite an existing command of the same name without `--force`. |
+| `.claude/commands/` | Add `/drill` and friends *alongside*. Refuse to overwrite an existing command of the same name without `--force`. |
 | `.claude/skills/` | Untouched. Derrick's skills are added separately. |
 | Existing constitution-like file | Reference it as `guardrails.constitution_path`. Do not write a new one. |
 | Existing `.specify/` | Reuse. Patch only `.specify/extensions/derrick/`. |
@@ -873,16 +877,16 @@ Contents:
 ```
 .claude-plugin/plugin.json
 commands/
-  add-feature.md            # the primary UX
+  drill.md                  # the primary UX
   derrick-status.md         # wraps `derrick status` (caveman-formatted)
   derrick-doctor.md         # wraps `derrick doctor`
   derrick-resume.md         # wraps `derrick run --resume-from`
 skills/
-  add-feature/SKILL.md      # full phase-by-phase instructions
+  drill/SKILL.md            # full phase-by-phase instructions
 README.md
 ```
 
-`commands/add-feature.md` is intentionally thin: it parses arguments,
+`commands/drill.md` is intentionally thin: it parses arguments,
 verifies derrick is installed, and then defers to the skill for the
 actual workflow narrative — same pattern the Anthropic-shipped skills
 use (a one-page command, a fat skill).
@@ -1127,7 +1131,7 @@ verdict per round, and replying status — no spinner.
 ### Headless mode
 
 When derrick detects `!isatty(stdin)` (CI, background subprocess,
-automated `derrick add`), assay runs without blocking for interactive
+automated `derrick drill`), assay runs without blocking for interactive
 input. Behaviour changes:
 
 - Only a `reject` verdict halts the pipeline. `revise` and `accept`
@@ -1136,7 +1140,7 @@ input. Behaviour changes:
 - The user is never prompted to extend rounds or override — the
   configured `tools.assay.rounds` limit is hard.
 
-This allows fully unattended `derrick add` runs in CI pipelines. For
+This allows fully unattended `derrick drill` runs in CI pipelines. For
 interactive sessions the behaviour is unchanged — `revise` and
 `reject` both surface to the user.
 
@@ -1191,6 +1195,8 @@ the rest of the codebase.
 | **activity** | Recent event timeline |
 | **link / blocks** | Typed edges between tickets |
 | **prefix** | Short site code, e.g. `ti` → `ti-47` |
+
+**Verb note — `drill`:** the verb for kicking off the feature pipeline (`derrick drill`, `/drill`). It is not a substrate noun, but it is reserved vocabulary: `drill` is not a gastown word and should not be confused for one. New contributors: use `drill` for this action, not `add`. (D64)
 
 Chosen deliberately distinct from gastown's vocabulary
 (rig/bead/convoy/polecat/mayor) so the two are unambiguous when
@@ -1261,7 +1267,7 @@ File-based: no server, trivial backup, trivial gitignore.
 
 **Foreman loop**: a tokio task in the derrick process. It polls
 ready tickets, dispatches, and watches for completion via hand
-hooks. When `derrick run add-feature` returns, the foreman either:
+hooks. When `derrick run drill` returns, the foreman either:
 - exits cleanly if all tickets are `done`, or
 - detaches into `.derrick/foreman.pid` and continues in the
   background. `derrick foreman stop` ends it; `derrick foreman
@@ -1326,7 +1332,7 @@ idempotency rules that fire before any ticket is created:
 2. **Active ticket skip**: if a ticket for the same feature already
    exists in a non-terminal state (`Ready`, `InFlight`, `InReview`,
    `Blocked`), bridge skips creation entirely and reuses the existing
-   ticket. This prevents duplicate tickets when `derrick add` is
+   ticket. This prevents duplicate tickets when `derrick drill` is
    re-run for a prompt that was already in progress.
 
 Both rules fire per-ticket (not per-batch) so a partial batch
@@ -1885,7 +1891,7 @@ does **not** parallelise `specify → plan → assay → tasks → analyze`
 previous step's output.
 
 **9.C.5 Multi-feature parallelism — git worktrees.** Two
-`/add-feature` invocations against the same repo, at the same
+`/drill` invocations against the same repo, at the same
 time, must not clobber each other's `.specify/feature.json`
 (or anything else under `specs/`, `.derrick/`, working tree
 state). The clean answer is git worktrees:
@@ -1969,7 +1975,7 @@ since the initial design:
 
 ### 10.2 Run resume — idempotent retry
 
-When `derrick add "<prompt>"` is invoked, the runner computes the
+When `derrick drill "<prompt>"` is invoked, the runner computes the
 `prompt_key` and checks `.derrick/runs/` for the most recent run
 with the same key that exited in a non-terminal state (i.e. failed
 or was interrupted mid-pipeline). If found, derrick **auto-resumes**
@@ -1978,10 +1984,10 @@ run sets `resume_of` to the original run's id.
 
 ```
 # Same prompt, pipeline incomplete from yesterday → auto-resumes
-derrick add "build a webhook ingest endpoint"
+derrick drill "build a webhook ingest endpoint"
 
 # Force a fresh run even if an incomplete one exists
-derrick add "build a webhook ingest endpoint" --force
+derrick drill "build a webhook ingest endpoint" --force
 ```
 
 `--force` discards any incomplete prior run for the same key and
@@ -1998,7 +2004,7 @@ to reconstruct the full history of a prompt across retries.
 
 **v1 (this design):**
 
-- `derrick init`, `derrick run add-feature`, `derrick doctor`,
+- `derrick init`, `derrick drill` / `derrick run drill`, `derrick doctor`,
   `derrick config`, `derrick uninstall` (reverses init cleanly).
 - `derrick switch` — upgrades a solo-mode repo to crew mode; patches
   `tools.substrate.mode`, adds `peers:` stanza, writes foreman defaults
@@ -2020,7 +2026,7 @@ to reconstruct the full history of a prompt across retries.
 - TUI dashboard: `derrick observe` (ratatui), six tabs covering
   Overview / Tickets / Stack / Activity / Tokens / Memory.
   Live-updating via filesystem watcher + 1s tick.
-- `/add-feature`, `/derrick-doctor`, `/derrick-resume`,
+- `/drill`, `/derrick-doctor`, `/derrick-resume`,
   `/derrick-status` slash commands.
 - Codex CLI wrapper config: derrick writes a `.codex/instructions.md`
   (or whatever Codex's equivalent is) during init so the assay
@@ -2045,7 +2051,7 @@ to reconstruct the full history of a prompt across retries.
 
 - Homebrew formula and a Windows build.
 - `derrick run <custom-pipeline>` for repos that want flows beyond
-  add-feature (e.g. "hotfix", "spike", "refactor").
+  drill (e.g. "hotfix", "spike", "refactor").
 - `derrick observe` mutation features (claim/close from inside
   the TUI; v1 is read-only).
 - Evaluate `@github/copilot-sdk` for in-process Copilot dispatch
@@ -2122,11 +2128,11 @@ links back to the section where it lives.
 | D43 | **Roughneck: LLM output compression via prompt injection.** A new crate `derrick-roughneck` appends a compression instruction to every model request, asking the model to emit a compressed form of its output before handoff. Three levels: `lite` (~30%), `full` (~65%, default), `ultra` (~75%). Config: `tools.roughneck.{enabled,level,compress_memory}`. Per-step manifest field `roughneck_tokens_saved` records estimated savings. TUI Tokens tab surfaces roughneck savings alongside scrub. | §3.1 / §9.B.2a / §10.1 |
 | D44 | **`derrick-scrub` records bytes_raw and bytes_saved per step in the manifest.** The scrub crate already existed; this decision adds structured telemetry so `derrick gain` and the TUI can show per-step context reduction, not just a binary "scrub on/off". Config: `tools.output_compression.enabled`. | §9.B.2 / §10.1 |
 | D45 | **`tokens_in` correction: `max(cli_reported, prompt_len/4)`.** `claude --output-format json` under-reports input tokens (direct message only, not full session context). Fix: derrick records the CLI value and a character-count estimate and stores the larger. Conservative but prevents systematic under-counting on cached-prefix sessions. | §9.B.7 / §10.1 |
-| D46 | **Run resume via `prompt_key`: idempotent retry for incomplete runs.** Each run computes a 12-hex SHA-256 prefix of the normalised prompt (`prompt_key`). `derrick add` auto-resumes the most recent incomplete run with the same key instead of starting fresh. `--force` overrides. `resume_of` in the manifest tracks lineage. Completed runs are never auto-resumed. | §10.2 |
+| D46 | **Run resume via `prompt_key`: idempotent retry for incomplete runs.** Each run computes a 12-hex SHA-256 prefix of the normalised prompt (`prompt_key`). `derrick drill` auto-resumes the most recent incomplete run with the same key instead of starting fresh. `--force` overrides. `resume_of` in the manifest tracks lineage. Completed runs are never auto-resumed. *(Command renamed from `derrick add` to `derrick drill` by D64; behaviour unchanged.)* | §10.2 |
 | D47 | **Bridge auto-remediation: terminal ticket delete+recreate; active ticket skip.** When creating tickets, bridge checks for existing tickets with the same feature identity. Terminal-state tickets (Done/Cancelled) are deleted and recreated. Non-terminal tickets are reused (skipped). Both rules fire per-ticket so partial batches are handled correctly. | §8.2.1 |
 | D48 | **Assay headless mode: only `reject` blocks the pipeline.** When `!isatty(stdin)`, assay runs without interactive prompts. `revise` and `accept` are both treated as pass; round exhaustion without `reject` logs a warning and continues. The hard rounds limit applies. Enables fully unattended CI runs. | §7 headless / §4 assay step |
 | D49 | **Constitution seeding in `derrick init` wizard.** When no existing constitution is found and speckit is unavailable for interactive authoring, the wizard prompts the user to enter constitution content directly. The text is written to `.specify/constitution.md` as real content (no banner stub). `--constitution-stub` still writes the banner for users who prefer to author separately. | §5.2 Step 5 |
-| D50 | **`derrick init` creates an initial commit when the repo has no HEAD.** After writing all init files, if the repo has no commits yet, the wizard runs `git add -A && git commit -m "chore: derrick init"`. Required because `derrick add` creates git worktrees, which require at least one commit. | §5.2 Step 7 |
+| D50 | **`derrick init` creates an initial commit when the repo has no HEAD.** After writing all init files, if the repo has no commits yet, the wizard runs `git add -A && git commit -m "chore: derrick init"`. Required because `derrick drill` creates git worktrees, which require at least one commit. *(Command renamed from `derrick add` to `derrick drill` by D64; behaviour unchanged.)* | §5.2 Step 7 |
 | D51 | **Pipeline step order fix: `tasks` runs before `analyze`.** Task generation depends on the accepted plan but not on codebase analysis. `analyze` then has the full task list available as context. Canonical order: `specify → clarify → plan → tasks → analyze → assay → bridge → foreman`. All pipeline config, step descriptions, and the §9.B.1 table updated to match. | §4 pipeline yaml / §9.B.1 / §9.C |
 | D52 | **`derrick switch`: solo → crew upgrade command.** New subcommand upgrades a repo from `mode: solo` to `mode: crew` (or `copilot` via `--mode`). Patches `tools.substrate.mode`, adds `peers:` stanza, writes foreman defaults. Idempotent. `--dry-run` previews the yaml diff. | §5.2.2 / §11 |
 | D53 | **`derrick upgrade` name reserved for binary self-update.** The subcommand is registered in the CLI but not yet implemented. It prints a clear "not yet available" message rather than a "command not found" error, preserving the name for the future self-update feature (check GitHub releases, download, replace running binary). | §11 |
@@ -2136,7 +2142,7 @@ links back to the section where it lives.
 | D57 | **MCP host-wiring split: `.mcp.json` for the server stanza, `settings.json` for permissions.** Corrects D54 clause (b), which stated "`derrick-adopt` wires the `mcpServers` stanza into Claude Code's `settings.json`". Claude Code does not honour `mcpServers` in `.claude/settings.json` for project-scoped servers. The correct split: (i) the server declaration is written to `.mcp.json` at the repo root (project-scoped, checked into VCS), shaped as `{ "mcpServers": { "derrick-survey": { "type": "stdio", "command": "derrick", "args": ["survey","serve","--mcp"] } } }`; (ii) per-tool permissions are written to `.claude/settings.json` under `permissions.allow`, using the `mcp__derrick-survey__<tool>` naming convention, to suppress per-call trust prompts for known tools. Known gap: Claude Code still requires a one-time interactive project-trust prompt on first load of `.mcp.json`; no settings key eliminates it (same "document the gap" posture as D34). All other host-wiring statements in D54 and §9.B.8 remain valid. Supersedes D54 clause (b) only. | §9.B.8 / D54 |
 | D58 | **Survey language scope extended to C#/.NET; `tree-sitter` runtime bumped to 0.26.** Extends D55's v1 language scope (Rust, TS/JS, Python, Go) to include C# (`.cs`), via the `tree-sitter-c-sharp` 0.23.5 grammar. Symbol extraction covers classes/structs/records (type), interfaces (interface), enums (enum), methods/constructors/local functions/properties (function), delegates (type), and namespaces incl. file-scoped (module); reference extraction covers invocations, member-access calls, and object creation (`new T()`). The 0.23.5 C# grammar emits tree-sitter ABI 15, which the workspace's pinned `tree-sitter` 0.24 runtime (max ABI 14) rejected; resolution: bump the workspace `tree-sitter` runtime to 0.26 (supports ABI 13–15), which keeps the existing 0.23-line Rust/Python/Go/JS/TS grammars working unchanged (no grammar-crate or survey API changes required). Pinning C# back to the ABI-14 0.23.1 grammar was considered and rejected in favour of the current grammar plus a runtime bump. Per-language extraction is mechanical and contained to `derrick-survey` (`model.rs`, `parse/`). No change to the index schema, MCP surface (D57), or token accounting. | §9.B.8 / D55 / D56 / root `Cargo.toml` |
 | D59 | **Survey language scope extended to Java and Kotlin.** Extends the scope (D55, D58) to Java (`.java`, via `tree-sitter-java` 0.23.5) and Kotlin (`.kt`/`.kts`, via `tree-sitter-kotlin-ng` 1.1.0 — the maintained successor to the stale `tree-sitter-kotlin`). Both grammars are on the 0.23/ABI-14 line the 0.26 runtime already supports (D58), so no runtime change was needed. Java symbols: classes/records (type), interfaces/annotation types (interface), enums (enum), methods/constructors (function), enum constants (constant), packages (module); refs: method invocations and `new T()`. Kotlin symbols: classes/objects (type), functions (function), properties/enum entries (constant), package headers (module); refs: call expressions incl. navigation (`a.b()`). Known limitation: Kotlin's grammar models interfaces as `class_declaration` (no distinct node), so Kotlin interfaces are indexed as `type` rather than `interface` — the query layer cannot discriminate without modifier predicates, which the extractor does not evaluate. Contained to `derrick-survey` (`model.rs`, `parse/`); no schema, MCP (D57), or token-accounting change. | §9.B.8 / D55 / D58 / root `Cargo.toml` |
-| D60 | **Live run progress via a UI-free `ProgressReporter` (run-feedback Layer 1).** `derrick run`/`derrick add` previously executed the whole pipeline behind a single await and surfaced only a hand-rolled carriage-return spinner with no elapsed time plus a debug-formatted `run <id>: Success` line on stdout — the "black box" UX. Resolution: `derrick-flow` defines a dependency-free `ProgressReporter` trait (`pipeline_started` / `step_started` / `step_finished` / `pipeline_finished`, carrying step id, status, token deltas, and durations) that the `Runner` calls at each step boundary; the orchestrator owns no terminal I/O. The `Runner` gains an `Arc<dyn ProgressReporter>` defaulting to `NoopReporter` (so tests and library callers stay silent) plus a `with_progress` builder. `derrick-cli` implements it with `indicatif` (new workspace dep): an animated per-step spinner with `i/total` counter and live elapsed time on a TTY, each step resolving to a `✓/⏭/⚠/✗` line with duration and token cost, and a clean final summary; degrades to plain status lines when stderr is not a terminal or `NO_COLOR` is set. All run status output is on **stderr** (stdout reserved for machine-readable output); the obsolete `crate::spinner` module and the stdout summary line are removed. **Layer 2 (true line-by-line streaming of agent subprocess output, currently buffered in `derrick-tools` via `wait_with_output`) is deferred** to a follow-up. Interactive prompt redesign (arrow-key menus via `inquire`) and a shared CLI theme module are tracked separately. | §5.3 / §10 / `derrick-flow` / `derrick-cli` / root `Cargo.toml` |
+| D60 | **Live run progress via a UI-free `ProgressReporter` (run-feedback Layer 1).** `derrick run`/`derrick drill` (previously `derrick add`) previously executed the whole pipeline behind a single await and surfaced only a hand-rolled carriage-return spinner with no elapsed time plus a debug-formatted `run <id>: Success` line on stdout — the "black box" UX. Resolution: `derrick-flow` defines a dependency-free `ProgressReporter` trait (`pipeline_started` / `step_started` / `step_finished` / `pipeline_finished`, carrying step id, status, token deltas, and durations) that the `Runner` calls at each step boundary; the orchestrator owns no terminal I/O. The `Runner` gains an `Arc<dyn ProgressReporter>` defaulting to `NoopReporter` (so tests and library callers stay silent) plus a `with_progress` builder. `derrick-cli` implements it with `indicatif` (new workspace dep): an animated per-step spinner with `i/total` counter and live elapsed time on a TTY, each step resolving to a `✓/⏭/⚠/✗` line with duration and token cost, and a clean final summary; degrades to plain status lines when stderr is not a terminal or `NO_COLOR` is set. All run status output is on **stderr** (stdout reserved for machine-readable output); the obsolete `crate::spinner` module and the stdout summary line are removed. **Layer 2 (true line-by-line streaming of agent subprocess output, currently buffered in `derrick-tools` via `wait_with_output`) is deferred** to a follow-up. Interactive prompt redesign (arrow-key menus via `inquire`) and a shared CLI theme module are tracked separately. | §5.3 / §10 / `derrick-flow` / `derrick-cli` / root `Cargo.toml` |
 | D61 | **Live agent-output streaming (run-feedback Layer 2).** Completes the black-box fix begun in D60. The host process layer (`derrick-tools/process.rs`) previously buffered agent output via `child.wait_with_output()`, so a step ran silently for minutes. Resolution: `run_host` now drains stdout and stderr concurrently on separate tasks (avoiding pipe-buffer deadlock), forwarding each complete line to an optional, UI-free `OutputSink` (a `Arc<dyn Fn(StreamSource, &str)>` newtype on `HostRequest`, default `None`) as it arrives, while still accumulating the raw bytes so the captured `HostResponse` is byte-identical to before. `derrick-flow` adds `ProgressReporter::step_output` and threads a per-step sink (closing over the step id + reporter) through `execute_step`/`execute_role_step`; the runner builds it from `self.reporter`, skipping interactive steps (which own stdin). `derrick-cli`'s `indicatif` reporter renders the latest output line as a condensed, truncated heartbeat in the running step's spinner. The sink stays `None` for non-TTY/`NO_COLOR` and interactive steps, so capture-only behaviour is unchanged there. No schema or token-accounting change. Remaining UX work (init-wizard redesign via `inquire`, shared CLI theme) is still open. | §6.5 / §5.3 / D60 / `derrick-tools` / `derrick-flow` / `derrick-cli` |
 | D62 | **Init wizard redesigned on `inquire` (arrow-key prompts).** Closes the init-wizard item deferred by D60. The wizard previously used hand-rolled numbered-list selects (type a number) and a long chain of separate yes/no prompts read via raw stdin — visually weak and tedious. Resolution: adopt `inquire` (new workspace dep) for all wizard prompts — arrow-key `Select`/`MultiSelect`, `Text` with inline validators (the ticket-prefix re-ask loop becomes a validator), and `Confirm`. The trailing yes/no toggles (conventional commits, append AGENTS.md, hooks, VS Code, JetBrains, force) collapse into a single `MultiSelect` with sensible defaults pre-checked, cutting ~6 prompts to one screen. `Esc`/`Ctrl-C` on any prompt cancels cleanly (→ `WizardSelection::Cancelled`); `prompt_constitution` falls back to default seeds. Safe because `should_run_wizard` already gates on a real TTY (`stdin`+`stdout`), so non-interactive/`--yes`/`--no-wizard`/piped/test paths never reach `inquire` and are unchanged; the `WizardInput`/`WizardOutput` contract and pure helpers/tests are preserved. Contained to `derrick-cli` (`init_wizard.rs`); no cross-crate or schema impact. Shared CLI theme module remains the one open UX item. | `derrick-cli` / D60 / root `Cargo.toml` |
 | D63 | **Shared CLI theme module (`ui`).** Closes the last UX item from D60/D62. Styling was scattered: three duplicated `is_styled()` definitions (`init.rs`, `init_wizard.rs`, `switch.rs`) and ~30 hand-rolled `\x1b[…m` escape literals across commands, with no single authority. Resolution: a new `crate::ui` module is the one place that decides whether output is styled (stdout TTY + `NO_COLOR` unset) and exposes colour/weight primitives (`bold`/`dim`/`cyan`/`green`/`red`/`yellow`, built on `owo_colors`), coloured glyphs (`tick`/`cross`/`warn_glyph`/`arrow`), and semantic line builders (`ready`/`written`/`skipped`/`done`/`hint`/`warn`/`rule`/`section`). The three `is_styled()` copies collapse to `ui::styled()`; `init_wizard`'s `bold`/`dim`/`section_rule` delegate to `ui`; the clean semantic lines in `init.rs`/`switch.rs` migrate to `ui` helpers. `owo_colors` emits the same escape codes as the prior literals and helpers degrade to plain text when unstyled, so output is byte-equivalent — verified by the existing init integration tests (which assert on plain text) plus new `ui` unit tests. Mixed lines with inline code spans keep their `ui::styled()`-gated branches (preserving backtick markers in plain mode) rather than forcing a lossy collapse. Contained to `derrick-cli`. | `derrick-cli` / D60 / D62 |
@@ -2150,6 +2156,7 @@ links back to the section where it lives.
 | D71 | **Stacking backends implemented.** The graphite (`gt`) and git-spice (`gs`) backends in `derrick-stack` are real, tested implementations — not v1 stubs. Restack-conflict policy (D19) is unchanged. `derrick doctor` checks the configured backend's binary (`gt` for graphite, `gs` for git-spice, `git`+`gh` for native) and fails the doctor check if the configured backend binary is absent. Supersedes any prose implying these backends were future work. *Superseded by D72* (graphite and git-spice backends deliberately removed). | §8.5 / D19 |
 | D72 | **Native-only stacking: derrick owns its stacking engine.** The graphite (`gt`) and git-spice (`gs`) third-party backend adapters are removed from `derrick-stack`; the native backend (plain git + `gh`) is the sole `StackBackend` implementation. Legacy configs naming `graphite` or `git-spice` fail with an actionable error pointing the user at `native`. Owning the stacking engine beats adapting to third-party CLIs whose semantics derrick cannot guarantee: restack correctness (D19 conflict-bail, D20 branch ownership) depends on derrick observing and controlling the exact git operations. D19, D20, D21, and D22 are unchanged — they govern the native engine. The `StackBackend` trait remains as the §8.6 extension seam for future backends. Supersedes the adapter clauses of D17 and D71. | §8.5 / D17 / D71 |
 | D73 | **Native stacking engine v2: topological cascade restack, whole-stack submit, merge-cascade PR retarget, stack navigation table.** Owning the engine (D72) obligates feature parity with the removed third-party tools where derrick's pipeline needs it; D19/D20/D21/D22 are unchanged. Four capabilities added: (1) `derrick stack restack` processes the `blocks` DAG in deterministic topological order (tie-break: ordinal then ticket id); a D19 conflict blocks only the conflicting ticket and poisons its transitive descendants — independent subtrees continue. (2) `derrick stack submit` walks the batch in stack order, opens missing PRs with the correct base (parent branch for non-roots, `main` for roots), and retargets existing PRs whose base is stale via `gh pr edit --base`. Submit retargets unconditionally rather than reading the current base first — `gh` treats a no-op base change idempotently, and one extra gh call beats a read-then-write race. (3) The foreman's merge-cascade (`restack_dependents`) also retargets the child PR's base after rebase+force-push; `NotSupported` is tolerated (warn + Note), same posture as the force-push gate. (4) `derrick stack submit` maintains an idempotent marked section (`<!-- derrick-stack-nav … -->`) in each stacked PR body listing the stack with the current PR highlighted; replace-if-present, append-if-absent. `derrick stack show` renders a PARENT column with tree indentation by DAG depth in topological order. `StackBackend` gains three additive default methods (`retarget_pr`, `set_pr_body`, `pr_body`) that return `NotSupported`; the native backend overrides all three; `NoneStackBackend` inherits the defaults. §8.6 seam preserved. | §8.5 / D72 |
+| D74 | **Rename \`add\` → \`drill\` across the full user surface. Supersedes the command naming in D46 and D50.** \`derrick add\` drove the entire dark-factory pipeline (spec → clarify → assay → plan → tasks → batch → foreman dispatch). \`add\` is the verb of passive list-appending (\`git add\`, \`npm add\`) — it framed derrick as a backlog/queue tool rather than the build/execution engine it is. \`drill\` is the verb the oil-derrick metaphor implies and fits the existing vocabulary (site / foreman / hand / dispatch). Applied consistently: (a) **CLI** — \`derrick drill "<prompt>"\` is the canonical command; \`add\` is retained as a hidden, deprecated alias. (b) **Run subcommand** — \`derrick run drill\`; the runner also accepts the legacy \`pipeline_id\` \`"add-feature"\` as a deprecated alias so existing run manifests remain resumable. (c) **Slash command and skill** — \`/drill\`; the plugin ships \`commands/drill.md\` and \`skills/drill/SKILL.md\`. (d) **\`pipeline_id\` string** — canonical value is \`"drill"\`; \`"add-feature"\` is a deprecated alias accepted at runtime. (e) The D64 \`--prompt-file\`/stdin surface moves with the rename — \`derrick drill --prompt-file\` and \`derrick run drill --prompt-file\`. English prose uses of "add"/"adds" for general actions are unchanged — only command-name references are renamed. | §5.3 / §6 / §10.2 / §11 / D46 / D50 / D64 |
 
 ### Remaining open questions
 

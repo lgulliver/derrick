@@ -30,9 +30,9 @@
       "presentation": { "reveal": "always", "panel": "dedicated", "focus": true }
     },
     {
-      "label": "derrick: run add-feature",
+      "label": "derrick: run drill",
       "type": "shell",
-      "command": "derrick run add-feature",
+      "command": "derrick run drill",
       "group": "none",
       "presentation": { "reveal": "always", "panel": "shared" }
     }

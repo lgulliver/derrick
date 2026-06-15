@@ -37,6 +37,7 @@ Thumbs.db
 .derrick/state.json
 .derrick/locks/
 .derrick/foreman.pid
+.derrick/foreman.log
 .derrick/derrick.db
 .derrick/derrick.db-shm
 .derrick/derrick.db-wal
@@ -44,6 +45,9 @@ Thumbs.db
 .derrick/index.db-shm
 .derrick/index.db-wal
 .derrick/worktrees/
+.derrick/copilot-worktrees/
+.derrick/copilot-queue/
+.derrick/.adopt-stage-*/
 
 # Claude Code agent worktrees and plan files (runtime state, never committed)
 .claude/worktrees/

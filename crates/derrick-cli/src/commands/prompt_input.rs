@@ -1,6 +1,6 @@
 //! Resolving the feature prompt from a string, a file, or stdin.
 //!
-//! `derrick add` / `derrick run add-feature` accept the feature brief three
+//! `derrick drill` / `derrick run drill` accept the feature brief three
 //! ways so that a large multi-line `/speckit.specify`-style prompt (newlines,
 //! quotes, `$`) can be supplied without shell-escaping pain:
 //!

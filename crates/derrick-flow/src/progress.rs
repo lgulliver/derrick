@@ -133,7 +133,7 @@ mod tests {
     fn noop_reporter_is_silent() {
         let reporter = NoopReporter;
         // None of these should panic or do anything observable.
-        reporter.pipeline_started("add-feature", "run-1", 3);
+        reporter.pipeline_started("drill", "run-1", 3);
         reporter.step_started("specify", 1, 3, false);
         reporter.step_finished(StepProgress {
             step_id: "specify",
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn recording_reporter_captures_lifecycle() {
         let reporter = RecordingReporter::default();
-        reporter.pipeline_started("add-feature", "run-1", 2);
+        reporter.pipeline_started("drill", "run-1", 2);
         reporter.step_started("specify", 1, 2, false);
         reporter.step_finished(StepProgress {
             step_id: "specify",
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(
             *events,
             vec![
-                "start:add-feature:2",
+                "start:drill:2",
                 "step_started:specify:1/2",
                 "step_finished:specify",
                 "finished:Success",

@@ -15,39 +15,39 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
     let (_repo_root, _config, _substrate, runner) = build_runner().await?;
 
     match args.command {
-        RunCommand::AddFeature(add_feature) => {
-            if let Some(from_step) = add_feature.resume_from {
+        RunCommand::Drill(drill) => {
+            if let Some(from_step) = drill.resume_from {
                 // Explicit step-level resume (--resume-from <step>).
                 let outcome = runner
-                    .resume(add_feature.run_id.as_deref(), Some(&from_step))
+                    .resume(drill.run_id.as_deref(), Some(&from_step))
                     .await
                     .map_err(|error| crate::message(error.to_string()))?;
                 return Ok(status_code(outcome.status));
             }
 
-            if add_feature.auto_resume {
-                // Prompt-key auto-resume: detected by `add.rs`, run_id already
+            if drill.auto_resume {
+                // Prompt-key auto-resume: detected by `drill.rs`, run_id already
                 // pinned to the incomplete run.
                 let outcome = runner
-                    .resume(add_feature.run_id.as_deref(), None)
+                    .resume(drill.run_id.as_deref(), None)
                     .await
                     .map_err(|error| crate::message(error.to_string()))?;
                 return Ok(status_code(outcome.status));
             }
 
-            if let Some(prior_run_id) = add_feature.force_prior_run_id.clone() {
+            if let Some(prior_run_id) = drill.force_prior_run_id.clone() {
                 // Force-restart: start a brand-new run but record lineage.
-                let input = pipeline_input(add_feature)?;
+                let input = pipeline_input(drill)?;
                 let outcome = runner
-                    .run_pipeline_as_restart("add-feature", input, prior_run_id)
+                    .run_pipeline_as_restart("drill", input, prior_run_id)
                     .await
                     .map_err(|error| crate::message(error.to_string()))?;
                 return Ok(status_code(outcome.status));
             }
 
-            let input = pipeline_input(add_feature)?;
+            let input = pipeline_input(drill)?;
             let outcome = runner
-                .run_pipeline("add-feature", input)
+                .run_pipeline("drill", input)
                 .await
                 .map_err(|error| crate::message(error.to_string()))?;
             Ok(status_code(outcome.status))
@@ -77,7 +77,7 @@ async fn build_runner() -> Result<
     crate::commands::models::emit_soft_warnings(&config);
     if config.tools().substrate().backend() != SubstrateBackendKind::Native {
         return Err(crate::message(
-            "derrick run add-feature requires tools.substrate.backend: native",
+            "derrick run drill requires tools.substrate.backend: native",
         ));
     }
     let substrate =
@@ -93,7 +93,7 @@ async fn build_runner() -> Result<
     Ok((repo_root, config, substrate, runner))
 }
 
-fn pipeline_input(args: crate::commands::AddFeatureArgs) -> Result<PipelineInput, crate::CliError> {
+fn pipeline_input(args: crate::commands::DrillRunArgs) -> Result<PipelineInput, crate::CliError> {
     let mut skip = args
         .skip
         .into_iter()
@@ -105,8 +105,8 @@ fn pipeline_input(args: crate::commands::AddFeatureArgs) -> Result<PipelineInput
         skip.insert("assay".to_owned());
     }
 
-    // On the direct `run add-feature` path the prompt may arrive via
-    // `--prompt-file` or stdin; resolve it here.  When `add.rs` is the caller it
+    // On the direct `run drill` path the prompt may arrive via
+    // `--prompt-file` or stdin; resolve it here.  When `drill.rs` is the caller it
     // has already resolved the prompt and cleared `prompt_file`, so this is a
     // no-op for that path.
     let prompt =

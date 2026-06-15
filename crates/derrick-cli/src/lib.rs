@@ -47,7 +47,15 @@ where
 
 async fn dispatch(cli: Cli) -> Result<exit_code::CliExitCode, CliError> {
     match cli.command {
-        Command::Add(args) => commands::add::execute(args).await,
+        Command::Drill(args) => {
+            if invoked_via_add_alias() {
+                eprintln!(
+                    "{}",
+                    ui::hint("`derrick add` is deprecated; use `derrick drill` instead")
+                );
+            }
+            commands::drill::execute(args).await
+        }
         Command::Init(args) => commands::init::execute(args).await,
         Command::Status(args) => commands::status::execute(args).await,
         Command::Doctor(args) => commands::doctor::execute(args).await,
@@ -101,6 +109,16 @@ enum CliError {
 
 fn message(text: impl Into<String>) -> CliError {
     CliError::Message(text.into())
+}
+
+/// Returns true when the `drill` command was reached via the deprecated `add`
+/// alias. Detected by scanning argv for the first subcommand token — `add`
+/// means the alias was used, `drill` (or any later token) means it was not.
+fn invoked_via_add_alias() -> bool {
+    std::env::args()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .is_some_and(|token| token == "add")
 }
 
 fn find_repo_root(start: &Path) -> Result<PathBuf, CliError> {

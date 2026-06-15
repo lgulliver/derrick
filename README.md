@@ -13,7 +13,7 @@
 **derrick** is a Rust CLI that turns a single command into a full dark-factory feature pipeline — spec, adversarial review, tickets, dispatch, PR stacking — without asking you to wire each underlying tool by hand.
 
 ```bash
-derrick add "build a webhook ingest endpoint with idempotent dedupe"
+derrick drill "build a webhook ingest endpoint with idempotent dedupe"
 ```
 
 That one line walks the entire pipeline, remembers what it learns about your codebase, compresses everything that crosses a model boundary, and runs independent work in parallel. One binary, SQLite, no daemon required.
@@ -23,7 +23,7 @@ That one line walks the entire pipeline, remembers what it learns about your cod
 ## How it works
 
 ```
-derrick add "description"
+derrick drill "description"
       │
       ▼
   clarify ──► plan ──► checkpoint ──► assay (adversarial review)
@@ -64,7 +64,7 @@ Every byte across a model boundary earns its place.
 Survey is wired automatically via MCP by `derrick init` — agents query it instead of fanning out across reads without any extra setup. Scrub and caveman fire automatically at every model boundary via Claude Code / Codex hooks written by `derrick init`. Roughneck fires at every model step via prompt injection; configure via `tools.roughneck` in `derrick.yaml`.
 
 ### 🔀 Parallelism
-Independent work runs concurrently. Each `/add-feature` run gets an isolated git worktree. The foreman dispatches multiple hands (agents) in parallel via `join_all`. Multi-reviewer assay fans reviewers out concurrently, bounded by `parallelism.assay_max` (§9.C.5).
+Independent work runs concurrently. Each `/drill` run gets an isolated git worktree. The foreman dispatches multiple hands (agents) in parallel via `join_all`. Multi-reviewer assay fans reviewers out concurrently, bounded by `parallelism.assay_max` (§9.C.5).
 
 ---
 
@@ -149,16 +149,16 @@ Non-interactive usage is unchanged (`--yes`, `--dry-run`, non-TTY, and scripted 
 Start a feature:
 
 ```bash
-derrick add "build a webhook ingest endpoint with idempotent dedupe"
+derrick drill "build a webhook ingest endpoint with idempotent dedupe"
 
 # Skip steps you don't need right now
-derrick add "fix the auth token refresh race" --no-clarify --no-assay
+derrick drill "fix the auth token refresh race" --no-clarify --no-assay
 
 # Dry run to see the plan without executing
-derrick add "refactor the rate limiter" --dry-run
+derrick drill "refactor the rate limiter" --dry-run
 ```
 
-Or trigger from inside Claude Code with `/add-feature` (maps to the same pipeline).
+Or trigger from inside Claude Code with `/drill` (maps to the same pipeline).
 
 ---
 
@@ -168,11 +168,11 @@ Or trigger from inside Claude Code with `/add-feature` (maps to the same pipelin
 derrick <COMMAND>
 
 PIPELINE
-  add          Run the full pipeline — prompt is a positional argument
+  drill        Run the full pipeline — prompt is a positional argument
   init         Adopt a repo (brownfield-safe, VS Code / JetBrains opt-in)
   switch       Upgrade a solo-mode repo to crew (or copilot) mode
   upgrade      Binary self-update from the latest GitHub release (--check, --force)
-  run          add-feature / resume — canonical forms for scripts / CI
+  run          drill / resume — canonical forms for scripts / CI
   foreman      start / stop / tick the dispatch loop
 
 VISIBILITY
@@ -311,7 +311,7 @@ You can override any role binding in `roles`, and pin a role's model to a concre
 
 What's landed and tested:
 
-- ✅ `derrick add` — positional-prompt shorthand; `run add-feature` for scripts
+- ✅ `derrick drill` — positional-prompt shorthand; `run drill` for scripts
 - ✅ Full pipeline executor with multi-reviewer assay and `parallel_group` steps
 - ✅ Foreman dispatch loop (attached and detached daemon)
 - ✅ Ticket state machine (ready → in-flight → in-review → done / blocked / rejected)
@@ -327,7 +327,7 @@ What's landed and tested:
 - ✅ `derrick switch` — solo → crew upgrade command
 - ✅ `derrick upgrade` — binary self-update from GitHub releases (`--check`, `--force`, atomic replacement with permission preservation)
 - ✅ Constitution seeding in `derrick init` wizard
-- ✅ `derrick init` initial commit fix — creates HEAD before first `derrick add`
+- ✅ `derrick init` initial commit fix — creates HEAD before first `derrick drill`
 - ✅ Pipeline step order fix — `tasks` before `analyze`
 - ✅ `derrick observe` — live ratatui dashboard
 - ✅ Tiered memory with tag index and lesson retrieval

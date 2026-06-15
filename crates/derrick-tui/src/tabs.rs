@@ -602,7 +602,7 @@ fn render_tokens(frame: &mut Frame, area: Rect, app: &App) {
     // ── Per-step bar chart ───────────────────────────────────────────────
     if s.per_step.is_empty() {
         frame.render_widget(
-            Paragraph::new("(no step data — run `derrick add` to generate token records)").block(
+            Paragraph::new("(no step data — run `derrick drill` to generate token records)").block(
                 Block::default()
                     .title("Per-step breakdown")
                     .borders(Borders::ALL),

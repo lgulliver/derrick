@@ -6,15 +6,10 @@
   "install": "curl -fsSL https://raw.githubusercontent.com/lgulliver/derrick/main/scripts/install.sh | bash",
   "skills": [
     {
-      "name": "add-feature",
+      "name": "drill",
       "description": "Run the full dark-factory pipeline for a feature description. Drives spec, plan, adversarial review, ticket creation, and foreman dispatch.",
-      "path": ".claude/skills/add-feature.md",
-      "aliases": ["/add-feature"]
-    },
-    {
-      "name": "derrick-status",
-      "description": "Show current batch status, in-flight tickets, and foreman state in a caveman-compressed summary.",
-      "path": ".claude/skills/derrick-status.md"
+      "path": ".claude/skills/drill/SKILL.md",
+      "aliases": ["/drill"]
     }
   ],
   "hooks": {

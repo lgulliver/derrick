@@ -1,3 +1,3 @@
 # /derrick-resume
 
-Run `derrick run add-feature --resume-from "$ARGUMENTS"`.
+Run `derrick run drill --resume-from "$ARGUMENTS"`.

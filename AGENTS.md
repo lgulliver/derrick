@@ -8,10 +8,10 @@
 Derrick is a unified front door over **speckit**, an in-process
 **assay** (adversarial plan review), and a derrick-native
 **execution substrate**. One install, one config (`derrick.yaml`),
-one primary command (`/add-feature`).
+one primary command (`/drill`).
 
 The full design is in [`DESIGN.md`](./DESIGN.md). It is the source
-of truth. Seventy-one decisions are recorded in §12 as **D1–D71**;
+of truth. Seventy-four decisions are recorded in §12 as **D1–D74**;
 do not re-litigate them without filing a `design-question` issue
 and updating §12 with a new `D` entry.
 
@@ -86,11 +86,11 @@ Engineering standards (style, SOLID, DRY, coverage) are in
 
 ### Dogfooding milestone
 
-Once derrick can drive `/add-feature` end-to-end against itself,
+Once derrick can drive `/drill` end-to-end against itself,
 we switch to dogfooding: orchestration moves out of ad-hoc
 Claude Code + raw codex/copilot invocations and into derrick's
 own pipeline. The minimum bar is the four crates below being
-implemented well enough that a fresh `/add-feature "..."` run
+implemented well enough that a fresh `/drill "..."` run
 in this repo produces a working spec, an accepted assay verdict,
 and a `tasks.md` (the substrate-backed ticket dispatch is a
 bonus — not strictly required for the switch).
@@ -104,7 +104,7 @@ bonus — not strictly required for the switch).
 
 When that bar is met, the orchestrator (Claude main session)
 should propose the switch, get human confirmation, and from
-that point on every ticket goes through `/add-feature` rather
+that point on every ticket goes through `/drill` rather
 than direct codex/copilot invocations. The agent contracts and
 quality gates stay the same — the difference is who issues the
 brief.

@@ -12,7 +12,7 @@ pub struct RunManifest {
     pub pipeline_id: String,
     pub prompt: String,
     /// Normalised SHA256 prefix of the prompt — used to match incomplete runs
-    /// for the same feature so `derrick add` can auto-resume instead of
+    /// for the same feature so `derrick drill` can auto-resume instead of
     /// starting fresh and hitting ticket-ID collisions.
     #[serde(default)]
     pub prompt_key: String,
@@ -297,7 +297,7 @@ mod tests {
         use chrono::Utc;
         let m = RunManifest::new(
             "run-1".to_owned(),
-            "add-feature".to_owned(),
+            "drill".to_owned(),
             "Build a webhook endpoint".to_owned(),
             FlagsManifest {
                 skip: vec![],
@@ -317,7 +317,7 @@ mod tests {
         use chrono::Utc;
         let mut m = RunManifest::new(
             "run-2".to_owned(),
-            "add-feature".to_owned(),
+            "drill".to_owned(),
             "prompt".to_owned(),
             FlagsManifest {
                 skip: vec![],
@@ -341,7 +341,7 @@ mod tests {
 
         let manifest = RunManifest::new(
             "20250101T000000Z".to_owned(),
-            "add-feature".to_owned(),
+            "drill".to_owned(),
             "Build a thing".to_owned(),
             FlagsManifest {
                 skip: vec![],

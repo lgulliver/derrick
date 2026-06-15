@@ -245,6 +245,29 @@ fn greenfield_init_in_empty_repo_creates_files() -> TestResult {
     assert_contains(&output, "test  ready")?;
     assert!(dir.path().join("derrick.yaml").exists());
     assert!(dir.path().join(".derrick/derrick.db").exists());
+
+    // The generated `.derrick/.gitignore` must cover every runtime artifact the
+    // foreman creates under `.derrick/`. Regression guard: a missing
+    // `copilot-worktrees/` rule once left 27GB of worktrees un-ignored, one
+    // `git add -A` away from being committed.
+    let gitignore = fs::read_to_string(dir.path().join(".derrick/.gitignore"))?;
+    let entries: Vec<&str> = gitignore.lines().collect();
+    for expected in [
+        "runs/",
+        "state.json",
+        "foreman.log",
+        "derrick.db*",
+        "index.db*",
+        "worktrees/",
+        "copilot-queue/",
+        "copilot-worktrees/",
+        ".adopt-stage-*/",
+    ] {
+        assert!(
+            entries.contains(&expected),
+            "{expected} missing from .derrick/.gitignore: {gitignore:?}"
+        );
+    }
     Ok(())
 }
 
@@ -780,7 +803,7 @@ fn doctor_exit_code_equals_fail_count() -> TestResult {
 }
 
 #[test]
-fn run_add_feature_smoke_writes_real_artifacts() -> TestResult {
+fn run_drill_smoke_writes_real_artifacts() -> TestResult {
     let dir = repo()?;
     greenfield(dir.path())?.success();
     fs::create_dir_all(dir.path().join(".specify/memory"))?;
@@ -793,7 +816,7 @@ fn run_add_feature_smoke_writes_real_artifacts() -> TestResult {
     let output = derrick()?
         .current_dir(dir.path())
         .env("PATH", path)
-        .args(["run", "add-feature", "--prompt", "hello", "--run", "smoke"])
+        .args(["run", "drill", "--prompt", "hello", "--run", "smoke"])
         .assert()
         .success()
         .get_output()

@@ -68,7 +68,7 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-    const ADD_FEATURE_PIPELINE: &str = "add-feature";
+    const DRILL_PIPELINE: &str = "drill";
 
     struct StaticHost {
         name: &'static str,
@@ -308,7 +308,7 @@ state:
         )
     }
 
-    fn add_feature_pipeline() -> &'static str {
+    fn drill_pipeline() -> &'static str {
         r#"  - id: specify
     role: drafter
     host: claude
@@ -457,10 +457,10 @@ fi
         Ok(())
     }
 
-    fn add_feature_pipeline_with_dispatch() -> String {
+    fn drill_pipeline_with_dispatch() -> String {
         format!(
             "{}\n  - id: bridge\n    runner: derrick\n    inputs: [\"{{{{feature_dir}}}}/tasks.md\"]\n    batch: \"br-{{{{run_id}}}}\"\n  - id: foreman\n    runner: derrick\n",
-            add_feature_pipeline()
+            drill_pipeline()
         )
     }
 
@@ -468,13 +468,13 @@ fi
     async fn bridge_creates_tickets_from_tasks() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
         let (dir, runner) = runner(&yaml_crew(
-            &add_feature_pipeline_with_dispatch(),
+            &drill_pipeline_with_dispatch(),
             &reviewer.path().join("reviewer"),
         ))
         .await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("bridge-test".to_owned()),
@@ -537,10 +537,10 @@ fi
 
     /// Pipeline with bridge only (no foreman) — tickets stay in `ready` state
     /// after bridge, making it easy to move them to terminal states for tests.
-    fn add_feature_pipeline_bridge_only() -> String {
+    fn drill_pipeline_bridge_only() -> String {
         format!(
             "{}\n  - id: bridge\n    runner: derrick\n    inputs: [\"{{{{feature_dir}}}}/tasks.md\"]\n    batch: \"br-{{{{run_id}}}}\"\n",
-            add_feature_pipeline()
+            drill_pipeline()
         )
     }
 
@@ -550,7 +550,7 @@ fi
         // Use a pipeline WITHOUT foreman so tickets stay in `ready` (not in_flight)
         // after run 1, allowing us to mark them done via the substrate API.
         let (dir, runner) = runner(&yaml_crew(
-            &add_feature_pipeline_bridge_only(),
+            &drill_pipeline_bridge_only(),
             &reviewer.path().join("reviewer"),
         ))
         .await?;
@@ -558,7 +558,7 @@ fi
         // Run 1: creates tst-0 … tst-2 in `ready` state.
         let outcome1 = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("remediate-run-1".to_owned()),
@@ -606,7 +606,7 @@ fi
         // Run 2: bridge should detect terminal tickets, delete and recreate them.
         let outcome2 = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("remediate-run-2".to_owned()),
@@ -634,7 +634,7 @@ fi
     async fn bridge_skips_tickets_that_are_active() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
         let (dir, runner) = runner(&yaml_crew(
-            &add_feature_pipeline_with_dispatch(),
+            &drill_pipeline_with_dispatch(),
             &reviewer.path().join("reviewer"),
         ))
         .await?;
@@ -643,7 +643,7 @@ fi
         // them → `in_flight`.
         let outcome1 = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("skip-run-1".to_owned()),
@@ -657,7 +657,7 @@ fi
         // not error, and the pipeline should succeed.
         let outcome2 = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("skip-run-2".to_owned()),
@@ -679,16 +679,13 @@ fi
     }
 
     #[tokio::test]
-    async fn add_feature_happy_path_writes_all_artifacts() -> TestResult {
+    async fn drill_happy_path_writes_all_artifacts() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("run-1".to_owned()),
@@ -706,6 +703,48 @@ fi
             dir.path()
                 .join(".derrick/runs/run-1/manifest.json")
                 .exists()
+        );
+        Ok(())
+    }
+
+    /// Fresh runs persist `pipeline_id: "drill"`, and a pre-rename manifest
+    /// carrying the legacy `pipeline_id: "add-feature"` still resolves and
+    /// resumes through the runner's dual-accept matcher.
+    #[tokio::test]
+    async fn legacy_add_feature_manifest_still_resumes() -> TestResult {
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        let (dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
+
+        // A fresh run writes the new pipeline id.
+        let outcome = runner
+            .run_pipeline(
+                DRILL_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("legacy-run".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+        assert_eq!(outcome.status, RunStatus::Success);
+
+        let manifest_path = dir.path().join(".derrick/runs/legacy-run/manifest.json");
+        let mut manifest = crate::manifest::read_manifest(&manifest_path)?;
+        assert_eq!(
+            manifest.pipeline_id, "drill",
+            "fresh runs must persist pipeline_id: drill"
+        );
+
+        // Rewrite the manifest to look like a pre-rename run, then resume it.
+        manifest.pipeline_id = "add-feature".to_owned();
+        crate::manifest::write_manifest(&manifest_path, &manifest)?;
+
+        let resumed = runner.resume(Some("legacy-run"), None).await?;
+        assert_eq!(
+            resumed.status,
+            RunStatus::Success,
+            "a legacy add-feature manifest should still resolve and resume"
         );
         Ok(())
     }
@@ -739,16 +778,13 @@ fi
         }
 
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         let reporter = std::sync::Arc::new(CountingReporter::default());
         let runner = runner.with_progress(reporter.clone());
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("run-progress".to_owned()),
@@ -787,7 +823,7 @@ fi
         let drafter = reviewer_script("#!/bin/sh\ncat > /dev/null\nprintf 'ok'")?;
         let reviewer = reviewer_script("#!/bin/sh\nexit 9")?;
         let (_dir, runner) = runner(&yaml_with_drafter(
-            add_feature_pipeline(),
+            drill_pipeline(),
             &drafter.path().join("reviewer"),
             &reviewer.path().join("reviewer"),
         ))
@@ -796,7 +832,7 @@ fi
         skip.insert("assay".to_owned());
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     skip,
@@ -831,7 +867,7 @@ fi
         let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
         let first = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("default-skip".to_owned()),
@@ -844,7 +880,7 @@ fi
 
         let second = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     unskip: BTreeSet::from(["optional".to_owned()]),
@@ -861,14 +897,11 @@ fi
     #[tokio::test]
     async fn dry_run_halts_after_tasks_step() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     dry_run: true,
@@ -889,11 +922,8 @@ fi
     #[tokio::test]
     async fn unknown_pipeline_id_errors() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
 
         let error = runner
             .run_pipeline("missing", PipelineInput::default())
@@ -906,16 +936,13 @@ fi
     }
 
     #[tokio::test]
-    async fn missing_prompt_for_add_feature_errors() -> TestResult {
+    async fn missing_prompt_for_drill_errors() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
 
         let error = runner
-            .run_pipeline(ADD_FEATURE_PIPELINE, PipelineInput::default())
+            .run_pipeline(DRILL_PIPELINE, PipelineInput::default())
             .await
             .err()
             .ok_or("missing prompt should error")?;
@@ -935,7 +962,7 @@ fi
         let (_dir, runner) = runner(&yaml(bad, &reviewer.path().join("reviewer"))).await?;
         let error = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     ..PipelineInput::default()
@@ -958,7 +985,7 @@ fi
         let (_dir, runner) = runner(&yaml(bad, &reviewer.path().join("reviewer"))).await?;
         let error = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     ..PipelineInput::default()
@@ -991,7 +1018,7 @@ fi
         let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("parallel-group".to_owned()),
@@ -1010,16 +1037,13 @@ fi
     #[tokio::test]
     async fn skip_id_on_nonskippable_step_errors() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         let mut skip = BTreeSet::new();
         skip.insert("specify".to_owned());
         let error = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     skip,
@@ -1037,14 +1061,11 @@ fi
     #[tokio::test]
     async fn assay_reject_halts_pipeline() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\nreject\\n'")?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("run-4".to_owned()),
@@ -1065,8 +1086,7 @@ fi
     async fn assay_revise_then_accept_succeeds_after_replan() -> TestResult {
         let drafter = reviewer_script("#!/bin/sh\ncat > /dev/null\nprintf 'ok'")?;
         let reviewer = revise_then_accept_script()?;
-        let rounds =
-            add_feature_pipeline().replace("rounds: \"{{tools.assay.rounds}}\"", "rounds: 2");
+        let rounds = drill_pipeline().replace("rounds: \"{{tools.assay.rounds}}\"", "rounds: 2");
         let (dir, runner) = runner(&yaml_with_drafter(
             &rounds,
             &drafter.path().join("reviewer"),
@@ -1076,7 +1096,7 @@ fi
 
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("revise-accept".to_owned()),
@@ -1099,14 +1119,11 @@ fi
         let reviewer = reviewer_script(
             "#!/bin/sh\nprintf '## Suggested revisions\\nonly objection\\n## Verdict\\nrevise\\n'",
         )?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("revise-accept-conditions".to_owned()),
@@ -1122,14 +1139,11 @@ fi
     #[tokio::test]
     async fn assay_unparsable_verdict_surfaces_step_failed() -> TestResult {
         let reviewer = reviewer_script("printf 'no verdict\\n'")?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         let error = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     ..PipelineInput::default()
@@ -1153,7 +1167,7 @@ fi
         let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("hello".to_owned()),
                     run_id: Some("run-bash".to_owned()),
@@ -1180,7 +1194,7 @@ fi
         let (_dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
         let error = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("hello".to_owned()),
                     run_id: Some("bash-fail".to_owned()),
@@ -1206,7 +1220,7 @@ fi
         let (_dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("hello".to_owned()),
                     run_id: Some("noop".to_owned()),
@@ -1230,7 +1244,7 @@ fi
         let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("hello".to_owned()),
                     run_id: Some("model".to_owned()),
@@ -1250,14 +1264,11 @@ fi
     #[tokio::test]
     async fn resume_from_step_skips_earlier_steps() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     skip: BTreeSet::from(["assay".to_owned()]),
@@ -1295,7 +1306,7 @@ fi
             let (_dir, runner) = runner(&yaml(&pipe, &reviewer.path().join("reviewer"))).await?;
             let error = runner
                 .run_pipeline(
-                    ADD_FEATURE_PIPELINE,
+                    DRILL_PIPELINE,
                     PipelineInput {
                         prompt: Some("test".to_owned()),
                         ..PipelineInput::default()
@@ -1312,14 +1323,11 @@ fi
     #[tokio::test]
     async fn resume_refuses_when_config_hash_mismatches() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     skip: BTreeSet::from(["assay".to_owned()]),
@@ -1545,7 +1553,7 @@ fi
         let runner = Runner::new(config, Arc::new(substrate), hosts, dir.path().to_path_buf());
         runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("specify-detect".to_owned()),
@@ -1727,7 +1735,7 @@ state:
         let runner = Runner::new(config, Arc::new(substrate), hosts, dir.path().to_path_buf());
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("codex-fallback".to_owned()),
@@ -1788,11 +1796,8 @@ state:
     #[tokio::test]
     async fn plan_prompt_includes_clarify_answers_when_present() -> TestResult {
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         let feature_dir = dir.path().join("specs/001-test");
         std::fs::create_dir_all(&feature_dir)?;
         std::fs::write(
@@ -1938,7 +1943,7 @@ state:
         let (dir, runner) = multi_reviewer_runner(&yaml).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("multi-accept".to_owned()),
@@ -1974,7 +1979,7 @@ state:
         let (dir, runner) = multi_reviewer_runner(&yaml).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("multi-reject".to_owned()),
@@ -2000,14 +2005,11 @@ state:
         // The role step's host CLI is a subprocess too. Its stdout/stderr
         // must be counted toward bytes_raw via the scrub plumbing.
         let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
-        let (_dir, runner) = runner(&yaml(
-            add_feature_pipeline(),
-            &reviewer.path().join("reviewer"),
-        ))
-        .await?;
+        let (_dir, runner) =
+            runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("role-bytes-raw".to_owned()),
@@ -2046,7 +2048,7 @@ state:
         let (_dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("bytes-raw".to_owned()),
@@ -2084,7 +2086,7 @@ state:
         let (_dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("bytes-saved".to_owned()),
@@ -2123,7 +2125,7 @@ state:
         let (dir, runner) = multi_reviewer_runner(&yaml).await?;
         let outcome = runner
             .run_pipeline(
-                ADD_FEATURE_PIPELINE,
+                DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
                     run_id: Some("multi-majority".to_owned()),
