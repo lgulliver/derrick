@@ -1,0 +1,6 @@
+1. Yes
+2. leave untracked.
+
+---
+
+there's merge conflicts
