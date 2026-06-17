@@ -534,6 +534,15 @@ step's command and current working directory (D30). The host loads its own
 context. Failure of any step halts the pipeline with a numbered error and the
 exact resume command (`derrick run drill --resume-from <step>`).
 
+Each step emits two substrate events scoped to `EventScope::Worktree { run_id }`:
+`PipelineStepStarted { step_id, index, total }` at step entry and
+`PipelineStepCompleted { step_id, status }` at step exit (D77). The
+`PipelineStepStarted` event bridges the live `ProgressReporter` plane (D60/D61,
+seen only by the launching terminal) into the persisted event log, so
+`derrick observe` can show mid-step liveness without polling the launching
+process. Live per-line agent output is not duplicated into the event log
+(volume); the TUI tails the per-step `.log` file for that (D78).
+
 The `add` subcommand is a hidden, deprecated alias for `drill`; the runner
 also accepts `"add-feature"` as a deprecated `pipeline_id` so existing run
 manifests stay resumable. See D64.
@@ -677,7 +686,7 @@ vocabulary regardless of backend (v1 ships only the native one).
 | `derrick batch [name]` | Batch state: order, blockers, who's working what, ETA estimate | `Batch.Get` |
 | `derrick foreman` | Foreman session status, current focus, recent escalations | `Foreman.Status` |
 | `derrick activity [--site \| --batch]` | Recent agent activity timeline | `Event.Tail` |
-| `derrick hands` | Hands registered to this site, current task, last heartbeat | `Hand.List` |
+| `derrick hands` | Hands registered to this site, current task, last heartbeat, pid (D75) | `Hand.List` |
 | `derrick orphans` | Lost work (tickets with no live owner) | `Ticket.Orphans` |
 | `derrick stack [--batch <name>]` | Current PR stack: parent→child PRs, merge state, restack health | `Stack.Show` |
 | `derrick runs` | Last N derrick pipeline runs, exit status per step | local `.derrick/runs/` |
@@ -796,7 +805,8 @@ can't damage state.
 
 ```
 ┌── derrick · site: taxi-ingest · mode: crew · backend: native ────────── 09:47 ─┐
-│  [1] Overview   [2] Tickets   [3] Stack   [4] Activity   [5] Tokens   [6] Memory │
+│  [1] Overview  [2] Tickets  [3] Stack  [4] Activity  [5] Tokens  [6] Memory      │
+│  [7] Hands     [8] Factory                                                        │
 ├──────────────────────────────────────────────────────────────────────────────────┤
 │  Active batch  001-webhook-ingest                                                │
 │  ▰▰▰▰▰▱▱▱▱▱▱   3 / 11 done · 2 in-flight · 6 ready · 0 blocked                  │
@@ -837,17 +847,41 @@ can't damage state.
    reference / feedback / lessons). Lets the user spot stale or
    wrong entries; `d` flags one for deletion (writes to a queue,
    not applied until the user runs `derrick memory prune`).
+7. **Hands** — per-hand rollup: hand id, kind, current ticket,
+   last heartbeat, pid (D75), and a status glyph
+   (`✓ done / ✗ failed / ⟳ running`) derived from the structured
+   telemetry events (D76) rather than free-text `Note` matching.
+8. **Factory** — an ASCII factory floor of animated workers
+   (D78). Workstations = active worktree rows; each worker avatar
+   is a unicode glyph chosen by `HandKind`
+   (claude/copilot/codex/opencode/aider/human). Worker animation
+   states are driven by recent events on `EventScope::Hand`:
+   `HandStarted` → worker arrives; throttled `HandProgress` →
+   worker "hammering" (braille frame cycle);
+   `TicketTransitionedToInReview` → box placed on conveyor;
+   `HandExited` → worker leaves; `TicketVerifiedMerged` → box
+   ships to dock. The conveyor is rendered from the `links`
+   dependency graph (`Blocks` edges); the shipping dock counts
+   merged PRs; the smokestack puffs when the foreman is
+   Attached/Detached and idles when Stopped. For per-line agent
+   output the tab tails `.derrick/runs/<id>/step-<id>.log` rather
+   than expanding the event log. Read-only — never mutates state.
 
 #### Live updates
 
-Two mechanisms, both running:
+Three mechanisms, all running:
 
 - **File watcher** (notify crate) on `.derrick/derrick.db`,
-  `.derrick/runs/`, `.derrick/foreman.pid`. Fires the moment
-  anything changes.
+   `.derrick/runs/`, `.derrick/foreman.pid`. Fires the moment
+   anything changes.
 - **Tick timer** (1s) as a fallback for things the watcher
-  doesn't surface (e.g. age counters in the in-flight pane,
-  remote PR state freshness).
+   doesn't surface (e.g. age counters in the in-flight pane,
+   remote PR state freshness, substrate event tail).
+- **Animation tick** (~100ms) for the Factory tab only (D78).
+   Drives per-worker frame counters and conveyor motion; substrate
+   polling still happens at the 1 Hz cadence above, so the
+   animation tick is pure local state (no substrate reads).
+   ratatui's diff-based rendering keeps the 10× redraw cheap.
 
 Refresh is incremental — only the affected pane redraws, not the
 whole screen. Important for long-running tmux sessions.
@@ -1601,11 +1635,40 @@ On every `derrick run` startup, before dispatching any work:
 3. Walk `claimed_at`-stale tickets in `InFlight` whose hands
    haven't heartbeat'd in `tools.foreman.hand_ttl` (default
    30 minutes). Re-queue as `Ready`, emit a
-   `HandAbandoned` event.
+   `HandAbandoned` event. **Hand pid liveness (D75)**: when a
+   hand row carries a `pid` (crew hands spawned by a dispatcher),
+   `kill(pid, 0)` is a second authoritative signal — a dead pid
+   abandons the hand immediately even before the heartbeat TTL
+   elapses, and a live pid suppresses abandonment when heartbeats
+   are merely stale (e.g. a busy agent that hasn't heartbeat'd but
+   is still running). Heartbeat TTL remains the backstop for hands
+   with no pid (human hands, externally-spawned hands).
 
 The cleanup loop runs sequentially with the main loop — never
 concurrently, never as background — so cleanups can't race
 the foreman's dispatch.
+
+#### Structured hand telemetry (D76)
+
+Crew dispatchers (`derrick-hand` HostCliHandDispatcher,
+`derrick-claude`, `derrick-copilot` local,
+`derrick-substrate-native` HumanHandDispatcher) report hand
+progress via three typed `EventKind` variants rather than
+free-text `Note` bodies:
+
+- `HandStarted { hand, pid, ticket }` — emitted on spawn; the pid
+  feeds D75 liveness.
+- `HandProgress { hand, snippet }` — throttled to at most one
+  event per hand per 2 seconds and only on meaningful-change
+  (latest stdout line differs from the last emitted snippet);
+  the snippet is capped at ~80 display columns. This bounds
+  event-log growth even when an agent streams hundreds of lines.
+- `HandExited { hand, code, stats }` — emitted on completion with
+  exit code and token stats.
+
+`Note` events remain for genuinely free-form operator messages.
+The TUI's `build_hand_rows` is the first consumer and no longer
+string-matches `"exited successfully"` / `"hand stats:"` bodies.
 
 #### Why this is in §8 and not in §9 parallelism
 
@@ -2157,6 +2220,10 @@ links back to the section where it lives.
 | D72 | **Native-only stacking: derrick owns its stacking engine.** The graphite (`gt`) and git-spice (`gs`) third-party backend adapters are removed from `derrick-stack`; the native backend (plain git + `gh`) is the sole `StackBackend` implementation. Legacy configs naming `graphite` or `git-spice` fail with an actionable error pointing the user at `native`. Owning the stacking engine beats adapting to third-party CLIs whose semantics derrick cannot guarantee: restack correctness (D19 conflict-bail, D20 branch ownership) depends on derrick observing and controlling the exact git operations. D19, D20, D21, and D22 are unchanged — they govern the native engine. The `StackBackend` trait remains as the §8.6 extension seam for future backends. Supersedes the adapter clauses of D17 and D71. | §8.5 / D17 / D71 |
 | D73 | **Native stacking engine v2: topological cascade restack, whole-stack submit, merge-cascade PR retarget, stack navigation table.** Owning the engine (D72) obligates feature parity with the removed third-party tools where derrick's pipeline needs it; D19/D20/D21/D22 are unchanged. Four capabilities added: (1) `derrick stack restack` processes the `blocks` DAG in deterministic topological order (tie-break: ordinal then ticket id); a D19 conflict blocks only the conflicting ticket and poisons its transitive descendants — independent subtrees continue. (2) `derrick stack submit` walks the batch in stack order, opens missing PRs with the correct base (parent branch for non-roots, `main` for roots), and retargets existing PRs whose base is stale via `gh pr edit --base`. Submit retargets unconditionally rather than reading the current base first — `gh` treats a no-op base change idempotently, and one extra gh call beats a read-then-write race. (3) The foreman's merge-cascade (`restack_dependents`) also retargets the child PR's base after rebase+force-push; `NotSupported` is tolerated (warn + Note), same posture as the force-push gate. (4) `derrick stack submit` maintains an idempotent marked section (`<!-- derrick-stack-nav … -->`) in each stacked PR body listing the stack with the current PR highlighted; replace-if-present, append-if-absent. `derrick stack show` renders a PARENT column with tree indentation by DAG depth in topological order. `StackBackend` gains three additive default methods (`retarget_pr`, `set_pr_body`, `pr_body`) that return `NotSupported`; the native backend overrides all three; `NoneStackBackend` inherits the defaults. §8.6 seam preserved. | §8.5 / D72 |
 | D74 | **Rename \`add\` → \`drill\` across the full user surface. Supersedes the command naming in D46 and D50.** \`derrick add\` drove the entire dark-factory pipeline (spec → clarify → assay → plan → tasks → batch → foreman dispatch). \`add\` is the verb of passive list-appending (\`git add\`, \`npm add\`) — it framed derrick as a backlog/queue tool rather than the build/execution engine it is. \`drill\` is the verb the oil-derrick metaphor implies and fits the existing vocabulary (site / foreman / hand / dispatch). Applied consistently: (a) **CLI** — \`derrick drill "<prompt>"\` is the canonical command; \`add\` is retained as a hidden, deprecated alias. (b) **Run subcommand** — \`derrick run drill\`; the runner also accepts the legacy \`pipeline_id\` \`"add-feature"\` as a deprecated alias so existing run manifests remain resumable. (c) **Slash command and skill** — \`/drill\`; the plugin ships \`commands/drill.md\` and \`skills/drill/SKILL.md\`. (d) **\`pipeline_id\` string** — canonical value is \`"drill"\`; \`"add-feature"\` is a deprecated alias accepted at runtime. (e) The D64 \`--prompt-file\`/stdin surface moves with the rename — \`derrick drill --prompt-file\` and \`derrick run drill --prompt-file\`. English prose uses of "add"/"adds" for general actions are unchanged — only command-name references are renamed. | §5.3 / §6 / §10.2 / §11 / D46 / D50 / D64 |
+| D75 | **Hand pid for process liveness.** The `hands` table gains a `pid INTEGER NULL` column (migration 0005, additive NULL default — migration-safe). `register_hand` records the dispatcher's spawned child pid; clean release sets it back to NULL. The foreman cleanup pass uses `kill(pid, 0)` liveness as a second signal alongside the existing 30-minute `last_seen` heartbeat TTL before abandoning a hand and requeueing its tickets — a dead pid is authoritative for "the agent process is gone" even before the heartbeat TTL elapses, and a live pid suppresses premature abandonment when heartbeats are stale. The `Substrate` trait gains `register_hand_with_pid`; the existing `register_hand` is retained for human/external hands. | §8.6 / foreman |
+| D76 | **Structured hand telemetry events.** The free-text `Note` bodies that crew dispatchers (`derrick-hand` HostCliHandDispatcher, `derrick-claude`, `derrick-copilot` local, `derrick-substrate-native` HumanHandDispatcher) currently emit to report hand progress are replaced by three typed `EventKind` variants: `HandStarted { hand, pid, ticket }`, `HandProgress { hand, snippet }`, `HandExited { hand, code, stats }`. `HandProgress` is throttled to at most one event per hand per 2 seconds and only on meaningful-change (latest stdout line differs from the last emitted snippet), bounding event-log growth; the snippet is capped at ~80 display columns. The TUI's `build_hand_rows` (`derrick-tui/src/data.rs`) is the first consumer and no longer string-matches `"exited successfully"` / `"hand stats:"` bodies. `Note` events remain for genuinely free-form operator messages. Append-only; no supersession of D66's hand-kind work. | §8.6 / §5.5 / `derrick-tui` / foreman |
+| D77 | **`PipelineStepStarted` event: bridge live run telemetry into the persisted plane.** D60/D61 gave the launching terminal live step progress via the in-process `ProgressReporter` trait (`step_started`/`step_output`/`step_finished`), but that plane is not persisted and `derrick observe` only sees step *completion* (`PipelineStepCompleted`). The flow runner now emits a `PipelineStepStarted { step_id, index, total }` event scoped to `EventScope::Worktree { run_id }` at the same call sites that later emit `PipelineStepCompleted` (`runner.rs` serial + parallel-group branches), giving the dashboard mid-step liveness without polling the launching process. Live per-line agent output is not duplicated into the event log (volume); the TUI continues to tail `.derrick/runs/<id>/step-<id>.log` for that (D78). The `ProgressReporter` trait is unchanged; this is a substrate-side mirror of its `step_started` callback. | §5.3 / §5.7 / D60 / D61 |
+| D78 | **Factory view — 8th tab in `derrick observe`.** A new `Factory` tab (hotkey `8`) in the ratatui dashboard renders an ASCII factory floor driven by the D75/D76/D77 telemetry. Workstations = active worktree rows; each worker avatar is a unicode glyph chosen by `HandKind` (claude/copilot/codex/opencode/aider/human). Worker animation states are driven by recent events on `EventScope::Hand`: `HandStarted` → worker arrives; throttled `HandProgress` → worker "hammering" (braille frame cycle); `TicketTransitionedToInReview` → box placed on conveyor; `HandExited` → worker leaves; `TicketVerifiedMerged` → box ships to dock. The conveyor is rendered from the `links` dependency graph (`Blocks` edges); the shipping dock counts merged PRs; the smokestack puffs when `ForemanStatus.mode` is Attached/Detached and idles when Stopped. A sub-second animation tick (~100 ms `tokio::time::interval`) is layered on the existing 1 Hz data refresh — animation state (per-worker frame counter) is local to the TUI; substrate polling stays at 1 Hz / on `notify` fs event, and ratatui's diff rendering keeps the 10× redraw cheap. For per-line agent output the tab tails `.derrick/runs/<id>/step-<id>.log` (already written per D60/D61) rather than expanding the event log. Read-only: the tab never mutates state, consistent with §5.7. | §5.7 / D75 / D76 / D77 |
 
 ### Remaining open questions
 

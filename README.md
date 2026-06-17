@@ -307,7 +307,7 @@ You can override any role binding in `roles`, and pin a role's model to a concre
 
 ## Status
 
-**Active development.** Architecture and 73 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 78 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 

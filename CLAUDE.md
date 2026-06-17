@@ -34,7 +34,7 @@ asks you to make. See AGENTS.md "Orchestration model".
   rules).
 - **Stay in scope**: a bug fix touches the crate that owns the bug.
   Cross-crate refactors go through `rust-architect` first.
-- **Don't relitigate D1–D71.** They're decided. File a
+- **Don't relitigate D1–D78.** They're decided. File a
   `design-question` issue if you genuinely think one is wrong.
 
 The rest is in AGENTS.md. Don't duplicate it here.
