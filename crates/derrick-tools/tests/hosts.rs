@@ -87,6 +87,7 @@ fn request(cwd: &Path) -> HostRequest {
         model: None,
         headless: false,
         output_sink: None,
+        pid_sink: None,
     }
 }
 

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use derrick_stack::{OpenPrParams, StackBackend};
 use derrick_substrate::{
-    Complexity, EventKind, EventScope, Hand, HandId, HandKind, InReviewMetadata,
+    Complexity, EventKind, EventScope, Hand, HandExitStats, HandId, HandKind, InReviewMetadata,
     ManualDoneAttestation, Substrate, SubstrateError, Ticket, TicketId, TicketState,
 };
 use derrick_substrate_native::NativeSubstrate;
@@ -489,7 +489,12 @@ struct PollTask {
     allow_all_tools: bool,
     poll_interval: Duration,
     poll_timeout: Duration,
+    /// Retained for a future `HandExitStats` extension that carries the
+    /// roughneck savings estimate; not read today (D76 replaced the
+    /// free-text "hand stats" Note that used them).
+    #[allow(dead_code)]
     roughneck_enabled: bool,
+    #[allow(dead_code)]
     roughneck_level: String,
     stack_backend: Option<Arc<dyn StackBackend>>,
     stack_draft: bool,
@@ -518,11 +523,27 @@ impl PollTask {
             Ok(child) => child,
             Err(error) => {
                 error!(?error, "failed to spawn `copilot`");
+                let _ = self.record_hand_exited(-1, None).await;
                 self.release(format!("failed to spawn copilot: {error}"))
                     .await;
                 return;
             }
         };
+
+        // D75/D76: record the child pid for foreman liveness and emit
+        // HandStarted so the factory view sees the worker arrive.
+        let child_pid = child.id();
+        let _ = self.substrate.set_hand_pid(&self.hand_id, child_pid).await;
+        let _ = self
+            .substrate
+            .record_typed_event(
+                EventScope::Hand(self.hand_id.clone()),
+                EventKind::HandStarted {
+                    pid: child_pid,
+                    ticket: self.ticket_id.clone(),
+                },
+            )
+            .await;
 
         let stdout_handle = child.stdout.take().map(|mut stdout| {
             tokio::spawn(async move {
@@ -574,7 +595,11 @@ impl PollTask {
                                 Some(handle) => handle.await.unwrap_or_default(),
                                 None => Vec::new(),
                             };
-                            self.record_hand_stats(&stdout_bytes).await;
+                            // D76: HandExited replaces the free-text "hand
+                            // stats" Note. Copilot CLI does not emit structured
+                            // token usage, so stats stay None.
+                            let _ = stdout_bytes;
+                            let _ = self.record_hand_exited(0, None).await;
                             self.check_terminal_state().await;
                             self.open_stacked_pr().await;
                             // The branch is pushed (and a PR may be open), so the
@@ -583,20 +608,22 @@ impl PollTask {
                             return;
                         }
                         Ok(status) => {
+                            let code = status.code().unwrap_or(-1);
                             warn!(
                                 ticket = %self.ticket_id,
-                                code = ?status.code(),
+                                code,
                                 "copilot exited non-zero"
                             );
+                            let _ = self.record_hand_exited(code, None).await;
                             self.release(format!(
-                                "copilot exited non-zero: {:?}",
-                                status.code()
+                                "copilot exited non-zero: {code}"
                             ))
                             .await;
                             return;
                         }
                         Err(error) => {
                             error!(?error, "failed to wait on copilot");
+                            let _ = self.record_hand_exited(-1, None).await;
                             self.release(format!("failed to wait on copilot: {error}"))
                                 .await;
                             return;
@@ -610,41 +637,20 @@ impl PollTask {
         }
     }
 
-    async fn record_hand_stats(&self, stdout_bytes: &[u8]) {
-        let bytes_raw = stdout_bytes.len() as u32;
-        let scrubber = derrick_scrub::Scrubber::with_defaults();
-        let (_scrubbed, scrub_stats) = scrubber.scrub("copilot", stdout_bytes);
-        let bytes_saved = scrub_stats
-            .bytes_in
-            .saturating_sub(scrub_stats.bytes_out)
-            .min(u64::from(u32::MAX)) as u32;
-
-        // Copilot CLI does not currently emit structured token usage in
-        // stdout, so input/output token counts are recorded as zero. The
-        // scrub byte-savings + roughneck estimate remain meaningful.
-        let tokens_in: u32 = 0;
-        let tokens_out: u32 = 0;
-        let roughneck_saved = if self.roughneck_enabled {
-            let text = std::str::from_utf8(stdout_bytes).unwrap_or("");
-            derrick_roughneck::estimate_savings(text, &self.roughneck_level).tokens_saved
-        } else {
-            0
-        };
-        let _ = tokens_out; // copilot stdout has no token count; suppress unused warning
-
-        let body = format!(
-            "hand stats: tokens_in={tokens_in} tokens_out={tokens_out} \
-             roughneck_saved={roughneck_saved} bytes_raw={bytes_raw} bytes_saved={bytes_saved}"
-        );
+    /// Records a `HandExited` event (D76), replacing the former free-text
+    /// "hand stats" Note. Copilot CLI does not emit structured token usage,
+    /// so `stats` is `None` on the success path too. Best-effort: a recording
+    /// failure is logged and swallowed.
+    async fn record_hand_exited(&self, code: i32, stats: Option<HandExitStats>) {
         if let Err(error) = self
             .substrate
             .record_typed_event(
-                EventScope::Ticket(self.ticket_id.clone()),
-                EventKind::Note { body },
+                EventScope::Hand(self.hand_id.clone()),
+                EventKind::HandExited { code, stats },
             )
             .await
         {
-            warn!(?error, ticket = %self.ticket_id, "failed to record hand stats note");
+            warn!(?error, ticket = %self.ticket_id, "failed to record HandExited event");
         }
     }
 

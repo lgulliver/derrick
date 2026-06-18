@@ -84,6 +84,7 @@ impl HostDelegatedModel {
             model: Some(self.name.clone()),
             headless: true,
             output_sink: None,
+            pid_sink: None,
         }
     }
 }

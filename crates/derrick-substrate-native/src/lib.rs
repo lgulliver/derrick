@@ -333,6 +333,31 @@ impl NativeSubstrate {
         .await
     }
 
+    /// Updates the `pid` column for a registered hand (D75). Crew dispatchers
+    /// call this from the [`derrick_tools::PidSink`] the moment `run_host`
+    /// spawns the agent child, so the foreman cleanup pass can check
+    /// `kill(pid, 0)` liveness alongside the heartbeat TTL. `None` clears the
+    /// pid (e.g. on clean release). No event is emitted — the dispatcher emits
+    /// `HandStarted`/`HandExited` separately; this is purely the liveness
+    /// record. No-op (returns `Ok`) if the hand id is not registered.
+    pub async fn set_hand_pid(
+        &self,
+        id: &HandId,
+        pid: Option<u32>,
+    ) -> Result<(), SubstrateError> {
+        let id = id.clone();
+        self.run_write(move |connection| {
+            connection
+                .execute(
+                    "UPDATE hands SET pid = ?1 WHERE id = ?2",
+                    params![pid.map(i64::from), id.as_str()],
+                )
+                .map_err(sql_error)?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Delete a worktree row outright. Used by the foreman cleanup pass after
     /// it has pruned the on-disk directory.
     pub(crate) async fn delete_worktree_row(&self, run_id: &str) -> Result<(), SubstrateError> {
@@ -366,31 +391,6 @@ impl NativeSubstrate {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(sql_error)?;
             Ok(rows)
-        })
-        .await
-    }
-
-    /// Hand ids whose `last_seen` predates `threshold` (or who have never
-    /// reported a heartbeat).
-    pub(crate) async fn list_stale_hands(
-        &self,
-        threshold: DateTime<Utc>,
-    ) -> Result<Vec<HandId>, SubstrateError> {
-        let threshold_text = format_time(threshold);
-        self.run_read(move |connection| {
-            let mut statement = connection
-                .prepare(
-                    "SELECT id FROM hands
-                     WHERE last_seen IS NULL OR last_seen < ?1
-                     ORDER BY id",
-                )
-                .map_err(sql_error)?;
-            let rows = statement
-                .query_map(params![threshold_text], |row| row.get::<_, String>(0))
-                .map_err(sql_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(sql_error)?;
-            rows.into_iter().map(HandId::new).collect()
         })
         .await
     }

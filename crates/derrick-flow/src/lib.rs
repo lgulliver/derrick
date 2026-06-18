@@ -158,6 +158,7 @@ Description of task three.
                 elapsed: Duration::from_millis(1),
                 tokens_in: 0,
                 tokens_out: 0,
+                pid: None,
             })
         }
     }
@@ -189,6 +190,7 @@ Description of task three.
                 elapsed: Duration::from_millis(1),
                 tokens_in: 0,
                 tokens_out: 0,
+                pid: None,
             })
         }
     }
@@ -1517,6 +1519,7 @@ fi
                     elapsed: Duration::from_millis(1),
                     tokens_in: 0,
                     tokens_out: 0,
+                    pid: None,
                 })
             }
         }
@@ -1644,6 +1647,7 @@ fi
                     elapsed: Duration::from_millis(1),
                     tokens_in: 0,
                     tokens_out: 0,
+                    pid: None,
                 })
             }
         }

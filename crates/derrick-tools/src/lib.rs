@@ -76,6 +76,35 @@ impl std::fmt::Debug for OutputSink {
     }
 }
 
+/// The boxed callback behind a [`PidSink`].
+type PidSinkFn = Arc<dyn Fn(u32) + Send + Sync>;
+
+/// A callback invoked once with the spawned host process's OS pid, the moment
+/// `run_host` spawns the child (D75/D76). This lets the caller record the pid
+/// for foreman liveness checks and emit a `HandStarted` event while the agent
+/// is actually running — not after it exits. The pid is also returned in
+/// [`HostResponse::pid`] for callers that only need it post-hoc.
+#[derive(Clone)]
+pub struct PidSink(PidSinkFn);
+
+impl PidSink {
+    /// Wraps a pid callback.
+    pub fn new(sink: impl Fn(u32) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(sink))
+    }
+
+    /// Delivers the spawned child pid to the callback.
+    pub(crate) fn emit(&self, pid: u32) {
+        (self.0)(pid);
+    }
+}
+
+impl std::fmt::Debug for PidSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PidSink(..)")
+    }
+}
+
 /// Input for a host CLI invocation.
 ///
 /// `Debug` is hand-implemented (not derived) because [`env`](Self::env) carries
@@ -119,6 +148,11 @@ pub struct HostRequest {
     /// the full output in [`HostResponse`]. `None` (the default) preserves the
     /// previous capture-only behaviour.
     pub output_sink: Option<OutputSink>,
+    /// Optional one-shot sink notified with the spawned child's OS pid at
+    /// spawn time (D75/D76). Lets the caller record the pid for foreman
+    /// liveness and emit `HandStarted` while the agent runs. `None` (the
+    /// default) preserves the previous behaviour.
+    pub pid_sink: Option<PidSink>,
 }
 
 impl HostRequest {
@@ -133,6 +167,7 @@ impl HostRequest {
             model: None,
             headless: false,
             output_sink: None,
+            pid_sink: None,
         }
     }
 }
@@ -150,6 +185,7 @@ impl std::fmt::Debug for HostRequest {
             .field("model", &self.model)
             .field("headless", &self.headless)
             .field("output_sink", &self.output_sink)
+            .field("pid_sink", &self.pid_sink)
             .finish()
     }
 }
@@ -180,6 +216,11 @@ pub struct HostResponse {
     pub tokens_in: u32,
     /// Output tokens produced by the host (0 when not reported).
     pub tokens_out: u32,
+    /// OS pid of the spawned host process (D75). `None` when the platform
+    /// did not report a pid or when no child was spawned. The pid is also
+    /// delivered live via [`HostRequest::pid_sink`] at spawn time; this field
+    /// lets post-hoc callers (telemetry, `HandExited`) reference it.
+    pub pid: Option<u32>,
 }
 
 /// Errors returned by host CLI adapters.

@@ -596,11 +596,14 @@ pub enum EventKind {
     },
     /// A crew hand spawned its agent process for a ticket (D76). Scoped to
     /// `EventScope::Hand(hand)`; the payload carries the pid (for D75
-    /// liveness) and the ticket the hand is working. Replaces the role of a
-    /// free-text `Note` at spawn time.
+    /// liveness) and the ticket the hand is working. `pid` is `None` for
+    /// hands that queue work without spawning a tracked process (e.g. the
+    /// claude queue dispatcher). Replaces the role of a free-text `Note` at
+    /// spawn time.
     HandStarted {
-        /// OS pid of the spawned agent process (feeds D75 liveness).
-        pid: u32,
+        /// OS pid of the spawned agent process (feeds D75 liveness). `None`
+        /// when the hand does not spawn a tracked child.
+        pid: Option<u32>,
         /// Ticket the hand is starting work on.
         ticket: TicketId,
     },

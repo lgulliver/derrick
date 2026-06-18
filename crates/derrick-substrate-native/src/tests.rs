@@ -1266,7 +1266,7 @@ async fn typed_event_round_trips_new_structured_kinds() -> Result<(), SubstrateE
         .record_typed_event(
             EventScope::Hand(hand.clone()),
             EventKind::HandStarted {
-                pid: 1337,
+                pid: Some(1337),
                 ticket: ticket.clone(),
             },
         )
@@ -1323,7 +1323,7 @@ async fn typed_event_round_trips_new_structured_kinds() -> Result<(), SubstrateE
     assert!(events.iter().any(|e| matches!(
         &e.kind,
         EventKind::HandStarted { pid, ticket: t }
-            if *pid == 1337 && t.as_str() == "tst-1"
+            if *pid == Some(1337) && t.as_str() == "tst-1"
     )));
     Ok(())
 }

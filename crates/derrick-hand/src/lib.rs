@@ -16,21 +16,24 @@
 //! leaves the merge-observed transition to the foreman's verifier (D31/D32).
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use derrick_memory::LessonIndex;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use derrick_substrate::{
-    Complexity, EventKind, EventScope, Hand, HandId, HandKind, Substrate, SubstrateError, Ticket,
+    Complexity, EventKind, EventScope, Hand, HandExitStats, HandId, HandKind, Substrate,
+    SubstrateError, Ticket,
 };
 use derrick_substrate_native::NativeSubstrate;
 use derrick_substrate_native::foreman::{
     DispatchContext, DispatchError, DispatchResult, HandDispatcher, prune_ticket_worktree_dir,
 };
-use derrick_tools::{HostRegistry, HostRequest, ModelChoice, Tier, select_model};
+use derrick_tools::{
+    HostError, HostRegistry, HostRequest, ModelChoice, OutputSink, PidSink, Tier, select_model,
+};
 use tokio::process::Command;
 use tracing::{info, instrument, warn};
 
@@ -38,6 +41,62 @@ use tracing::{info, instrument, warn};
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// Default wall-clock ceiling for a single host CLI invocation.
 const DEFAULT_POLL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// Throttle window for `HandProgress` events (D76): at most one progress
+/// event per hand per 2 seconds, and only when the latest output line differs
+/// from the last emitted snippet.
+const HAND_PROGRESS_WINDOW: Duration = Duration::from_secs(2);
+/// Maximum display width of a `HandProgress` snippet (D76). Longer lines are
+/// truncated with an ellipsis.
+const HAND_PROGRESS_SNIPPET_MAX: usize = 80;
+
+/// Throttles `HandProgress` emission to at most one event per
+/// [`HAND_PROGRESS_WINDOW`] and only on meaningful-change (D76). Pure logic —
+/// unit-tested independently of the substrate.
+struct ProgressThrottler {
+    last_emit: Option<Instant>,
+    last_snippet: String,
+    window: Duration,
+}
+
+impl ProgressThrottler {
+    fn new(window: Duration) -> Self {
+        Self {
+            last_emit: None,
+            last_snippet: String::new(),
+            window,
+        }
+    }
+
+    /// Returns `Some(snippet)` when both (a) `>= window` has elapsed since the
+    /// last emit and (b) `snippet` differs from the last emitted value. Returns
+    /// `None` otherwise (suppress).
+    fn consider(&mut self, now: Instant, snippet: &str) -> Option<String> {
+        let changed = snippet != self.last_snippet;
+        let elapsed = self
+            .last_emit
+            .is_none_or(|t| now.duration_since(t) >= self.window);
+        if changed && elapsed {
+            self.last_emit = Some(now);
+            self.last_snippet = snippet.to_owned();
+            Some(snippet.to_owned())
+        } else {
+            None
+        }
+    }
+}
+
+/// Truncates `line` to [`HAND_PROGRESS_SNIPPET_MAX`] display columns, appending
+/// an ellipsis when truncated. Used for `HandProgress` snippets (D76).
+fn truncate_snippet(line: &str) -> String {
+    if line.chars().count() <= HAND_PROGRESS_SNIPPET_MAX {
+        line.to_owned()
+    } else {
+        let truncated: String = line.chars().take(HAND_PROGRESS_SNIPPET_MAX.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    }
+}
+
 
 /// Runtime configuration for [`HostCliHandDispatcher`].
 #[derive(Clone, Debug)]
@@ -359,7 +418,7 @@ impl HandDispatcher for HostCliHandDispatcher {
         //    assignment releases the hand back to Ready and removes the
         //    worktree before propagating.
         let outcome = self
-            .dispatch_assigned(ctx, &branch, &worktree_path, host)
+            .dispatch_assigned(ctx, &hand_id, &branch, &worktree_path, host)
             .await;
         if let Err(error) = outcome {
             let reason = format!("{} dispatch failed: {error}", self.host_name);
@@ -401,6 +460,7 @@ impl HostCliHandDispatcher {
     async fn dispatch_assigned(
         &self,
         ctx: &DispatchContext<'_>,
+        hand_id: &HandId,
         branch: &str,
         worktree_path: &std::path::Path,
         host: &dyn derrick_tools::HostAdapter,
@@ -437,43 +497,84 @@ impl HostCliHandDispatcher {
             return Ok(());
         }
 
+        // Wire the D75/D76 telemetry sinks before invoking the host. The
+        // pid_sink fires the moment `run_host` spawns the child: it records
+        // the pid for foreman liveness and emits `HandStarted`. The
+        // output_sink throttles agent output lines into `HandProgress`
+        // events (at most one per HAND_PROGRESS_WINDOW and only on change).
+        let substrate_for_pid = Arc::clone(&self.substrate);
+        let hand_id_for_pid = hand_id.clone();
+        let ticket_id = ticket.id.clone();
+        request.pid_sink = Some(PidSink::new(move |pid| {
+            let substrate = Arc::clone(&substrate_for_pid);
+            let hand_id = hand_id_for_pid.clone();
+            let ticket_id = ticket_id.clone();
+            tokio::spawn(async move {
+                let _ = substrate.set_hand_pid(&hand_id, Some(pid)).await;
+                let _ = substrate
+                    .record_typed_event(
+                        EventScope::Hand(hand_id),
+                        EventKind::HandStarted {
+                            pid: Some(pid),
+                            ticket: ticket_id,
+                        },
+                    )
+                    .await;
+            });
+        }));
+        let substrate_for_progress = Arc::clone(&self.substrate);
+        let hand_id_for_progress = hand_id.clone();
+        let throttler = Arc::new(Mutex::new(ProgressThrottler::new(HAND_PROGRESS_WINDOW)));
+        request.output_sink = Some(OutputSink::new(move |_source, line| {
+            let snippet = truncate_snippet(line.trim());
+            let emit = throttler
+                .lock()
+                .map(|mut t| t.consider(Instant::now(), &snippet))
+                .ok()
+                .flatten();
+            if let Some(snippet) = emit {
+                let substrate = Arc::clone(&substrate_for_progress);
+                let hand_id = hand_id_for_progress.clone();
+                tokio::spawn(async move {
+                    let _ = substrate
+                        .record_typed_event(
+                            EventScope::Hand(hand_id),
+                            EventKind::HandProgress { snippet },
+                        )
+                        .await;
+                });
+            }
+        }));
+
         // Invoke the host CLI. A spawn error / timeout / nonzero exit surfaces
         // as `Err`, which the caller turns into a release + cleanup + Err so
         // the foreman does not record the ticket as dispatched.
-        let response = host
-            .run(request)
-            .await
-            .map_err(|error| DispatchError::Io(std::io::Error::other(error.to_string())))?;
+        let response = host.run(request).await;
 
-        let bytes_raw = (response.stdout.len().saturating_add(response.stderr.len())) as u32;
-        let scrubber = derrick_scrub::Scrubber::with_defaults();
-        let (_out, out_stats) = scrubber.scrub(self.host_name, response.stdout.as_bytes());
-        let (_err, err_stats) = scrubber.scrub(self.host_name, response.stderr.as_bytes());
-        let bytes_saved = out_stats
-            .bytes_in
-            .saturating_sub(out_stats.bytes_out)
-            .saturating_add(err_stats.bytes_in.saturating_sub(err_stats.bytes_out))
-            .min(u64::from(u32::MAX)) as u32;
-        let roughneck_saved = if self.config.roughneck_enabled {
-            derrick_roughneck::estimate_savings(&response.stdout, &self.config.roughneck_level)
-                .tokens_saved
-        } else {
-            0
-        };
-        self.record_note(
-            ctx,
-            format!(
-                "{} hand stats: tokens_in={} tokens_out={} roughneck_saved={} \
-                 bytes_raw={} bytes_saved={}",
-                self.host_name,
-                response.tokens_in,
-                response.tokens_out,
-                roughneck_saved,
-                bytes_raw,
-                bytes_saved
-            ),
-        )
-        .await?;
+        // Emit HandExited (D76) on both success and failure paths. This
+        // replaces the free-text "hand stats" Note — token stats now ride in
+        // HandExitStats. The pid is intentionally left on the hand row: after
+        // dispatch the ticket is InReview or released (never InFlight), so the
+        // cleanup pass's dead-pid check finds no InFlight ticket to requeue.
+        match response {
+            Ok(response) => {
+                let stats = HandExitStats {
+                    tokens_in: Some(u64::from(response.tokens_in)),
+                    tokens_out: Some(u64::from(response.tokens_out)),
+                };
+                self.record_hand_exited(hand_id, response.exit_code, Some(stats))
+                    .await;
+            }
+            Err(error) => {
+                let code = match &error {
+                    HostError::NonZeroExit { exit_code, .. } => *exit_code,
+                    _ => -1,
+                };
+                self.record_hand_exited(hand_id, code, None).await;
+                return Err(DispatchError::Io(std::io::Error::other(error.to_string())));
+            }
+        }
+
         // If the hand drove the ticket to a terminal hand state (it ran
         // `derrick ticket review`, so the branch is pushed and the checkout is
         // dead weight), remove the worktree now. Otherwise keep it: an operator
@@ -483,6 +584,26 @@ impl HostCliHandDispatcher {
                 .await;
         }
         Ok(())
+    }
+
+    /// Records a `HandExited` event (D76). Best-effort: a recording failure is
+    /// logged and swallowed so it never masks the dispatch outcome.
+    async fn record_hand_exited(
+        &self,
+        hand_id: &HandId,
+        code: i32,
+        stats: Option<HandExitStats>,
+    ) {
+        if let Err(error) = self
+            .substrate
+            .record_typed_event(
+                EventScope::Hand(hand_id.clone()),
+                EventKind::HandExited { code, stats },
+            )
+            .await
+        {
+            warn!(?error, hand = %hand_id, "failed to record HandExited event");
+        }
     }
 
     async fn record_note(
@@ -548,6 +669,111 @@ mod tests {
     use derrick_tools::{HostAdapter, HostError, HostResponse};
     use std::sync::Mutex;
     use tempfile::TempDir;
+
+    // ---- ProgressThrottler / snippet tests (D76) ----
+
+    #[test]
+    fn progress_throttler_emits_first_changed_line() {
+        let mut t = ProgressThrottler::new(Duration::from_secs(2));
+        let now = Instant::now();
+        assert_eq!(
+            t.consider(now, "editing src/lib.rs"),
+            Some("editing src/lib.rs".to_owned())
+        );
+        // Same line again → suppressed (no change).
+        assert_eq!(t.consider(now, "editing src/lib.rs"), None);
+    }
+
+    #[test]
+    fn progress_throttler_suppresses_within_window() {
+        let mut t = ProgressThrottler::new(Duration::from_secs(2));
+        let base = Instant::now();
+        assert_eq!(t.consider(base, "line A"), Some("line A".to_owned()));
+        // Different line, but within the window → suppressed.
+        assert_eq!(
+            t.consider(base + Duration::from_millis(500), "line B"),
+            None
+        );
+        // After the window, the changed line emits.
+        assert_eq!(
+            t.consider(base + Duration::from_secs(3), "line B"),
+            Some("line B".to_owned())
+        );
+    }
+
+    #[test]
+    fn progress_throttler_requires_change_even_after_window() {
+        let mut t = ProgressThrottler::new(Duration::from_secs(1));
+        let base = Instant::now();
+        assert_eq!(t.consider(base, "same"), Some("same".to_owned()));
+        // After the window but the line is unchanged → suppressed.
+        assert_eq!(t.consider(base + Duration::from_secs(2), "same"), None);
+    }
+
+    #[test]
+    fn truncate_snippet_caps_long_lines_with_ellipsis() {
+        let long = "x".repeat(120);
+        let truncated = truncate_snippet(&long);
+        assert!(truncated.chars().count() <= HAND_PROGRESS_SNIPPET_MAX);
+        assert!(truncated.ends_with('…'));
+        assert_eq!(truncate_snippet("short"), "short");
+        assert_eq!(truncate_snippet(""), "");
+    }
+
+    // ---- HandExited emission (D76) ----
+
+    #[tokio::test]
+    async fn dispatch_emits_hand_exited_event() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let repo = tempdir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        init_repo(&repo);
+        let worktree_root = tempdir.path().join("host-worktrees");
+
+        let state_td = TempDir::new_in(tempdir.path()).expect("state td");
+        let substrate = open_substrate(&state_td).await;
+        let ticket = make_ticket(&substrate, "drk-300").await;
+
+        let captured = Arc::new(Mutex::new(None));
+        let mut registry = HostRegistry::empty();
+        registry.register(
+            "codex",
+            Box::new(StubHost {
+                name: "codex",
+                captured: Arc::clone(&captured),
+            }),
+        );
+
+        let dispatcher = HostCliHandDispatcher::new(
+            Arc::clone(&substrate),
+            Arc::new(registry),
+            "codex",
+            HandKind::Codex,
+            ModelChoice::Pinned("gpt-5.5".to_owned()),
+            test_config(repo.clone(), worktree_root.clone()),
+        );
+
+        let result = dispatcher
+            .dispatch(&ctx(&ticket, tempdir.path()))
+            .await
+            .expect("dispatch");
+
+        // HandExited must be recorded for the hand (D76). The StubHost does
+        // not invoke pid_sink/output_sink, so HandStarted/HandProgress won't
+        // fire here — only HandExited (emitted in dispatch_assigned after run).
+        let events = substrate.tail_typed_events(None, 50).await.expect("tail");
+        assert!(
+            events.iter().any(|e| matches!(
+                (&e.scope, &e.kind),
+                (EventScope::Hand(h), EventKind::HandExited { code, stats })
+                    if h == &result.hand && *code == 0
+                        && stats.as_ref().and_then(|s| s.tokens_in) == Some(0u64)
+            )),
+            "expected HandExited for hand {}, got: {:?}",
+            result.hand,
+            events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+    }
 
     fn site_fixture() -> derrick_config::Site {
         derrick_config::Config::defaults().site().clone()
@@ -726,6 +952,7 @@ mod tests {
                 elapsed: Duration::from_millis(1),
                 tokens_in: 0,
                 tokens_out: 0,
+                pid: None,
             })
         }
     }
@@ -1023,6 +1250,7 @@ mod tests {
                 elapsed: Duration::from_millis(1),
                 tokens_in: 0,
                 tokens_out: 0,
+                pid: None,
             })
         }
     }

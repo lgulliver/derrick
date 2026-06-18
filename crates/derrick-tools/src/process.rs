@@ -50,6 +50,15 @@ pub(crate) async fn run_host(
         }
     })?;
 
+    // Report the child pid to the live sink (D75/D76) so callers can record
+    // it for foreman liveness and emit `HandStarted` while the agent runs.
+    // `child.id()` is `Some` on unix/macOS once spawned; `None` on platforms
+    // without a pid concept.
+    let pid = child.id();
+    if let (Some(pid_value), Some(sink)) = (pid, request.pid_sink.as_ref()) {
+        sink.emit(pid_value);
+    }
+
     // Drain both pipes concurrently while the child runs. Reading on separate
     // tasks prevents the classic pipe-buffer-full deadlock and lets us forward
     // each line to the sink as it arrives (Layer 2), while still accumulating
@@ -92,6 +101,7 @@ pub(crate) async fn run_host(
             elapsed,
             tokens_in: 0,
             tokens_out: 0,
+            pid,
         })
     } else {
         Err(HostError::NonZeroExit {

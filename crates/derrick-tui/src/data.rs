@@ -587,9 +587,9 @@ fn build_hand_rows(events: &[TypedEvent]) -> Vec<HandRow> {
                 hand_id: Some(h.to_string()),
                 action: "started",
                 ticket_id: Some(ticket.to_string()),
-                detail: Some(format!("pid {pid}")),
+                detail: pid.map(|p| format!("pid {p}")),
                 status_hint: None,
-                pid_hint: Some(*pid),
+                pid_hint: *pid,
             },
             (EventScope::Hand(h), EventKind::HandProgress { snippet }) => HandEventUpdate {
                 hand_id: Some(h.to_string()),
@@ -1318,7 +1318,7 @@ mod tests {
                 id: EventId(2),
                 scope: EventScope::Hand(hand.clone()),
                 kind: EventKind::HandStarted {
-                    pid: 7,
+                    pid: Some(7),
                     ticket: ticket.clone(),
                 },
                 at: now - chrono::Duration::seconds(60),
