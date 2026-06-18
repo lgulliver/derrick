@@ -329,7 +329,11 @@ What's landed and tested:
 - ✅ Constitution seeding in `derrick init` wizard
 - ✅ `derrick init` initial commit fix — creates HEAD before first `derrick drill`
 - ✅ Pipeline step order fix — `tasks` before `analyze`
-- ✅ `derrick observe` — live ratatui dashboard
+- ✅ `derrick observe` — live ratatui dashboard (8 tabs: overview, tickets, stack, activity, tokens, memory, hands, factory)
+- ✅ Factory view — animated ASCII factory floor of workers with unicode avatars per `HandKind`, smokestack/conveyor/dock, ~100 ms animation tick (D78)
+- ✅ Structured hand telemetry — `HandStarted`/`HandProgress`/`HandExited` events replace free-text dispatcher `Note`s; throttled progress (D76)
+- ✅ Hand pid liveness — foreman cleanup uses `kill(pid,0)` alongside heartbeat TTL; dead pid abandons immediately, live pid suppresses stale-heartbeat abandonment (D75)
+- ✅ `PipelineStepStarted` event — bridges live run telemetry into the persisted event log so `derrick observe` sees mid-step liveness (D77)
 - ✅ Tiered memory with tag index and lesson retrieval
 - ✅ `derrick survey` — native code-graph index (SQLite + FTS5) over Rust/TS/JS/Python/Go/C#/Java/Kotlin; MCP server (`survey serve --mcp`) so agents query symbols/callers/impact instead of fanning out across reads; debounced watcher keeps it fresh
 - ✅ `derrick init` — brownfield-safe, VS Code + JetBrains opt-in, Codex instructions
@@ -342,7 +346,7 @@ What's landed and tested:
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 - 🔜 Homebrew tap (v1.1)
 
-885 tests passing across 20 crates.
+903 tests passing across 20 crates.
 
 ## Coverage
 
