@@ -159,6 +159,7 @@ impl HandDispatcher for CopilotHandDispatcher {
             id: hand_id.clone(),
             kind: HandKind::Copilot,
             last_seen: Some(Utc::now()),
+            pid: None,
         };
         self.substrate.register_hand(hand).await?;
 

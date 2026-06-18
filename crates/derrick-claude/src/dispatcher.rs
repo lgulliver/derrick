@@ -189,6 +189,7 @@ impl HandDispatcher for ClaudeHandDispatcher {
             id: hand_id.clone(),
             kind: HandKind::Claude,
             last_seen: Some(Utc::now()),
+            pid: None,
         };
         self.substrate.register_hand(hand).await?;
 

@@ -16,12 +16,13 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use tokio::task;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const READER_POOL_SIZE: usize = 4;
 const MIGRATION_0001: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_state_machine_integrity.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_hand_kinds.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_ticket_complexity.sql");
+const MIGRATION_0005: &str = include_str!("../migrations/0005_hand_pid.sql");
 
 /// Configuration for opening the native substrate.
 #[derive(Clone, Debug)]
@@ -1648,12 +1649,14 @@ impl Substrate for NativeSubstrate {
         self.run_write(move |connection| {
             connection
                 .execute(
-                    "INSERT INTO hands (id, kind, last_seen) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, last_seen = excluded.last_seen",
+                    "INSERT INTO hands (id, kind, last_seen, pid) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(id) DO UPDATE SET kind = excluded.kind,
+                       last_seen = excluded.last_seen, pid = excluded.pid",
                     params![
                         hand.id.as_str(),
                         hand.kind.to_string(),
-                        hand.last_seen.map(format_time)
+                        hand.last_seen.map(format_time),
+                        hand.pid.map(i64::from)
                     ],
                 )
                 .map_err(sql_error)?;
@@ -1667,10 +1670,19 @@ impl Substrate for NativeSubstrate {
         .await
     }
 
+    async fn register_hand_with_pid(
+        &self,
+        mut hand: Hand,
+        pid: u32,
+    ) -> Result<(), SubstrateError> {
+        hand.pid = Some(pid);
+        self.register_hand(hand).await
+    }
+
     async fn list_hands(&self) -> Result<Vec<Hand>, SubstrateError> {
         self.run_read(move |connection| {
             let mut statement = connection
-                .prepare("SELECT id, kind, last_seen FROM hands ORDER BY id")
+                .prepare("SELECT id, kind, last_seen, pid FROM hands ORDER BY id")
                 .map_err(sql_error)?;
             let hands = statement
                 .query_map([], hand_from_row)
@@ -2104,6 +2116,12 @@ fn migrate(connection: &mut Connection) -> Result<(), SubstrateError> {
     if version < 4 {
         run_migration_0004(connection)?;
     }
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    if version < 5 {
+        run_migration_0005(connection)?;
+    }
     Ok(())
 }
 
@@ -2113,6 +2131,17 @@ fn run_migration_0004(connection: &mut Connection) -> Result<(), SubstrateError>
     let transaction = connection.transaction().map_err(sql_error)?;
     transaction
         .execute_batch(MIGRATION_0004)
+        .map_err(sql_error)?;
+    transaction.commit().map_err(sql_error)?;
+    Ok(())
+}
+
+fn run_migration_0005(connection: &mut Connection) -> Result<(), SubstrateError> {
+    // A plain additive column: no table rebuild, so no foreign_keys toggle and
+    // no foreign_key_check (nothing references `hands.pid`).
+    let transaction = connection.transaction().map_err(sql_error)?;
+    transaction
+        .execute_batch(MIGRATION_0005)
         .map_err(sql_error)?;
     transaction.commit().map_err(sql_error)?;
     Ok(())
@@ -2638,10 +2667,13 @@ fn hand_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hand> {
     let id: String = row.get(0)?;
     let kind: String = row.get(1)?;
     let last_seen: Option<String> = row.get(2)?;
+    let pid: Option<i64> = row.get(3)?;
+    let pid = pid.and_then(|p| u32::try_from(p).ok());
     Ok(Hand {
         id: parse_in_row(id, HandId::new)?,
         kind: parse_in_row(kind, |value| HandKind::from_str(&value))?,
         last_seen: parse_optional_time_in_row(last_seen)?,
+        pid,
     })
 }
 

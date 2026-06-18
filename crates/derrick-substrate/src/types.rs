@@ -440,6 +440,17 @@ impl FromStr for HandKind {
     }
 }
 
+/// Token statistics a crew hand reports when it exits (D76). Carried by
+/// [`EventKind::HandExited`]. Fields are optional so dispatchers that cannot
+/// measure a dimension still emit the event.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct HandExitStats {
+    /// Input tokens consumed by the hand's agent process, when measured.
+    pub tokens_in: Option<u64>,
+    /// Output tokens produced by the hand's agent process, when measured.
+    pub tokens_out: Option<u64>,
+}
+
 /// Kind of event in the activity log. Carries the full payload so the
 /// current ticket state is a projection of the event log (D31).
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -571,6 +582,46 @@ pub enum EventKind {
         /// Terminal status: "success", "skipped", "halted", or "failed".
         status: String,
     },
+    /// A pipeline step started (D77). Bridges the live `ProgressReporter`
+    /// plane (D60/D61) into the persisted event log so `derrick observe` sees
+    /// mid-step liveness without polling the launching process. Scoped to
+    /// `EventScope::Worktree { run_id }`, mirroring `PipelineStepCompleted`.
+    PipelineStepStarted {
+        /// Step identifier (e.g. "specify", "plan", "assay").
+        step_id: String,
+        /// Zero-based index of the step within the pipeline.
+        index: u32,
+        /// Total number of steps in the pipeline.
+        total: u32,
+    },
+    /// A crew hand spawned its agent process for a ticket (D76). Scoped to
+    /// `EventScope::Hand(hand)`; the payload carries the pid (for D75
+    /// liveness) and the ticket the hand is working. Replaces the role of a
+    /// free-text `Note` at spawn time.
+    HandStarted {
+        /// OS pid of the spawned agent process (feeds D75 liveness).
+        pid: u32,
+        /// Ticket the hand is starting work on.
+        ticket: TicketId,
+    },
+    /// Throttled mid-run progress from a crew hand (D76). Scoped to
+    /// `EventScope::Hand(hand)`. Dispatchers emit at most one per hand per 2
+    /// seconds and only on meaningful-change; the snippet is capped at ~80
+    /// display columns. Replaces the free-text `Note` heartbeat bodies.
+    HandProgress {
+        /// Latest stdout/stderr line (truncated, single-line).
+        snippet: String,
+    },
+    /// A crew hand's agent process exited (D76). Scoped to
+    /// `EventScope::Hand(hand)`. Carries the exit code and optional token
+    /// stats. Replaces the free-text `"exited successfully"` / `"hand stats:"`
+    /// `Note` bodies.
+    HandExited {
+        /// Process exit code (`0` for success).
+        code: i32,
+        /// Optional token statistics for the run.
+        stats: Option<HandExitStats>,
+    },
 }
 
 /// Snake-case discriminator strings for `EventKind` variants. Used for the
@@ -601,6 +652,10 @@ impl EventKind {
             Self::RestackConflict { .. } => "restack_conflict",
             Self::Note { .. } => "note",
             Self::PipelineStepCompleted { .. } => "pipeline_step_completed",
+            Self::PipelineStepStarted { .. } => "pipeline_step_started",
+            Self::HandStarted { .. } => "hand_started",
+            Self::HandProgress { .. } => "hand_progress",
+            Self::HandExited { .. } => "hand_exited",
         }
     }
 }
@@ -713,6 +768,11 @@ pub struct Hand {
     pub kind: HandKind,
     /// Last heartbeat timestamp.
     pub last_seen: Option<DateTime<Utc>>,
+    /// OS pid of the spawned agent process, when tracked (D75). Crew hands
+    /// spawned by a dispatcher carry the child pid so the foreman cleanup
+    /// pass can check liveness via `kill(pid, 0)` alongside the heartbeat
+    /// TTL. `None` for human hands and externally-spawned hands.
+    pub pid: Option<u32>,
 }
 
 /// Persisted activity event.

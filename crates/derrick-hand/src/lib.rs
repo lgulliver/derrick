@@ -312,6 +312,7 @@ impl HandDispatcher for HostCliHandDispatcher {
                 id: hand_id.clone(),
                 kind: self.hand_kind,
                 last_seen: Some(Utc::now()),
+                pid: None,
             })
             .await?;
 

@@ -758,6 +758,7 @@ state:
             id: hand.clone(),
             kind: HandKind::Human,
             last_seen: None,
+            pid: None,
         })
         .await
         .expect("register hand");

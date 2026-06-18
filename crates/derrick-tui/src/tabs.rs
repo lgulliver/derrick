@@ -731,6 +731,7 @@ fn render_hands(frame: &mut Frame, area: Rect, app: &App) {
             Row::new(vec![
                 Cell::from(Line::from(hand_status_span(&h.status))),
                 Cell::from(h.hand_id.clone()),
+                Cell::from(h.pid.map(|p| p.to_string()).unwrap_or_default()),
                 Cell::from(h.ticket_id.clone().unwrap_or_default()),
                 Cell::from(h.action.clone()),
                 Cell::from(age),
@@ -754,6 +755,7 @@ fn render_hands(frame: &mut Frame, area: Rect, app: &App) {
         [
             Constraint::Length(2),
             Constraint::Length(20),
+            Constraint::Length(8),
             Constraint::Length(12),
             Constraint::Length(16),
             Constraint::Length(8),
@@ -761,7 +763,7 @@ fn render_hands(frame: &mut Frame, area: Rect, app: &App) {
         ],
     )
     .header(
-        Row::new(vec!["", "hand", "ticket", "action", "age", "detail"])
+        Row::new(vec!["", "hand", "pid", "ticket", "action", "age", "detail"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().title(title).borders(Borders::ALL));
@@ -1045,6 +1047,7 @@ mod tests {
             last_seen: Utc::now(),
             status: status.to_owned(),
             detail: detail.map(str::to_owned),
+            pid: None,
         }
     }
 

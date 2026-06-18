@@ -267,6 +267,7 @@ impl HandDispatcher for LocalCopilotHandDispatcher {
             id: hand_id.clone(),
             kind: HandKind::Copilot,
             last_seen: Some(Utc::now()),
+            pid: None,
         };
         self.substrate.register_hand(hand).await?;
 
@@ -1066,6 +1067,7 @@ mod tests {
             id: HandId::new("blocker-hand").expect("hand id"),
             kind: HandKind::Copilot,
             last_seen: Some(Utc::now()),
+            pid: None,
         };
         substrate
             .register_hand(blocker.clone())

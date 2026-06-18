@@ -518,6 +518,22 @@ pub struct HandRow {
     pub status: String,
     /// One-line summary of notable output (commit hash, PR URL, error, etc.).
     pub detail: Option<String>,
+    /// OS pid of the hand's agent process, when reported via `HandStarted`
+    /// (D75/D76). `None` for human hands or hands that only emitted legacy
+    /// `Note` telemetry.
+    pub pid: Option<u32>,
+}
+
+/// Per-event update extracted by `build_hand_rows` from a `TypedEvent`.
+/// Kept as a small struct (rather than a positional tuple) so the match
+/// arms stay readable and clippy's `type_complexity` lint stays quiet.
+struct HandEventUpdate {
+    hand_id: Option<String>,
+    action: &'static str,
+    ticket_id: Option<String>,
+    detail: Option<String>,
+    status_hint: Option<&'static str>,
+    pid_hint: Option<u32>,
 }
 
 /// Aggregate `TypedEvent`s into one `HandRow` per hand id, sorted newest-first
@@ -536,82 +552,163 @@ fn build_hand_rows(events: &[TypedEvent]) -> Vec<HandRow> {
     for ev in events {
         // Determine the hand id this event belongs to, plus the action/detail
         // we should record.
-        let (hand_id, action, ticket_id, detail, status_hint): (
-            Option<String>,
-            &'static str,
-            Option<String>,
-            Option<String>,
-            Option<&'static str>,
-        ) = match (&ev.scope, &ev.kind) {
+        let update = match (&ev.scope, &ev.kind) {
             // Hand-scoped events
-            (EventScope::Hand(h), EventKind::HandRegistered) => {
-                (Some(h.to_string()), "registered", None, None, None)
+            (EventScope::Hand(h), EventKind::HandRegistered) => HandEventUpdate {
+                hand_id: Some(h.to_string()),
+                action: "registered",
+                ticket_id: None,
+                detail: None,
+                status_hint: None,
+                pid_hint: None,
+            },
+            (EventScope::Hand(h), EventKind::HandHeartbeat) => HandEventUpdate {
+                hand_id: Some(h.to_string()),
+                action: "heartbeat",
+                ticket_id: None,
+                detail: None,
+                status_hint: None,
+                pid_hint: None,
+            },
+            (EventScope::Hand(h), EventKind::HandAbandoned { previous_owner_of }) => {
+                HandEventUpdate {
+                    hand_id: Some(h.to_string()),
+                    action: "abandoned",
+                    ticket_id: Some(previous_owner_of.to_string()),
+                    detail: None,
+                    status_hint: Some("failed"),
+                    pid_hint: None,
+                }
             }
-            (EventScope::Hand(h), EventKind::HandHeartbeat) => {
-                (Some(h.to_string()), "heartbeat", None, None, None)
+            // Structured hand telemetry (D76). These take precedence over the
+            // legacy free-text `Note` arms below; dispatchers migrate to them
+            // in Phase 2.
+            (EventScope::Hand(h), EventKind::HandStarted { pid, ticket }) => HandEventUpdate {
+                hand_id: Some(h.to_string()),
+                action: "started",
+                ticket_id: Some(ticket.to_string()),
+                detail: Some(format!("pid {pid}")),
+                status_hint: None,
+                pid_hint: Some(*pid),
+            },
+            (EventScope::Hand(h), EventKind::HandProgress { snippet }) => HandEventUpdate {
+                hand_id: Some(h.to_string()),
+                action: "working",
+                ticket_id: None,
+                detail: Some(snippet.clone()),
+                status_hint: None,
+                pid_hint: None,
+            },
+            (EventScope::Hand(h), EventKind::HandExited { code, stats }) => {
+                let detail = match stats {
+                    Some(s) => format!(
+                        "exit {code} (in {} out {})",
+                        s.tokens_in.map_or("-".to_owned(), |n| n.to_string()),
+                        s.tokens_out.map_or("-".to_owned(), |n| n.to_string())
+                    ),
+                    None => format!("exit {code}"),
+                };
+                let status = if *code == 0 { "done" } else { "failed" };
+                HandEventUpdate {
+                    hand_id: Some(h.to_string()),
+                    action: if *code == 0 { "completed" } else { "failed" },
+                    ticket_id: None,
+                    detail: Some(detail),
+                    status_hint: Some(status),
+                    pid_hint: None,
+                }
             }
-            (EventScope::Hand(h), EventKind::HandAbandoned { previous_owner_of }) => (
-                Some(h.to_string()),
-                "abandoned",
-                Some(previous_owner_of.to_string()),
-                None,
-                Some("failed"),
-            ),
             // Ticket-scoped events that name a hand
-            (EventScope::Ticket(tid), EventKind::TicketAssigned { hand }) => (
-                Some(hand.to_string()),
-                "dispatched",
-                Some(tid.to_string()),
-                None,
-                None,
-            ),
+            (EventScope::Ticket(tid), EventKind::TicketAssigned { hand }) => HandEventUpdate {
+                hand_id: Some(hand.to_string()),
+                action: "dispatched",
+                ticket_id: Some(tid.to_string()),
+                detail: None,
+                status_hint: None,
+                pid_hint: None,
+            },
             (EventScope::Ticket(tid), EventKind::TicketUnassigned { reason }) => {
                 // We don't know which hand released the ticket here, so this
                 // event cannot update a HandRow.  We still record nothing.
                 let _ = (tid, reason);
-                (None, "", None, None, None)
-            }
-            // Hand-scoped notes ("claude hand: ...", "exited successfully",
-            // "exited non-zero", "hand stats: ...", etc.)
-            (EventScope::Hand(h), EventKind::Note { body }) => {
-                if let Some(rest) = body.strip_prefix("hand stats:") {
-                    (
-                        Some(h.to_string()),
-                        "stats recorded",
-                        None,
-                        Some(rest.trim().to_owned()),
-                        None,
-                    )
-                } else if body.contains("exited successfully") {
-                    (
-                        Some(h.to_string()),
-                        "completed",
-                        None,
-                        Some(body.clone()),
-                        Some("done"),
-                    )
-                } else if body.contains("exited non-zero") || body.contains("failed") {
-                    (
-                        Some(h.to_string()),
-                        "failed",
-                        None,
-                        Some(body.clone()),
-                        Some("failed"),
-                    )
-                } else if let Some(rest) = body.strip_prefix("claude hand:") {
-                    (
-                        Some(h.to_string()),
-                        "queue written",
-                        None,
-                        Some(rest.trim().to_owned()),
-                        None,
-                    )
-                } else {
-                    (Some(h.to_string()), "note", None, Some(body.clone()), None)
+                HandEventUpdate {
+                    hand_id: None,
+                    action: "",
+                    ticket_id: None,
+                    detail: None,
+                    status_hint: None,
+                    pid_hint: None,
                 }
             }
-            _ => (None, "", None, None, None),
+            // Hand-scoped notes — legacy dispatcher telemetry (D76 migrates
+            // these to HandStarted/HandProgress/HandExited). Retained as a
+            // fallback so hands still render while dispatchers transition.
+            (EventScope::Hand(h), EventKind::Note { body }) => {
+                if let Some(rest) = body.strip_prefix("hand stats:") {
+                    HandEventUpdate {
+                        hand_id: Some(h.to_string()),
+                        action: "stats recorded",
+                        ticket_id: None,
+                        detail: Some(rest.trim().to_owned()),
+                        status_hint: None,
+                        pid_hint: None,
+                    }
+                } else if body.contains("exited successfully") {
+                    HandEventUpdate {
+                        hand_id: Some(h.to_string()),
+                        action: "completed",
+                        ticket_id: None,
+                        detail: Some(body.clone()),
+                        status_hint: Some("done"),
+                        pid_hint: None,
+                    }
+                } else if body.contains("exited non-zero") || body.contains("failed") {
+                    HandEventUpdate {
+                        hand_id: Some(h.to_string()),
+                        action: "failed",
+                        ticket_id: None,
+                        detail: Some(body.clone()),
+                        status_hint: Some("failed"),
+                        pid_hint: None,
+                    }
+                } else if let Some(rest) = body.strip_prefix("claude hand:") {
+                    HandEventUpdate {
+                        hand_id: Some(h.to_string()),
+                        action: "queue written",
+                        ticket_id: None,
+                        detail: Some(rest.trim().to_owned()),
+                        status_hint: None,
+                        pid_hint: None,
+                    }
+                } else {
+                    HandEventUpdate {
+                        hand_id: Some(h.to_string()),
+                        action: "note",
+                        ticket_id: None,
+                        detail: Some(body.clone()),
+                        status_hint: None,
+                        pid_hint: None,
+                    }
+                }
+            }
+            _ => HandEventUpdate {
+                hand_id: None,
+                action: "",
+                ticket_id: None,
+                detail: None,
+                status_hint: None,
+                pid_hint: None,
+            },
         };
+
+        let HandEventUpdate {
+            hand_id,
+            action,
+            ticket_id,
+            detail,
+            status_hint,
+            pid_hint,
+        } = update;
 
         let Some(hand_id) = hand_id else { continue };
         if action.is_empty() {
@@ -635,6 +732,7 @@ fn build_hand_rows(events: &[TypedEvent]) -> Vec<HandRow> {
             last_seen: ev.at,
             status: "running".to_owned(),
             detail: None,
+            pid: None,
         });
         // Newest-first: only fill empty fields.
         if row.ticket_id.is_none() {
@@ -642,6 +740,9 @@ fn build_hand_rows(events: &[TypedEvent]) -> Vec<HandRow> {
         }
         if row.detail.is_none() {
             row.detail = detail;
+        }
+        if row.pid.is_none() {
+            row.pid = pid_hint;
         }
         // last_seen is the most recent event timestamp; first-seen wins
         // because events are newest-first.
@@ -1177,6 +1278,85 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].status, "failed");
         assert_eq!(rows[0].action, "abandoned");
+    }
+
+    #[test]
+    fn build_hand_rows_consumes_structured_hand_events() {
+        use derrick_substrate::{EventId, HandExitStats, HandId, TicketId};
+
+        let Ok(hand) = HandId::new("sumac") else {
+            return;
+        };
+        let Ok(ticket) = TicketId::new("tst-12") else {
+            return;
+        };
+        let now = chrono::Utc::now();
+
+        // Newest-first: exit (success), progress, started.
+        let events = vec![
+            TypedEvent {
+                id: EventId(4),
+                scope: EventScope::Hand(hand.clone()),
+                kind: EventKind::HandExited {
+                    code: 0,
+                    stats: Some(HandExitStats {
+                        tokens_in: Some(100),
+                        tokens_out: Some(40),
+                    }),
+                },
+                at: now,
+            },
+            TypedEvent {
+                id: EventId(3),
+                scope: EventScope::Hand(hand.clone()),
+                kind: EventKind::HandProgress {
+                    snippet: "running tests".to_owned(),
+                },
+                at: now - chrono::Duration::seconds(30),
+            },
+            TypedEvent {
+                id: EventId(2),
+                scope: EventScope::Hand(hand.clone()),
+                kind: EventKind::HandStarted {
+                    pid: 7,
+                    ticket: ticket.clone(),
+                },
+                at: now - chrono::Duration::seconds(60),
+            },
+        ];
+
+        let rows = build_hand_rows(&events);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.hand_id, "sumac");
+        assert_eq!(row.pid, Some(7), "HandStarted pid captured into row");
+        assert_eq!(row.ticket_id.as_deref(), Some("tst-12"));
+        // Newest-first fill: exit detail wins over progress snippet.
+        assert!(row.detail.as_deref().unwrap().contains("exit 0"));
+        assert_eq!(row.status, "done", "HandExited code==0 -> done");
+        assert_eq!(row.action, "completed");
+    }
+
+    #[test]
+    fn build_hand_rows_marks_hand_exited_nonzero_failed() {
+        use derrick_substrate::{EventId, HandId};
+
+        let Ok(hand) = HandId::new("willow") else {
+            return;
+        };
+        let events = vec![TypedEvent {
+            id: EventId(1),
+            scope: EventScope::Hand(hand),
+            kind: EventKind::HandExited {
+                code: 2,
+                stats: None,
+            },
+            at: chrono::Utc::now(),
+        }];
+        let rows = build_hand_rows(&events);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].action, "failed");
     }
 
     // -----------------------------------------------------------------------

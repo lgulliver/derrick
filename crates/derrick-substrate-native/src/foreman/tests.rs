@@ -1043,6 +1043,7 @@ async fn register_hand_simple(substrate: &NativeSubstrate, id: &str) -> HandId {
             id: hand_id.clone(),
             kind: HandKind::Human,
             last_seen: Some(Utc::now()),
+            pid: None,
         })
         .await
         .expect("register hand");
