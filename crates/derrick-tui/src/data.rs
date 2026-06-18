@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Timelike, Utc};
 use derrick_substrate::{
-    EventKind, EventScope, ForemanMode, ForemanStatus, Substrate, SubstrateError, Ticket,
+    EventKind, EventScope, ForemanMode, ForemanStatus, Hand, Substrate, SubstrateError, Ticket,
     TicketFilter, TicketState, TypedEvent,
 };
 use serde::Deserialize;
@@ -73,8 +73,8 @@ pub struct LastAssaySnapshot {
     pub at: DateTime<Utc>,
 }
 
-/// One of the seven tabs in the dashboard. The discriminant ordering matches
-/// the numeric `1`-`7` hotkeys.
+/// One of the eight tabs in the dashboard. The discriminant ordering matches
+/// the numeric `1`-`8` hotkeys.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Tab {
     /// Overview: standup view of the active batch.
@@ -92,6 +92,8 @@ pub enum Tab {
     Memory,
     /// Hands: per-hand activity rollup.
     Hands,
+    /// Factory: animated ASCII factory floor of workers (D78).
+    Factory,
 }
 
 impl Tab {
@@ -105,10 +107,11 @@ impl Tab {
             Self::Tokens => "Tokens",
             Self::Memory => "Memory",
             Self::Hands => "Hands",
+            Self::Factory => "Factory",
         }
     }
 
-    /// Zero-based index in the tabs bar (0..=6).
+    /// Zero-based index in the tabs bar (0..=7).
     pub fn index(self) -> usize {
         match self {
             Self::Overview => 0,
@@ -118,6 +121,7 @@ impl Tab {
             Self::Tokens => 4,
             Self::Memory => 5,
             Self::Hands => 6,
+            Self::Factory => 7,
         }
     }
 
@@ -131,12 +135,13 @@ impl Tab {
             4 => Some(Self::Tokens),
             5 => Some(Self::Memory),
             6 => Some(Self::Hands),
+            7 => Some(Self::Factory),
             _ => None,
         }
     }
 
     /// All tabs in display order.
-    pub fn all() -> [Self; 7] {
+    pub fn all() -> [Self; 8] {
         [
             Self::Overview,
             Self::Tickets,
@@ -145,6 +150,7 @@ impl Tab {
             Self::Tokens,
             Self::Memory,
             Self::Hands,
+            Self::Factory,
         ]
     }
 }
@@ -166,6 +172,7 @@ impl FromStr for Tab {
             "tokens" => Ok(Self::Tokens),
             "memory" => Ok(Self::Memory),
             "hands" => Ok(Self::Hands),
+            "factory" => Ok(Self::Factory),
             other => Err(ParseTabError(other.to_owned())),
         }
     }
@@ -934,6 +941,10 @@ pub struct DataModel {
     pub memory_entries: Vec<MemoryEntry>,
     /// Per-hand activity rollup for the Hands tab.
     pub hand_rows: Vec<HandRow>,
+    /// Registered hands with kind + pid, for the Factory tab's worker avatars
+    /// (D78). Polled via `list_hands` at the same 1 Hz cadence as the rest of
+    /// the model.
+    pub hands: Vec<Hand>,
     /// Timestamp of the most recent refresh.
     pub last_refresh: Option<DateTime<Utc>>,
     /// Site name pulled from the substrate.
@@ -968,6 +979,7 @@ impl DataModel {
         let tickets = substrate.list_tickets(TicketFilter::default()).await?;
         let foreman = substrate.foreman_status().await?;
         let events = substrate.tail_typed_events(None, 100).await?;
+        let hands = substrate.list_hands().await?;
 
         // Derive stack summary from the already-fetched stack nodes (no
         // extra I/O needed).
@@ -1045,6 +1057,7 @@ impl DataModel {
             token_summary,
             memory_entries: memory_entries.to_vec(),
             hand_rows,
+            hands,
             last_refresh: Some(Utc::now()),
             site_name: site.name().to_owned(),
         })
@@ -1142,6 +1155,8 @@ mod tests {
         assert_eq!("Activity".parse::<Tab>().ok(), Some(Tab::Activity));
         assert_eq!("tokens".parse::<Tab>().ok(), Some(Tab::Tokens));
         assert_eq!("memory".parse::<Tab>().ok(), Some(Tab::Memory));
+        assert_eq!("hands".parse::<Tab>().ok(), Some(Tab::Hands));
+        assert_eq!("factory".parse::<Tab>().ok(), Some(Tab::Factory));
     }
 
     #[test]
@@ -1155,7 +1170,7 @@ mod tests {
         for tab in Tab::all() {
             assert_eq!(Tab::from_index(tab.index()), Some(tab));
         }
-        assert_eq!(Tab::from_index(7), None);
+        assert_eq!(Tab::from_index(8), None);
     }
 
     #[test]
@@ -1167,18 +1182,20 @@ mod tests {
         assert_eq!(Tab::Tokens.title(), "Tokens");
         assert_eq!(Tab::Memory.title(), "Memory");
         assert_eq!(Tab::Hands.title(), "Hands");
+        assert_eq!(Tab::Factory.title(), "Factory");
     }
 
     #[test]
-    fn tab_all_has_seven_entries() {
-        assert_eq!(Tab::all().len(), 7);
+    fn tab_all_has_eight_entries() {
+        assert_eq!(Tab::all().len(), 8);
     }
 
     #[test]
     fn tab_hands_has_correct_index() {
         assert_eq!(Tab::Hands.index(), 6);
         assert_eq!(Tab::from_index(6), Some(Tab::Hands));
-        assert_eq!(Tab::from_index(7), None);
+        assert_eq!(Tab::from_index(7), Some(Tab::Factory));
+        assert_eq!(Tab::from_index(8), None);
     }
 
     #[test]
