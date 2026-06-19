@@ -13,6 +13,7 @@ use ratatui::widgets::{BarChart, Block, Borders, Cell, List, ListItem, Paragraph
 
 use crate::app::{App, TicketSort};
 use crate::data::{ActivityFilter, HandRow, StackLoadResult, Tab, TicketRow};
+use derrick_substrate::{ForemanMode, HandKind};
 
 /// Format a duration in seconds as a compact human-readable string
 /// (`"14m"`, `"2h03m"`, `"5s"`).
@@ -48,7 +49,7 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
 /// Footer key-hint line shown below all tabs.
 pub fn render_footer(frame: &mut Frame, area: Rect) {
-    let hints = "q quit  r refresh  ↑↓ scroll  ⏎ detail  / filter  ? help  Esc back  1-7 tabs";
+    let hints = "q quit  r refresh  ↑↓ scroll  ⏎ detail  / filter  ? help  Esc back  1-8 tabs";
     let p = Paragraph::new(hints).block(Block::default().borders(Borders::TOP));
     frame.render_widget(p, area);
 }
@@ -77,6 +78,7 @@ pub fn render_active_tab(frame: &mut Frame, area: Rect, app: &App) {
         Tab::Tokens => render_tokens(frame, area, app),
         Tab::Memory => render_memory(frame, area, app),
         Tab::Hands => render_hands(frame, area, app),
+        Tab::Factory => render_factory(frame, area, app),
     }
 
     if app.show_help {
@@ -731,6 +733,7 @@ fn render_hands(frame: &mut Frame, area: Rect, app: &App) {
             Row::new(vec![
                 Cell::from(Line::from(hand_status_span(&h.status))),
                 Cell::from(h.hand_id.clone()),
+                Cell::from(h.pid.map(|p| p.to_string()).unwrap_or_default()),
                 Cell::from(h.ticket_id.clone().unwrap_or_default()),
                 Cell::from(h.action.clone()),
                 Cell::from(age),
@@ -754,6 +757,7 @@ fn render_hands(frame: &mut Frame, area: Rect, app: &App) {
         [
             Constraint::Length(2),
             Constraint::Length(20),
+            Constraint::Length(8),
             Constraint::Length(12),
             Constraint::Length(16),
             Constraint::Length(8),
@@ -761,7 +765,7 @@ fn render_hands(frame: &mut Frame, area: Rect, app: &App) {
         ],
     )
     .header(
-        Row::new(vec!["", "hand", "ticket", "action", "age", "detail"])
+        Row::new(vec!["", "hand", "pid", "ticket", "action", "age", "detail"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().title(title).borders(Borders::ALL));
@@ -783,11 +787,177 @@ fn render_hands(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Unicode avatar glyph for each hand kind (D78). Emoji give the workers a
+/// little personality; the braille spinner set below carries the animation.
+fn hand_kind_avatar(kind: HandKind) -> &'static str {
+    match kind {
+        HandKind::Claude => "🤖",
+        HandKind::Copilot => "🐙",
+        HandKind::Codex => "🧑‍💻",
+        HandKind::Opencode => "🦀",
+        HandKind::Aider => "🦜",
+        HandKind::Human => "🧑",
+        _ => "·",
+    }
+}
+
+/// Braille spinner frames used for the "hammering" worker animation (D78).
+/// Reuses the set from `derrick-cli`'s `CliReporter` conceptually; kept inline
+/// here so `derrick-tui` stays independent of `derrick-cli`.
+const FACTORY_SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Factory tab (D78): an ASCII factory floor of animated workers. Each
+/// registered hand is a workstation with a unicode avatar per `HandKind`; the
+/// worker's animation state is derived from the structured hand telemetry
+/// (`HandStarted`/`HandProgress`/`HandExited`, surfaced via `hand_rows`). A
+/// smokestack puffs when the foreman is running; a ready-ticket conveyor and a
+/// shipping dock (done tickets) frame the floor. Read-only — never mutates
+/// state. Animation is driven by `app.animation_frame` (incremented at ~100 ms
+/// by the event loop); substrate data still refreshes at 1 Hz / on `notify`.
+fn render_factory(frame: &mut Frame, area: Rect, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5), // smokestack + status
+            Constraint::Min(5),    // workstations
+            Constraint::Length(3), // conveyor + dock
+        ])
+        .split(area);
+
+    let foreman = app.data.overview.foreman_status.as_ref();
+    let puffing = matches!(
+        foreman.map(|f| f.mode),
+        Some(ForemanMode::Attached) | Some(ForemanMode::Detached)
+    );
+    let mode_label = match foreman.map(|f| f.mode) {
+        Some(ForemanMode::Attached) => "attached",
+        Some(ForemanMode::Detached) => "detached",
+        _ => "stopped",
+    };
+    let done_count = app
+        .data
+        .tickets
+        .iter()
+        .filter(|t| t.state == "done")
+        .count();
+    let ready_count = app
+        .data
+        .tickets
+        .iter()
+        .filter(|t| t.state == "ready")
+        .count();
+    let inflight_count = app
+        .data
+        .tickets
+        .iter()
+        .filter(|t| t.state == "in_flight" || t.state == "in_review")
+        .count();
+    let stack_glyph = if puffing { "🏭💨" } else { "🏭  " };
+    let status_line = format!(
+        "{stack_glyph}  foreman: {mode_label}   workers: {}   in-flight: {inflight_count}   ready: {ready_count}   shipped: {done_count}",
+        app.data.hands.len(),
+    );
+    frame.render_widget(
+        Paragraph::new(status_line).block(
+            Block::default()
+                .title("Factory floor")
+                .borders(Borders::ALL),
+        ),
+        chunks[0],
+    );
+
+    // Workstations: one row per registered hand. The spinner frame is indexed
+    // by app.animation_frame so the "running" workers animate at ~100 ms.
+    let frame_idx = (app.animation_frame as usize) % FACTORY_SPINNER.len();
+    let rows: Vec<Row> = app
+        .data
+        .hands
+        .iter()
+        .map(|hand| {
+            let avatar = hand_kind_avatar(hand.kind);
+            let row = app
+                .data
+                .hand_rows
+                .iter()
+                .find(|r| r.hand_id == hand.id.as_str());
+            let (status_glyph, action) = match row {
+                Some(r) => {
+                    let g = match r.status.as_str() {
+                        "done" => "✓",
+                        "failed" => "✗",
+                        "running" => FACTORY_SPINNER[frame_idx],
+                        _ => "·",
+                    };
+                    (g.to_owned(), r.action.clone())
+                }
+                None => ("·".to_owned(), "idle".to_owned()),
+            };
+            let ticket = row
+                .and_then(|r| r.ticket_id.clone())
+                .unwrap_or_else(|| "-".to_owned());
+            let pid = hand
+                .pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".to_owned());
+            Row::new(vec![
+                Cell::from(avatar.to_owned()),
+                Cell::from(hand.id.as_str().to_owned()),
+                Cell::from(status_glyph),
+                Cell::from(action),
+                Cell::from(ticket),
+                Cell::from(pid),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Length(20),
+            Constraint::Length(3),
+            Constraint::Length(12),
+            Constraint::Length(14),
+            Constraint::Length(8),
+        ],
+    )
+    .header(
+        Row::new(vec!["", "hand", "st", "action", "ticket", "pid"])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::default().title("Workstations").borders(Borders::ALL));
+    frame.render_widget(table, chunks[1]);
+
+    // Conveyor: ready tickets flowing toward the dock. A spinner offset by a
+    // few frames from the worker animation gives the belt its own motion.
+    let belt_frame = (app.animation_frame as usize + 3) % FACTORY_SPINNER.len();
+    let ready: Vec<String> = app
+        .data
+        .tickets
+        .iter()
+        .filter(|t| t.state == "ready")
+        .map(|t| t.id.clone())
+        .collect();
+    let belt = if ready.is_empty() {
+        "(queue empty)".to_owned()
+    } else {
+        ready.join(" ▸ ")
+    };
+    let conveyor_line = format!("{} ready conveyor: {}", FACTORY_SPINNER[belt_frame], belt);
+    frame.render_widget(
+        Paragraph::new(conveyor_line).block(
+            Block::default()
+                .title("Conveyor → dock")
+                .borders(Borders::ALL),
+        ),
+        chunks[2],
+    );
+}
+
 fn render_help_overlay(frame: &mut Frame, area: Rect) {
     let body = "Keys:\n\
         q     quit\n\
         r     refresh\n\
-        1-7   switch tab\n\
+        1-8   switch tab\n\
         ↑/↓   navigate rows\n\
         ⏎     toggle detail / open PR (Stack)\n\
         /     filter\n\
@@ -839,6 +1009,7 @@ fn render_all_tabs_no_panic(app: &crate::app::App) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
     use chrono::TimeZone;
 
     use super::*;
@@ -1045,6 +1216,7 @@ mod tests {
             last_seen: Utc::now(),
             status: status.to_owned(),
             detail: detail.map(str::to_owned),
+            pid: None,
         }
     }
 
@@ -2018,5 +2190,113 @@ mod tests {
         let app = crate::app::App::new(crate::data::Tab::Overview, data);
         // Render all tabs at 80x24 — should not panic.
         render_all_tabs_no_panic(&app);
+    }
+
+    // -----------------------------------------------------------------------
+    // Factory tab (D78)
+    // -----------------------------------------------------------------------
+
+    fn factory_hand(
+        id: &str,
+        kind: derrick_substrate::HandKind,
+        pid: Option<u32>,
+    ) -> derrick_substrate::Hand {
+        derrick_substrate::Hand {
+            id: derrick_substrate::HandId::new(id).expect("hand id"),
+            kind,
+            last_seen: None,
+            pid,
+        }
+    }
+
+    #[test]
+    fn factory_tab_renders_workers_smokestack_and_dock() {
+        use derrick_substrate::{ForemanMode, HandKind};
+
+        let mut data = crate::data::DataModel::empty();
+        data.hands = vec![
+            factory_hand("bramble", HandKind::Codex, Some(123)),
+            factory_hand("sumac", HandKind::Copilot, None),
+        ];
+        data.hand_rows = vec![
+            make_hand_row("bramble", Some("tst-1"), "working", "running", None),
+            make_hand_row("sumac", Some("tst-2"), "completed", "done", None),
+        ];
+        data.tickets = vec![
+            row("tst-1", "in_flight", "ingest", None),
+            row("tst-2", "done", "migration", None),
+            row("tst-3", "ready", "wiring", None),
+        ];
+        data.overview.foreman_status = Some(crate::data::ForemanStatusSnapshot {
+            mode: ForemanMode::Attached,
+            pid: Some(1),
+            started_at: None,
+        });
+        let mut app = crate::app::App::new(crate::data::Tab::Factory, data);
+        app.animation_frame = 2;
+        let out = render_tab_to_string(&app, 160, 40);
+        assert!(out.contains("Factory floor"), "title should appear");
+        assert!(out.contains("bramble"), "worker hand id should appear");
+        assert!(out.contains("sumac"), "second worker should appear");
+        assert!(
+            out.contains("tst-3"),
+            "ready ticket should appear on the conveyor"
+        );
+        assert!(
+            out.contains("shipped: 1"),
+            "done ticket count should appear"
+        );
+        assert!(
+            out.contains("💨"),
+            "smokestack should puff when foreman is attached"
+        );
+    }
+
+    #[test]
+    fn factory_tab_idle_when_no_hands_and_foreman_stopped() {
+        use derrick_substrate::ForemanMode;
+
+        let mut data = crate::data::DataModel::empty();
+        data.overview.foreman_status = Some(crate::data::ForemanStatusSnapshot {
+            mode: ForemanMode::Stopped,
+            pid: None,
+            started_at: None,
+        });
+        let app = crate::app::App::new(crate::data::Tab::Factory, data);
+        let out = render_tab_to_string(&app, 120, 24);
+        assert!(
+            out.contains("workers: 0"),
+            "zero-worker count should appear"
+        );
+        assert!(out.contains("stopped"), "foreman mode should appear");
+        assert!(
+            !out.contains("💨"),
+            "smokestack should NOT puff when foreman is stopped"
+        );
+    }
+
+    #[test]
+    fn factory_tab_renders_across_animation_frames_without_panic() {
+        let mut data = crate::data::DataModel::empty();
+        data.hands = vec![factory_hand(
+            "bramble",
+            derrick_substrate::HandKind::Codex,
+            Some(9),
+        )];
+        data.hand_rows = vec![make_hand_row(
+            "bramble",
+            Some("tst-1"),
+            "working",
+            "running",
+            None,
+        )];
+        let mut app = crate::app::App::new(crate::data::Tab::Factory, data);
+        // Cycle the animation frame through several values — each must render
+        // without panic (the spinner index wraps via modulo).
+        for frame in 0..25 {
+            app.animation_frame = frame;
+            let out = render_tab_to_string(&app, 80, 24);
+            assert!(out.contains("bramble"), "worker renders at frame {frame}");
+        }
     }
 }

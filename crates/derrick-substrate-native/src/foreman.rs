@@ -25,6 +25,32 @@ use tracing::{info, warn};
 
 use crate::NativeSubstrate;
 
+/// Returns `true` when a process with `pid` is currently alive (D75). Used by
+/// the cleanup pass to decide whether a stale-heartbeat hand is still actually
+/// running its agent child.
+///
+/// Unix uses `kill(pid, 0)`: it returns `0` if the process exists and is
+/// signalable by us, `-1` otherwise. `ESRCH` (no such process) and `EPERM`
+/// (exists, not ours) both produce `-1`; for our own children `EPERM` is
+/// impossible, and a reused pid owned by another user means our child is gone
+/// — so `== 0` is the only "alive" signal. This avoids needing libc's errno
+/// constants or adding a `libc`/`nix` dependency (house rule #2).
+///
+/// Windows falls back to `false` (process probing is part of the v1.1 Windows
+/// support track) so the heartbeat TTL remains authoritative there.
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    unsafe { kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    false
+}
+
 /// Lightweight cross-reference against git + GitHub PR state.
 ///
 /// Per D33 the verifier trusts git history over PR metadata. The trait
@@ -709,20 +735,40 @@ impl Foreman {
         self.cleanup_adopt_stage_dirs(report, worktree_threshold)
             .await?;
 
-        // 1c: release tickets owned by stale hands.
+        // 1c: release tickets owned by hands whose agent process is gone or
+        //     whose heartbeat is stale (D75/D32). A dead pid is authoritative
+        //     — abandon immediately even if the heartbeat is fresh. A live pid
+        //     suppresses TTL abandonment when the heartbeat is merely stale
+        //     (the agent is still running, just busy). Hands with no pid keep
+        //     the existing heartbeat-TTL behaviour.
         let hand_threshold = now - self.ttls.hand_ttl;
-        let stale_hands = self.substrate.list_stale_hands(hand_threshold).await?;
-        for hand in stale_hands {
-            let inflight = self.substrate.list_inflight_tickets_owned_by(&hand).await?;
+        let all_hands = self.substrate.list_hands().await?;
+        for hand in all_hands {
+            let pid_dead = hand.pid.is_some_and(|pid| !process_alive(pid));
+            let live_pid = hand.pid.is_some_and(process_alive);
+            let stale_heartbeat = hand.last_seen.is_none_or(|t| t < hand_threshold);
+            let abandon = pid_dead || (stale_heartbeat && !live_pid);
+            if !abandon {
+                continue;
+            }
+            let inflight = self
+                .substrate
+                .list_inflight_tickets_owned_by(&hand.id)
+                .await?;
             for ticket_id in inflight {
-                let reason = format!(
-                    "hand abandoned: last seen before {}",
-                    hand_threshold.to_rfc3339()
-                );
+                let reason = match (pid_dead, hand.pid) {
+                    (true, Some(pid)) => {
+                        format!("hand abandoned: child process {pid} is no longer alive")
+                    }
+                    _ => format!(
+                        "hand abandoned: last seen before {}",
+                        hand_threshold.to_rfc3339()
+                    ),
+                };
                 self.substrate.release_from_hand(&ticket_id, reason).await?;
                 self.substrate
                     .record_typed_event(
-                        EventScope::Hand(hand.clone()),
+                        EventScope::Hand(hand.id.clone()),
                         EventKind::HandAbandoned {
                             previous_owner_of: ticket_id.clone(),
                         },
@@ -732,7 +778,7 @@ impl Foreman {
                     .cleanup_actions
                     .push(CleanupAction::RequeuedAbandonedHand {
                         ticket: ticket_id,
-                        hand: hand.clone(),
+                        hand: hand.id.clone(),
                     });
             }
         }

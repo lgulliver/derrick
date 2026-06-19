@@ -11,9 +11,9 @@ use chrono::{DateTime, Utc};
 pub use derrick_config::Site;
 pub use types::{
     Batch, BatchName, BlockReason, Complexity, Event, EventId, EventKind, EventScope, ForemanMode,
-    ForemanStatus, Hand, HandId, HandKind, InReviewMetadata, Link, LinkKind, ManualDoneAttestation,
-    NewEvent, NewTicket, SubstrateError, Ticket, TicketFilter, TicketId, TicketState, TypedEvent,
-    ticket_id_pattern,
+    ForemanStatus, Hand, HandExitStats, HandId, HandKind, InReviewMetadata, Link, LinkKind,
+    ManualDoneAttestation, NewEvent, NewTicket, SubstrateError, Ticket, TicketFilter, TicketId,
+    TicketState, TypedEvent, ticket_id_pattern,
 };
 
 /// Storage contract implemented by derrick substrate backends.
@@ -216,6 +216,19 @@ pub trait Substrate: Send + Sync {
 
     /// Registers a hand that can own or execute tickets.
     async fn register_hand(&self, hand: Hand) -> Result<(), SubstrateError>;
+
+    /// Registers a crew hand with its spawned child pid for process liveness
+    /// (D75). Dispatchers call this when they spawn an agent process so the
+    /// foreman cleanup pass can check `kill(pid, 0)` alongside the heartbeat
+    /// TTL. The default implementation delegates to [`Substrate::register_hand`]
+    /// (pid ignored) so backends without pid tracking and test mocks keep
+    /// working; the native backend overrides it to persist `pid` on the hand
+    /// row. The hand's existing `pid` field, if set, is overwritten with the
+    /// supplied pid.
+    async fn register_hand_with_pid(&self, mut hand: Hand, pid: u32) -> Result<(), SubstrateError> {
+        hand.pid = Some(pid);
+        self.register_hand(hand).await
+    }
 
     /// Lists registered hands.
     async fn list_hands(&self) -> Result<Vec<Hand>, SubstrateError>;

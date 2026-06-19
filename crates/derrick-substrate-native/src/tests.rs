@@ -76,6 +76,7 @@ async fn register_hand_fixture(
             id: h.clone(),
             kind: HandKind::Human,
             last_seen: None,
+            pid: None,
         })
         .await?;
     Ok(h)
@@ -864,6 +865,7 @@ async fn migration_0003_admits_host_cli_hand_kinds() -> Result<(), SubstrateErro
                 id: hand_id(id)?,
                 kind,
                 last_seen: None,
+                pid: None,
             })
             .await?;
     }
@@ -1041,6 +1043,28 @@ fn write_v3_db(db_path: &Path) -> Result<(), SubstrateError> {
     Ok(())
 }
 
+fn write_v4_db(db_path: &Path) -> Result<(), SubstrateError> {
+    let mut connection = open_writer_connection(db_path)?;
+    connection
+        .execute_batch(MIGRATION_0001)
+        .map_err(sql_error)?;
+    let s = site_for_v1();
+    connection
+        .execute(
+            "INSERT INTO site (name, prefix, created_at) VALUES (?1, ?2, ?3)",
+            params![s.name(), s.prefix(), now_text()],
+        )
+        .map_err(sql_error)?;
+    run_migration_0002(&mut connection)?;
+    run_migration_0003(&mut connection)?;
+    run_migration_0004(&mut connection)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, 4, "write_v4_db must leave the DB at user_version = 4");
+    Ok(())
+}
+
 #[tokio::test]
 async fn migration_0004_adds_complexity_column_and_round_trips() -> Result<(), SubstrateError> {
     // A v3 DB (no complexity column) seeded with a ticket must migrate to v4
@@ -1097,7 +1121,7 @@ async fn migration_0004_adds_complexity_column_and_round_trips() -> Result<(), S
     let v: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(sql_error)?;
-    assert_eq!(v, 4);
+    assert_eq!(v, SCHEMA_VERSION);
 
     let mut statement = connection
         .prepare("PRAGMA foreign_key_check;")
@@ -1113,6 +1137,194 @@ async fn migration_0004_adds_complexity_column_and_round_trips() -> Result<(), S
         violations.is_empty(),
         "no FK violations after 0004, got: {violations:?}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn migration_0005_adds_pid_column_and_round_trips() -> Result<(), SubstrateError> {
+    // A v4 DB (no pid column) seeded with a hand must migrate to v5, the
+    // legacy hand survives with pid = NULL, and register_hand_with_pid
+    // persists a pid that round-trips through list_hands.
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let config = native_config_fixture(&tempdir);
+    write_v4_db(&config.db_path)?;
+
+    // Seed a pre-existing hand into the v4 schema (no pid column).
+    {
+        let connection = open_writer_connection(&config.db_path)?;
+        connection
+            .execute(
+                "INSERT INTO hands (id, kind, last_seen)
+                 VALUES ('claude-legacy', 'claude', NULL)",
+                params![],
+            )
+            .map_err(sql_error)?;
+    }
+
+    // open() runs migrate() -> 0005 adds the pid column.
+    let substrate = NativeSubstrate::open(config.clone(), site_for_v1()).await?;
+
+    // The legacy hand survives with pid = None.
+    let hands = substrate.list_hands().await?;
+    let legacy = hands
+        .iter()
+        .find(|h| h.id.as_str() == "claude-legacy")
+        .expect("legacy hand survived 0005");
+    assert_eq!(legacy.pid, None, "legacy hand has no pid");
+
+    // register_hand_with_pid persists a pid that round-trips.
+    let hand = Hand {
+        id: hand_id("crew-1")?,
+        kind: HandKind::Codex,
+        last_seen: Some(Utc::now()),
+        pid: None,
+    };
+    substrate.register_hand_with_pid(hand, 4242).await?;
+    let hands = substrate.list_hands().await?;
+    let crew = hands
+        .iter()
+        .find(|h| h.id.as_str() == "crew-1")
+        .expect("crew hand registered");
+    assert_eq!(crew.pid, Some(4242), "register_hand_with_pid persisted pid");
+
+    let connection = open_writer_connection(&config.db_path)?;
+    let v: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(sql_error)?;
+    assert_eq!(v, 5);
+
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check;")
+        .map_err(sql_error)?;
+    let violations: Vec<(String, i64, String, i64)> = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)?;
+    assert!(
+        violations.is_empty(),
+        "no FK violations after 0005, got: {violations:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn register_hand_persists_pid_field() -> Result<(), SubstrateError> {
+    // A hand constructed with a pid via the plain register_hand path persists
+    // it; a hand with pid = None persists None.
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+    substrate
+        .register_hand(Hand {
+            id: hand_id("h-pid")?,
+            kind: HandKind::Codex,
+            last_seen: None,
+            pid: Some(99),
+        })
+        .await?;
+    substrate
+        .register_hand(Hand {
+            id: hand_id("h-nopid")?,
+            kind: HandKind::Human,
+            last_seen: None,
+            pid: None,
+        })
+        .await?;
+    let hands = substrate.list_hands().await?;
+    let with_pid = hands.iter().find(|h| h.id.as_str() == "h-pid").unwrap();
+    let no_pid = hands.iter().find(|h| h.id.as_str() == "h-nopid").unwrap();
+    assert_eq!(with_pid.pid, Some(99));
+    assert_eq!(no_pid.pid, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_event_round_trips_new_structured_kinds() -> Result<(), SubstrateError> {
+    // D75/D76/D77: the new EventKind variants serialize to the events table
+    // and deserialize back via tail_typed_events with payloads intact.
+    let tempdir = tempfile::tempdir().map_err(io_error)?;
+    let substrate = open_substrate(&tempdir).await?;
+    let hand = hand_id("h1")?;
+    let ticket = ticket_id("tst-1")?;
+
+    // The hand must be registered and the worktree reserved before we can
+    // record Hand-/Worktree-scoped events (the events table FKs reference
+    // hands(id) and worktrees(run_id)).
+    substrate
+        .register_hand(Hand {
+            id: hand.clone(),
+            kind: HandKind::Codex,
+            last_seen: None,
+            pid: None,
+        })
+        .await?;
+    substrate.reserve_worktree("run-1", "derrick/run-1").await?;
+
+    substrate
+        .record_typed_event(
+            EventScope::Hand(hand.clone()),
+            EventKind::HandStarted {
+                pid: Some(1337),
+                ticket: ticket.clone(),
+            },
+        )
+        .await?;
+    substrate
+        .record_typed_event(
+            EventScope::Hand(hand.clone()),
+            EventKind::HandProgress {
+                snippet: "writing src/lib.rs".to_owned(),
+            },
+        )
+        .await?;
+    substrate
+        .record_typed_event(
+            EventScope::Hand(hand.clone()),
+            EventKind::HandExited {
+                code: 0,
+                stats: Some(derrick_substrate::HandExitStats {
+                    tokens_in: Some(1200),
+                    tokens_out: Some(800),
+                }),
+            },
+        )
+        .await?;
+    substrate
+        .record_typed_event(
+            EventScope::Worktree {
+                run_id: "run-1".to_owned(),
+            },
+            EventKind::PipelineStepStarted {
+                step_id: "specify".to_owned(),
+                index: 0,
+                total: 5,
+            },
+        )
+        .await?;
+
+    let events = substrate.tail_typed_events(None, 50).await?;
+    // Newest-first: the four events we just wrote dominate.
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::PipelineStepStarted { step_id, index, total }
+            if step_id == "specify" && *index == 0 && *total == 5
+    )));
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::HandExited { code, stats }
+            if *code == 0 && stats.as_ref().and_then(|s| s.tokens_in) == Some(1200)
+    )));
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::HandProgress { snippet } if snippet == "writing src/lib.rs"
+    )));
+    assert!(events.iter().any(|e| matches!(
+        &e.kind,
+        EventKind::HandStarted { pid, ticket: t }
+            if *pid == Some(1337) && t.as_str() == "tst-1"
+    )));
     Ok(())
 }
 
@@ -1597,6 +1809,7 @@ async fn hands_and_heartbeat_round_trip() -> Result<(), SubstrateError> {
             id: hand_id("claude-1")?,
             kind: HandKind::Claude,
             last_seen: None,
+            pid: None,
         })
         .await?;
     substrate.heartbeat(&hand_id("claude-1")?).await?;

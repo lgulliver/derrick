@@ -189,6 +189,7 @@ impl HandDispatcher for ClaudeHandDispatcher {
             id: hand_id.clone(),
             kind: HandKind::Claude,
             last_seen: Some(Utc::now()),
+            pid: None,
         };
         self.substrate.register_hand(hand).await?;
 
@@ -227,6 +228,21 @@ impl HandDispatcher for ClaudeHandDispatcher {
 
         // 3. Atomic Ready -> InFlight + owner = hand.
         self.substrate.assign_to_hand(&ticket.id, &hand_id).await?;
+
+        // 3b. D76: signal the hand has started on this ticket. Claude is
+        //     queue-based — the `claude --print` process is spawned later by
+        //     the PollTask below, so no pid is known here (pid = None). The
+        //     factory view still sees the worker arrive.
+        let _ = self
+            .substrate
+            .record_typed_event(
+                EventScope::Hand(hand_id.clone()),
+                EventKind::HandStarted {
+                    pid: None,
+                    ticket: ticket.id.clone(),
+                },
+            )
+            .await;
 
         // 4. Surface dispatch in the activity log.
         let queue_path_display = queue_file.display().to_string();

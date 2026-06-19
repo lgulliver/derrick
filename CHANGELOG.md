@@ -6,6 +6,49 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Factory view — 8th tab in `derrick observe` (D78).** An animated ASCII
+  factory floor of workers, driven by the new structured hand telemetry
+  (D75/D76/D77). Each registered hand is a workstation with a unicode avatar
+  per `HandKind` (🤖 claude / 🐙 copilot / 🧑‍💻 codex / 🦀 opencode / 🦜 aider /
+  🧑 human). Running workers animate a braille spinner from `HandProgress`
+  events; `HandExited` resolves them to ✓/✗. A 🏭💨 smokestack puffs when the
+  foreman is attached/detached and idles when stopped; a ready-ticket conveyor
+  feeds the shipping dock (done-ticket count). Hotkey `8` or
+  `derrick observe --tab factory`. Read-only — substrate still polled at 1 Hz /
+  on `notify`; only the animation frame ticks at ~100 ms.
+- **Structured hand telemetry (D76).** Crew dispatchers (`derrick-hand`
+  HostCliHandDispatcher, `derrick-copilot` local, `derrick-claude`) now emit
+  typed `EventKind` variants — `HandStarted { pid, ticket }`, `HandProgress {
+  snippet }`, `HandExited { code, stats }` — replacing the free-text `Note`
+  bodies they previously wrote. `HandProgress` is throttled to at most one
+  event per hand per 2 seconds and only on meaningful-change (snippet capped at
+  ~80 display columns), bounding event-log growth. The TUI's `build_hand_rows`
+  consumes the structured events directly and no longer string-matches
+  `"exited successfully"` / `"hand stats:"` bodies. `Note` events remain for
+  genuinely free-form operator messages.
+- **Hand pid for process liveness (D75).** The `hands` table gains a `pid`
+  column (migration 0005, additive NULL default — migration-safe). Crew
+  dispatchers record the spawned agent child pid via a new `PidSink` on
+  `HostRequest` (fired live at spawn by `derrick-tools::process::run_host`, so
+  the pid is known while the agent runs, not after it exits). The foreman
+  cleanup pass uses `kill(pid, 0)` liveness as a second signal alongside the
+  30-minute heartbeat TTL: a dead pid abandons the hand immediately even with a
+  fresh heartbeat; a live pid suppresses TTL abandonment when the heartbeat is
+  merely stale (busy agent). The `Substrate` trait gains
+  `register_hand_with_pid` (default delegates to `register_hand` so test mocks
+  keep working). Unix only — Windows falls back to heartbeat-TTL (pid probing
+  is part of the v1.1 Windows track).
+- **`PipelineStepStarted` event (D77).** The flow runner emits a
+  `PipelineStepStarted { step_id, index, total }` event scoped to
+  `EventScope::Worktree { run_id }` at step entry, mirroring the existing
+  `PipelineStepCompleted` at step exit. This bridges the live
+  `ProgressReporter` plane (D60/D61, seen only by the launching terminal) into
+  the persisted event log so `derrick observe` sees mid-step liveness without
+  polling the launching process. Live per-line agent output is not duplicated
+  into the event log (volume); the factory view tails per-step `.log` files
+  for that.
+
 ## [0.1.0-alpha.3] — 2026-05-31
 
 ### Added

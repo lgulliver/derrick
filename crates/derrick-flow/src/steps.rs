@@ -613,6 +613,7 @@ async fn execute_foreman(
             id: hand_id.clone(),
             kind: hand_kind,
             last_seen: None,
+            pid: None,
         })
         .await;
 

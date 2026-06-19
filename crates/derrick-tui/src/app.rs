@@ -109,6 +109,11 @@ pub struct App {
     pub pending_open_url: Option<String>,
     /// Memory slug to append to the prune queue on the next event loop iteration.
     pub pending_prune_slug: Option<String>,
+    /// Monotonic animation frame counter incremented by the ~100 ms animation
+    /// tick (D78). Used only by the Factory tab for per-worker motion; the
+    /// substrate is still polled at 1 Hz / on `notify` fs events — this counter
+    /// drives purely local animation state.
+    pub animation_frame: u64,
 }
 
 impl App {
@@ -128,6 +133,7 @@ impl App {
             activity_auto_scroll: true,
             pending_open_url: None,
             pending_prune_slug: None,
+            animation_frame: 0,
         }
     }
 
@@ -202,7 +208,7 @@ impl App {
                 self.ticket_sort = self.ticket_sort.cycle();
                 self.selected_row = 0;
             }
-            KeyCode::Char(c @ '1'..='7') => {
+            KeyCode::Char(c @ '1'..='8') => {
                 let idx = (c as u8 - b'1') as usize;
                 if let Some(tab) = Tab::from_index(idx) {
                     self.active_tab = tab;

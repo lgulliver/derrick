@@ -113,6 +113,12 @@ where
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // D78: ~100 ms animation tick for the Factory tab. Drives only local
+    // animation state (app.animation_frame) — the substrate is still polled at
+    // the 1 Hz `tick` cadence above and on `notify` fs events. ratatui's
+    // diff-based rendering keeps the 10x redraw cheap.
+    let mut anim_tick = tokio::time::interval(Duration::from_millis(100));
+    anim_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut watcher_rx = spawn_watcher(watch_paths);
 
     // Initial draw.
@@ -172,6 +178,12 @@ where
             }
             _ = watcher_rx.recv() => {
                 needs_refresh = true;
+                needs_redraw = true;
+            }
+            _ = anim_tick.tick() => {
+                // D78: animation frame for the Factory tab. Pure local state —
+                // no substrate refresh.
+                app.animation_frame = app.animation_frame.wrapping_add(1);
                 needs_redraw = true;
             }
         }

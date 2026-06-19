@@ -312,6 +312,23 @@ impl Runner {
                     let interactive = is_interactive_step(step);
                     self.reporter
                         .step_started(step.id(), idx + 1, total_steps, interactive);
+                    // D77: mirror the live step_started reporter callback into
+                    // the persisted event log so `derrick observe` sees mid-step
+                    // liveness without polling the launching process. Scoped to
+                    // the run's worktree, mirroring PipelineStepCompleted below.
+                    let _ = self
+                        .substrate
+                        .record_typed_event(
+                            derrick_substrate::EventScope::Worktree {
+                                run_id: run_id.clone(),
+                            },
+                            derrick_substrate::EventKind::PipelineStepStarted {
+                                step_id: step.id().to_owned(),
+                                index: u32::try_from(idx).unwrap_or(u32::MAX),
+                                total: u32::try_from(total_steps).unwrap_or(u32::MAX),
+                            },
+                        )
+                        .await;
                     // Interactive steps own the terminal (stdin prompts), so do
                     // not stream their output over the prompt.
                     let sink = if interactive {
@@ -818,6 +835,22 @@ impl Runner {
                         }
                         // Index/total are not meaningful within a parallel group.
                         self.reporter.step_started(step.id(), 0, 0, false);
+                        // D77: mirror step_started into the persisted event log
+                        // (0/0 index, matching the reporter — the step's
+                        // absolute position is not meaningful inside a group).
+                        let _ = self
+                            .substrate
+                            .record_typed_event(
+                                derrick_substrate::EventScope::Worktree {
+                                    run_id: run_id.clone(),
+                                },
+                                derrick_substrate::EventKind::PipelineStepStarted {
+                                    step_id: step.id().to_owned(),
+                                    index: 0,
+                                    total: 0,
+                                },
+                            )
+                            .await;
                         let sem = semaphore.clone();
                         let runner = self.clone();
                         let step = step.clone();

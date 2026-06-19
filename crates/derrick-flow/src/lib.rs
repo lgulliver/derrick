@@ -158,6 +158,7 @@ Description of task three.
                 elapsed: Duration::from_millis(1),
                 tokens_in: 0,
                 tokens_out: 0,
+                pid: None,
             })
         }
     }
@@ -189,6 +190,7 @@ Description of task three.
                 elapsed: Duration::from_millis(1),
                 tokens_in: 0,
                 tokens_out: 0,
+                pid: None,
             })
         }
     }
@@ -1487,6 +1489,7 @@ fi
 
     #[tokio::test]
     async fn specify_step_prescaffolds_and_writes_feature_json() -> TestResult {
+        use derrick_substrate::{EventKind, EventScope, Substrate};
         // Verify that derrick pre-scaffolds the feature directory and writes
         // feature.json before invoking the host, then the host overwrites the
         // stub spec.md with real content.
@@ -1517,6 +1520,7 @@ fi
                     elapsed: Duration::from_millis(1),
                     tokens_in: 0,
                     tokens_out: 0,
+                    pid: None,
                 })
             }
         }
@@ -1540,17 +1544,24 @@ fi
             "constitution",
         )?;
         let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
-        let substrate = NativeSubstrate::open(
-            NativeConfig {
-                db_path: dir.path().join(".derrick/derrick.db"),
-                worktree_root: dir.path().join(".derrick/worktrees"),
-            },
-            config.site().clone(),
-        )
-        .await?;
+        let substrate: std::sync::Arc<dyn Substrate> = std::sync::Arc::new(
+            NativeSubstrate::open(
+                NativeConfig {
+                    db_path: dir.path().join(".derrick/derrick.db"),
+                    worktree_root: dir.path().join(".derrick/worktrees"),
+                },
+                config.site().clone(),
+            )
+            .await?,
+        );
         let mut hosts = HostRegistry::empty();
         hosts.register("claude", Box::new(MinimalSpecifyHost));
-        let runner = Runner::new(config, Arc::new(substrate), hosts, dir.path().to_path_buf());
+        let runner = Runner::new(
+            config,
+            Arc::clone(&substrate),
+            hosts,
+            dir.path().to_path_buf(),
+        );
         runner
             .run_pipeline(
                 DRILL_PIPELINE,
@@ -1561,6 +1572,20 @@ fi
                 },
             )
             .await?;
+
+        // D77: a PipelineStepStarted event must be persisted for the specify
+        // step, scoped to the run's worktree, so `derrick observe` sees mid-step
+        // liveness without polling the launching process.
+        let events = substrate.tail_typed_events(None, 100).await?;
+        assert!(
+            events.iter().any(|e| matches!(
+                (&e.scope, &e.kind),
+                (EventScope::Worktree { run_id }, EventKind::PipelineStepStarted { step_id, .. })
+                    if run_id == "specify-detect" && step_id == "specify"
+            )),
+            "expected PipelineStepStarted for specify, got: {:?}",
+            events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
 
         let feature_json =
             std::fs::read_to_string(dir.path().join(FEATURE_JSON)).expect("feature.json missing");
@@ -1644,6 +1669,7 @@ fi
                     elapsed: Duration::from_millis(1),
                     tokens_in: 0,
                     tokens_out: 0,
+                    pid: None,
                 })
             }
         }

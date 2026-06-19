@@ -623,6 +623,108 @@ async fn cleanup_requeues_inflight_with_dead_hand() {
 }
 
 #[tokio::test]
+async fn cleanup_abandons_hand_with_dead_pid_immediately() {
+    // D75: a hand whose child pid is dead is abandoned even with a fresh
+    // heartbeat (dead pid is authoritative — no need to wait for the TTL).
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+
+    // Spawn a child that exits immediately and reap it → the pid is dead.
+    let dead_pid = {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn sh");
+        let pid = child.id();
+        child.wait().expect("wait");
+        pid
+    };
+
+    let hand_id = HandId::new("h-dead-pid").expect("hand id");
+    substrate
+        .register_hand(Hand {
+            id: hand_id.clone(),
+            kind: HandKind::Codex,
+            last_seen: Some(Utc::now()),
+            pid: Some(dead_pid),
+        })
+        .await
+        .expect("register hand");
+    let ticket = new_ticket(&substrate, "drk-1").await;
+    ticket_to_in_flight(&substrate, &ticket, &hand_id).await;
+
+    let foreman = build_foreman(
+        substrate.clone(),
+        Box::new(MockRepoState::new()),
+        no_op_dispatcher(substrate.clone(), hand_id.clone()),
+        tempdir.path().to_path_buf(),
+    );
+    let report = foreman.tick().await.expect("tick");
+    let expected = ticket.id.clone();
+    assert!(
+        report.cleanup_actions.iter().any(|a| matches!(
+            a,
+            CleanupAction::RequeuedAbandonedHand { ticket, .. } if ticket == &expected
+        )),
+        "dead-pid hand should be abandoned immediately; got {:?}",
+        report.cleanup_actions
+    );
+}
+
+#[tokio::test]
+async fn cleanup_suppresses_abandonment_for_live_pid() {
+    // D75: a hand with a live pid is NOT abandoned even when the heartbeat is
+    // stale (the agent is still running, just busy).
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+
+    let live_pid = std::process::id();
+    let hand_id = HandId::new("h-live-pid").expect("hand id");
+    substrate
+        .register_hand(Hand {
+            id: hand_id.clone(),
+            kind: HandKind::Codex,
+            last_seen: Some(Utc::now()),
+            pid: Some(live_pid),
+        })
+        .await
+        .expect("register hand");
+    let ticket = new_ticket(&substrate, "drk-1").await;
+    ticket_to_in_flight(&substrate, &ticket, &hand_id).await;
+
+    // Backdate the heartbeat past the TTL — only the live pid protects the hand.
+    let stale = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let db_path = tempdir.path().join("derrick.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "UPDATE hands SET last_seen = ?1 WHERE id = ?2",
+        rusqlite::params![stale, hand_id.as_str()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let foreman = build_foreman(
+        substrate.clone(),
+        Box::new(MockRepoState::new()),
+        no_op_dispatcher(substrate.clone(), hand_id.clone()),
+        tempdir.path().to_path_buf(),
+    );
+    let report = foreman.tick().await.expect("tick");
+    let expected = ticket.id.clone();
+    assert!(
+        !report.cleanup_actions.iter().any(|a| matches!(
+            a,
+            CleanupAction::RequeuedAbandonedHand { ticket, .. } if ticket == &expected
+        )),
+        "live-pid hand should NOT be abandoned despite stale heartbeat; got {:?}",
+        report.cleanup_actions
+    );
+    let after = substrate.get_ticket(&ticket.id).await.unwrap().unwrap();
+    assert_eq!(after.state, TicketState::InFlight);
+}
+
+#[tokio::test]
 async fn cleanup_triggers_eager_verifier_on_stale_in_review() {
     let tempdir = TempDir::new().expect("tempdir");
     let substrate = open_substrate(&tempdir).await;
@@ -1043,6 +1145,7 @@ async fn register_hand_simple(substrate: &NativeSubstrate, id: &str) -> HandId {
             id: hand_id.clone(),
             kind: HandKind::Human,
             last_seen: Some(Utc::now()),
+            pid: None,
         })
         .await
         .expect("register hand");
