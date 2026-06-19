@@ -340,11 +340,7 @@ impl NativeSubstrate {
     /// pid (e.g. on clean release). No event is emitted — the dispatcher emits
     /// `HandStarted`/`HandExited` separately; this is purely the liveness
     /// record. No-op (returns `Ok`) if the hand id is not registered.
-    pub async fn set_hand_pid(
-        &self,
-        id: &HandId,
-        pid: Option<u32>,
-    ) -> Result<(), SubstrateError> {
+    pub async fn set_hand_pid(&self, id: &HandId, pid: Option<u32>) -> Result<(), SubstrateError> {
         let id = id.clone();
         self.run_write(move |connection| {
             connection
@@ -1670,11 +1666,7 @@ impl Substrate for NativeSubstrate {
         .await
     }
 
-    async fn register_hand_with_pid(
-        &self,
-        mut hand: Hand,
-        pid: u32,
-    ) -> Result<(), SubstrateError> {
+    async fn register_hand_with_pid(&self, mut hand: Hand, pid: u32) -> Result<(), SubstrateError> {
         hand.pid = Some(pid);
         self.register_hand(hand).await
     }

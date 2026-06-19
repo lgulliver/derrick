@@ -1556,7 +1556,12 @@ fi
         );
         let mut hosts = HostRegistry::empty();
         hosts.register("claude", Box::new(MinimalSpecifyHost));
-        let runner = Runner::new(config, Arc::clone(&substrate), hosts, dir.path().to_path_buf());
+        let runner = Runner::new(
+            config,
+            Arc::clone(&substrate),
+            hosts,
+            dir.path().to_path_buf(),
+        );
         runner
             .run_pipeline(
                 DRILL_PIPELINE,

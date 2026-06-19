@@ -92,11 +92,13 @@ fn truncate_snippet(line: &str) -> String {
     if line.chars().count() <= HAND_PROGRESS_SNIPPET_MAX {
         line.to_owned()
     } else {
-        let truncated: String = line.chars().take(HAND_PROGRESS_SNIPPET_MAX.saturating_sub(1)).collect();
+        let truncated: String = line
+            .chars()
+            .take(HAND_PROGRESS_SNIPPET_MAX.saturating_sub(1))
+            .collect();
         format!("{truncated}…")
     }
 }
-
 
 /// Runtime configuration for [`HostCliHandDispatcher`].
 #[derive(Clone, Debug)]
@@ -588,12 +590,7 @@ impl HostCliHandDispatcher {
 
     /// Records a `HandExited` event (D76). Best-effort: a recording failure is
     /// logged and swallowed so it never masks the dispatch outcome.
-    async fn record_hand_exited(
-        &self,
-        hand_id: &HandId,
-        code: i32,
-        stats: Option<HandExitStats>,
-    ) {
+    async fn record_hand_exited(&self, hand_id: &HandId, code: i32, stats: Option<HandExitStats>) {
         if let Err(error) = self
             .substrate
             .record_typed_event(

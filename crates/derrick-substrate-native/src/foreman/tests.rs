@@ -720,11 +720,7 @@ async fn cleanup_suppresses_abandonment_for_live_pid() {
         "live-pid hand should NOT be abandoned despite stale heartbeat; got {:?}",
         report.cleanup_actions
     );
-    let after = substrate
-        .get_ticket(&ticket.id)
-        .await
-        .unwrap()
-        .unwrap();
+    let after = substrate.get_ticket(&ticket.id).await.unwrap().unwrap();
     assert_eq!(after.state, TicketState::InFlight);
 }
 

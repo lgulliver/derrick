@@ -757,9 +757,9 @@ impl Foreman {
                 .await?;
             for ticket_id in inflight {
                 let reason = match (pid_dead, hand.pid) {
-                    (true, Some(pid)) => format!(
-                        "hand abandoned: child process {pid} is no longer alive"
-                    ),
+                    (true, Some(pid)) => {
+                        format!("hand abandoned: child process {pid} is no longer alive")
+                    }
                     _ => format!(
                         "hand abandoned: last seen before {}",
                         hand_threshold.to_rfc3339()

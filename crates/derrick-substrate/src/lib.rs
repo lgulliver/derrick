@@ -225,11 +225,7 @@ pub trait Substrate: Send + Sync {
     /// working; the native backend overrides it to persist `pid` on the hand
     /// row. The hand's existing `pid` field, if set, is overwritten with the
     /// supplied pid.
-    async fn register_hand_with_pid(
-        &self,
-        mut hand: Hand,
-        pid: u32,
-    ) -> Result<(), SubstrateError> {
+    async fn register_hand_with_pid(&self, mut hand: Hand, pid: u32) -> Result<(), SubstrateError> {
         hand.pid = Some(pid);
         self.register_hand(hand).await
     }

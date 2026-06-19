@@ -850,7 +850,7 @@ impl Runner {
                                     total: 0,
                                 },
                             )
-                        .await;
+                            .await;
                         let sem = semaphore.clone();
                         let runner = self.clone();
                         let step = step.clone();

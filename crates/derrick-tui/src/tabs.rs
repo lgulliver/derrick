@@ -858,8 +858,11 @@ fn render_factory(frame: &mut Frame, area: Rect, app: &App) {
         app.data.hands.len(),
     );
     frame.render_widget(
-        Paragraph::new(status_line)
-            .block(Block::default().title("Factory floor").borders(Borders::ALL)),
+        Paragraph::new(status_line).block(
+            Block::default()
+                .title("Factory floor")
+                .borders(Borders::ALL),
+        ),
         chunks[0],
     );
 
@@ -941,8 +944,11 @@ fn render_factory(frame: &mut Frame, area: Rect, app: &App) {
     };
     let conveyor_line = format!("{} ready conveyor: {}", FACTORY_SPINNER[belt_frame], belt);
     frame.render_widget(
-        Paragraph::new(conveyor_line)
-            .block(Block::default().title("Conveyor → dock").borders(Borders::ALL)),
+        Paragraph::new(conveyor_line).block(
+            Block::default()
+                .title("Conveyor → dock")
+                .borders(Borders::ALL),
+        ),
         chunks[2],
     );
 }
@@ -2190,7 +2196,11 @@ mod tests {
     // Factory tab (D78)
     // -----------------------------------------------------------------------
 
-    fn factory_hand(id: &str, kind: derrick_substrate::HandKind, pid: Option<u32>) -> derrick_substrate::Hand {
+    fn factory_hand(
+        id: &str,
+        kind: derrick_substrate::HandKind,
+        pid: Option<u32>,
+    ) -> derrick_substrate::Hand {
         derrick_substrate::Hand {
             id: derrick_substrate::HandId::new(id).expect("hand id"),
             kind,
@@ -2228,9 +2238,18 @@ mod tests {
         assert!(out.contains("Factory floor"), "title should appear");
         assert!(out.contains("bramble"), "worker hand id should appear");
         assert!(out.contains("sumac"), "second worker should appear");
-        assert!(out.contains("tst-3"), "ready ticket should appear on the conveyor");
-        assert!(out.contains("shipped: 1"), "done ticket count should appear");
-        assert!(out.contains("💨"), "smokestack should puff when foreman is attached");
+        assert!(
+            out.contains("tst-3"),
+            "ready ticket should appear on the conveyor"
+        );
+        assert!(
+            out.contains("shipped: 1"),
+            "done ticket count should appear"
+        );
+        assert!(
+            out.contains("💨"),
+            "smokestack should puff when foreman is attached"
+        );
     }
 
     #[test]
@@ -2245,7 +2264,10 @@ mod tests {
         });
         let app = crate::app::App::new(crate::data::Tab::Factory, data);
         let out = render_tab_to_string(&app, 120, 24);
-        assert!(out.contains("workers: 0"), "zero-worker count should appear");
+        assert!(
+            out.contains("workers: 0"),
+            "zero-worker count should appear"
+        );
         assert!(out.contains("stopped"), "foreman mode should appear");
         assert!(
             !out.contains("💨"),
@@ -2261,7 +2283,13 @@ mod tests {
             derrick_substrate::HandKind::Codex,
             Some(9),
         )];
-        data.hand_rows = vec![make_hand_row("bramble", Some("tst-1"), "working", "running", None)];
+        data.hand_rows = vec![make_hand_row(
+            "bramble",
+            Some("tst-1"),
+            "working",
+            "running",
+            None,
+        )];
         let mut app = crate::app::App::new(crate::data::Tab::Factory, data);
         // Cycle the animation frame through several values — each must render
         // without panic (the spinner index wraps via modulo).
