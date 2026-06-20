@@ -1,0 +1,50 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "6aaab20f0fc6",
+  "session_id": "6596e55b-dc59-4f74-9615-4e46bac076b1",
+  "strategy": "manual-commit",
+  "created_at": "2026-06-20T18:25:19.146826Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "crates/derrick-cli/src/commands/init.rs",
+    "crates/derrick-cli/src/commands/mod.rs",
+    "crates/derrick-cli/src/commands/reset.rs",
+    "crates/derrick-cli/src/commands/undo.rs",
+    "crates/derrick-cli/src/lib.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-sonnet-4-6",
+  "turn_id": "522e4bb3a7af",
+  "token_usage": {
+    "input_tokens": 134,
+    "cache_creation_tokens": 160003,
+    "cache_read_tokens": 11316275,
+    "output_tokens": 64240,
+    "api_call_count": 126
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-06-20T18:25:19.123619Z",
+    "agent_lines": 229,
+    "agent_removed": 0,
+    "human_added": 30,
+    "human_modified": 10,
+    "human_removed": 0,
+    "total_committed": 269,
+    "total_lines_changed": 269,
+    "agent_percentage": 85.13011152416357,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    }
+  ]
+}

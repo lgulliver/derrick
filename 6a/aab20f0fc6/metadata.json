@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.7.5",
+  "checkpoint_id": "6aaab20f0fc6",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "crates/derrick-cli/src/commands/init.rs",
+    "crates/derrick-cli/src/commands/mod.rs",
+    "crates/derrick-cli/src/commands/reset.rs",
+    "crates/derrick-cli/src/commands/undo.rs",
+    "crates/derrick-cli/src/lib.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6a/aab20f0fc6/0/metadata.json",
+      "transcript": "/6a/aab20f0fc6/0/full.jsonl",
+      "content_hash": "/6a/aab20f0fc6/0/content_hash.txt",
+      "prompt": "/6a/aab20f0fc6/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 134,
+    "cache_creation_tokens": 160003,
+    "cache_read_tokens": 11316275,
+    "output_tokens": 64240,
+    "api_call_count": 126
+  }
+}
