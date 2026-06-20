@@ -106,7 +106,34 @@ impl HostAdapter for ClaudeHost {
             binary: self.binary.clone(),
             args,
         };
-        let mut response = run_host(NAME, spec, request).await?;
+        let result = run_host(NAME, spec, request).await;
+        // When the claude CLI exits non-zero it writes a JSON envelope to
+        // stdout, not stderr. Parse that to surface a meaningful message.
+        let result = result.map_err(|e| match e {
+            HostError::NonZeroExit {
+                host,
+                exit_code,
+                stderr,
+                stdout,
+            } => {
+                let (parsed_text, _, _) = parse_claude_json(&stdout);
+                let effective_stderr = if !stderr.is_empty() {
+                    stderr
+                } else if !parsed_text.is_empty() {
+                    parsed_text
+                } else {
+                    stdout.clone()
+                };
+                HostError::NonZeroExit {
+                    host,
+                    exit_code,
+                    stderr: effective_stderr,
+                    stdout,
+                }
+            }
+            other => other,
+        });
+        let mut response = result?;
         // Parse JSON to extract the text and token counts; fall back
         // gracefully for CLI versions that don't support --output-format json.
         let (text, tokens_in, tokens_out) = parse_claude_json(&response.stdout);

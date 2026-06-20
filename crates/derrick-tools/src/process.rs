@@ -108,6 +108,7 @@ pub(crate) async fn run_host(
             host: host.to_owned(),
             exit_code,
             stderr,
+            stdout,
         })
     }
 }

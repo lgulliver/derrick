@@ -240,8 +240,12 @@ pub enum HostError {
         host: String,
         /// Process exit code, or -1 when no code was reported.
         exit_code: i32,
-        /// Captured stderr.
+        /// Captured stderr (or stdout when stderr is empty — some CLIs write
+        /// errors to stdout instead of stderr).
         stderr: String,
+        /// Captured stdout, preserved separately so host adapters can parse
+        /// structured error output (e.g. claude's JSON error envelope).
+        stdout: String,
     },
     /// Host process exceeded its timeout.
     #[error("host {host} timed out after {seconds}s")]

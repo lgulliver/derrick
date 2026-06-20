@@ -349,6 +349,7 @@ exit 7
             host,
             exit_code: 7,
             stderr,
+            ..
         }) => {
             assert_eq!(host, kind.name());
             assert_eq!(stderr, "typed failure");

@@ -91,6 +91,7 @@ mod tests {
                     host: self.name.to_owned(),
                     exit_code: 7,
                     stderr: "failed".to_owned(),
+                    stdout: String::new(),
                 });
             }
             let feature = request.cwd.join("specs/001-test");
