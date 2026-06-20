@@ -333,10 +333,27 @@ pub const SPEC_STUB_MARKER: &str = "<!-- derrick: specify pending -->";
 ///
 /// This eliminates the need for the LLM to invent a path and create the
 /// directory itself — the model is then told exactly where to write.
+/// Function words skipped when deriving a feature-directory slug so that
+/// stopwords like "a" or "that" don't pad the branch name.
+const SLUG_STOPWORDS: &[&str] = &[
+    "a", "an", "the", "that", "this", "these", "those", "and", "or", "but", "for", "with", "from",
+    "into", "to", "in", "on", "of", "at", "by", "as", "is", "are", "was", "were", "be", "been",
+    "which", "who", "what",
+];
+
 pub fn prescaffold_feature_dir(wd: &Path, prompt: &str) -> Result<std::path::PathBuf, RunError> {
     let specs_root = wd.join("specs");
     create_dir_all(&specs_root)?;
-    let slug = prompt_to_slug(prompt, 6, 30);
+    // Pre-filter the prompt so stopwords and single-character tokens (e.g. the
+    // two halves of "D&D") don't fill the slug.  Rejoin as a plain string so
+    // `prompt_to_slug` can apply its own word/char limits cleanly.
+    let meaningful: String = prompt
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 1 && !SLUG_STOPWORDS.contains(w))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let slug = prompt_to_slug(&meaningful, 4, 25);
     let slug = if slug.is_empty() {
         "feature".to_owned()
     } else {
@@ -477,7 +494,7 @@ mod tests {
             prescaffold_feature_dir(tmp.path(), "Add a greet command with flags").unwrap();
         assert_eq!(
             feature_dir,
-            std::path::PathBuf::from("specs/001-add-a-greet-command-with-flags")
+            std::path::PathBuf::from("specs/001-add-greet-command-flags")
         );
         let spec = tmp.path().join(&feature_dir).join("spec.md");
         assert!(spec.exists(), "spec.md should be created");
@@ -488,7 +505,7 @@ mod tests {
         assert!(json_path.exists(), "feature.json should be created");
         let json = std::fs::read_to_string(&json_path).unwrap();
         assert!(
-            json.contains("specs/001-add-a-greet-command-with-flags"),
+            json.contains("specs/001-add-greet-command-flags"),
             "feature.json should point at the new dir, got: {json}"
         );
     }
