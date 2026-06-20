@@ -1,2 +1,26 @@
 I ran derrick drill "a web application that provides D&D and other table top groups a dynamic world building set of tools. Items, lore, locations, maps, NPCs, random generators" against my chronographer repo and got
 ▸ drill  run 20260620T172033Z                                                                                                                                                                                                   step specify failed: host claude exited with code 1
+
+---
+
+lets get that committed and pushed
+
+---
+
+ran next and got:
+
+  plan ✓ done  3m31s  ↑13.1k ↓13.9k
+  ┌ Plan Summary
+  │ **Branch**: `001-a-web-application-that-provide` | **Date**: 2026-06-20 | **S...
+  └ 118 lines → /Users/lgulliver/repos/chronographer/.derrick/worktrees/20260620T173904Z/specs/001-a-web-application-that-provide/plan.md
+
+  assay ⚖ Cross-Examination (0 objections) → Not covered in spec or plan:
+  assay ⚠ Maximum 1 rounds reached — unresolved risks logged.
+  assay ⚠ Review risks noted after 1 rounds (continuing).
+  ⚠ reviewer 'reviewer' uses the same provider as the proposer ('shell') — adversarial value reduced
+
+few things:
+
+1. branch names should be less.... derrived from the exact prompt.
+2. Give the user a summary of the plan to confirm what the plan is before confirmation
+3. There was only 1 round of assay and unresolved items. why?
