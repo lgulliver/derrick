@@ -114,6 +114,65 @@ pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliErr
     outcome
 }
 
+/// Re-scaffold `.claude/` skills, hooks and settings against the current
+/// `derrick.yaml`, without touching the `.derrick/` database or the config
+/// file itself. Equivalent to a forced brownfield re-init that preserves
+/// `derrick.yaml` exactly.
+pub(crate) async fn execute_reset(
+    repo_root: &Path,
+    yes: bool,
+    dry_run: bool,
+) -> Result<CliExitCode, crate::CliError> {
+    check_prerequisites()?;
+    let config = read_config(repo_root)?;
+
+    let opts = AdoptOptions {
+        site_name: config.site().name().to_owned(),
+        site_prefix: config.site().prefix().to_owned(),
+        mode: config.tools().substrate().mode(),
+        force: true,
+        no_hooks: false,
+        append_agents_md: false,
+        constitution: ConstitutionMode::Reference,
+    };
+
+    let adopter = Adopter::new(repo_root);
+    let detection = adopter.detect().map_err(|e| message(e.to_string()))?;
+    let mut plan = adopter
+        .propose(&detection, &opts, None)
+        .map_err(|e| message(e.to_string()))?;
+
+    // Never rewrite derrick.yaml — reset preserves the config exactly.
+    plan.writes.retain(|w| w.path != Path::new("derrick.yaml"));
+
+    print_plan(&plan);
+
+    if dry_run {
+        return Ok(CliExitCode::Success);
+    }
+
+    if !yes && !plan.writes.is_empty() {
+        use std::io::Write as _;
+        print!("Apply these changes? [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).ok();
+        if !answer.trim().eq_ignore_ascii_case("y") && !answer.trim().eq_ignore_ascii_case("yes") {
+            println!("Cancelled.");
+            return Ok(CliExitCode::Success);
+        }
+    }
+
+    let outcome = adopter
+        .apply(&plan)
+        .await
+        .map_err(|e| message(e.to_string()))?;
+    for path in &outcome.written {
+        print_written(&path.display().to_string());
+    }
+    Ok(CliExitCode::Success)
+}
+
 fn resolve_options(
     repo_root: &Path,
     args: InitArgs,

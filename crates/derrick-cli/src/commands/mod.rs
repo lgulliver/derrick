@@ -13,6 +13,7 @@ pub(crate) mod init_wizard;
 pub(crate) mod models;
 pub(crate) mod observe;
 pub(crate) mod prompt_input;
+pub(crate) mod reset;
 pub(crate) mod run;
 pub(crate) mod scrub;
 pub(crate) mod stack;
@@ -20,6 +21,7 @@ pub(crate) mod status;
 pub(crate) mod survey;
 pub(crate) mod switch;
 pub(crate) mod ticket;
+pub(crate) mod undo;
 pub(crate) mod uninstall;
 pub(crate) mod upgrade;
 
@@ -56,6 +58,30 @@ pub(crate) enum Command {
     Switch(SwitchArgs),
     /// Query the native code-graph index (symbols, references, impact).
     Survey(SurveyArgs),
+    /// Re-scaffold .claude/ skills and hooks from the current derrick.yaml (preserves config and DB).
+    Reset(ResetArgs),
+    /// Revert the last hand's git commits.
+    Undo(UndoArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ResetArgs {
+    /// Skip confirmation prompts.
+    #[arg(long, short = 'y')]
+    pub(crate) yes: bool,
+    /// Preview changes without writing.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UndoArgs {
+    /// Skip confirmation prompt.
+    #[arg(long, short = 'y')]
+    pub(crate) yes: bool,
+    /// Preview what would be reverted without making changes.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }
 
 /// Arguments for `derrick drill` — positional prompt shorthand for `run drill`.
