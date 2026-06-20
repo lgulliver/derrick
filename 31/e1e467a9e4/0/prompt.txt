@@ -1,0 +1,2 @@
+I ran derrick drill "a web application that provides D&D and other table top groups a dynamic world building set of tools. Items, lore, locations, maps, NPCs, random generators" against my chronographer repo and got
+▸ drill  run 20260620T172033Z                                                                                                                                                                                                   step specify failed: host claude exited with code 1
