@@ -384,7 +384,7 @@ impl StreamParser {
                         target: "derrick_models::api",
                         runtime = self.dialect.runtime_id(),
                         %error,
-                        "dropping unparseable NDJSON stream line"
+                        "dropping unparsable NDJSON stream line"
                     );
                     Vec::new()
                 }
@@ -427,7 +427,7 @@ impl StreamParser {
                     target: "derrick_models::api",
                     runtime = self.dialect.runtime_id(),
                     %error,
-                    "dropping unparseable SSE data frame"
+                    "dropping unparsable SSE data frame"
                 );
                 return Vec::new();
             }
