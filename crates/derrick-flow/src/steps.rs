@@ -603,7 +603,7 @@ async fn execute_foreman(
             "role `{executor_role}` points to model `{model_name}`, but no model named `{model_name}` exists under `models`"
         ))
     })?;
-    let hand_kind = hand_kind_for_executor(model.provider(), model.cli());
+    let hand_kind = hand_kind_for_executor(&model.resolved_runtime(), model.cli());
     let hand_suffix = hand_kind.to_string();
     let hand_id = HandId::new(format!("{}-{hand_suffix}-hand", config.site().prefix()))
         .map_err(|e| RunError::Config(format!("foreman: invalid hand id: {e}")))?;
@@ -815,8 +815,12 @@ fn parse_tasks_from_markdown(
 /// crew-mode tickets. Copilot now runs through the local `copilot` CLI (which
 /// DOES take `--model`, D67); claude, codex, opencode, and aider are likewise
 /// host-CLI executors; everything else falls back to a human hand.
-pub fn hand_kind_for_executor(provider: &str, cli: Option<&str>) -> HandKind {
-    let matches = |name: &str| provider == name || cli.is_some_and(|value| value.starts_with(name));
+pub fn hand_kind_for_executor(runtime: &str, cli: Option<&str>) -> HandKind {
+    // D79: `runtime` is the resolved runtime id (`claude-cli`, `shell`, …). Map
+    // a `*-cli` runtime to its host so the bare host-name matching below still
+    // works; non-CLI runtimes fall through to their own id.
+    let host = derrick_config::cli_host_for_runtime(runtime).unwrap_or(runtime);
+    let matches = |name: &str| host == name || cli.is_some_and(|value| value.starts_with(name));
     if matches("copilot") {
         HandKind::Copilot
     } else if matches("claude") {

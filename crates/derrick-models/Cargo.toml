@@ -11,8 +11,10 @@ async-trait = { workspace = true }
 derrick-config = { path = "../derrick-config" }
 derrick-tools = { path = "../derrick-tools" }
 futures = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 shell-words = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

@@ -335,44 +335,136 @@ impl ModelError {
     }
 }
 
+/// Normalised error surfaced by any runtime (D79).
+///
+/// A single shape across CLI, API, and local runtimes so the foreman can make a
+/// uniform retry/escalate decision. `retryable` is the load-bearing field;
+/// `stdout`/`stderr` capture CLI subprocess output when present. Converts into
+/// [`ModelError::Provider`] for the `Model` trait surface.
+#[derive(Clone, Debug)]
+pub struct RuntimeError {
+    /// Runtime that produced the error, e.g. `claude-cli` or `ollama`.
+    pub runtime: String,
+    /// Provider serving the model, when known.
+    pub provider: Option<String>,
+    /// Whether the caller may retry the request.
+    pub retryable: bool,
+    /// Human-readable error message.
+    pub message: String,
+    /// Captured subprocess stdout, for CLI runtimes.
+    pub stdout: Option<String>,
+    /// Captured subprocess stderr, for CLI runtimes.
+    pub stderr: Option<String>,
+}
+
+impl RuntimeError {
+    /// Creates a non-retryable runtime error.
+    pub fn new(runtime: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            runtime: runtime.into(),
+            provider: None,
+            retryable: false,
+            message: message.into(),
+            stdout: None,
+            stderr: None,
+        }
+    }
+
+    /// Sets the serving provider.
+    #[must_use]
+    pub fn with_provider(mut self, provider: Option<String>) -> Self {
+        self.provider = provider;
+        self
+    }
+
+    /// Marks the error retryable.
+    #[must_use]
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
+    }
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "runtime {} error: {}",
+            self.runtime, self.message
+        )
+    }
+}
+
+impl std::error::Error for RuntimeError {}
+
+impl From<RuntimeError> for ModelError {
+    fn from(error: RuntimeError) -> Self {
+        ModelError::Provider {
+            provider: error.runtime,
+            message: error.message,
+            retryable: error.retryable,
+        }
+    }
+}
+
 type ProviderConstructor =
     Arc<dyn Fn(&ModelDef, &AuthStore) -> Result<Box<dyn Model>, ModelError> + Send + Sync>;
 
-/// Registry mapping provider names to model constructors.
+/// Registry mapping runtime ids to model constructors (D79).
+///
+/// The five `*-cli` runtimes delegate to the `derrick-tools` host adapters
+/// (unchanged D65 behaviour); `shell` is the bespoke-envelope escape hatch; and
+/// the opt-in API/local runtimes (`anthropic-api`, `openai-api`,
+/// `openai-compatible`, `ollama`) build HTTP-backed models. Adding a runtime is
+/// a `register` call — not an architectural change.
 #[derive(Clone, Default)]
-pub struct ProviderRegistry {
+pub struct RuntimeRegistry {
     constructors: HashMap<String, ProviderConstructor>,
 }
 
-impl ProviderRegistry {
-    /// Returns a registry pre-populated with the default providers.
-    ///
-    /// Per D65, inference is host-delegated: each of the five host CLIs is
-    /// registered as a provider whose name equals the host name. The `shell`
-    /// provider survives as a bespoke-envelope escape hatch. There is no
-    /// direct-API path.
+/// Backwards-compatible alias for the pre-D79 name.
+pub type ProviderRegistry = RuntimeRegistry;
+
+impl RuntimeRegistry {
+    /// Returns a registry pre-populated with every built-in runtime.
     pub fn with_defaults() -> Self {
         let mut registry = Self::default();
         registry.register("shell", providers::shell::build);
-        register_host(&mut registry, "claude", || {
+        register_cli_runtime(&mut registry, "claude-cli", "claude", || {
             Arc::new(derrick_tools::ClaudeHost::new())
         });
-        register_host(&mut registry, "codex", || {
+        register_cli_runtime(&mut registry, "codex-cli", "codex", || {
             Arc::new(derrick_tools::CodexHost::new())
         });
-        register_host(&mut registry, "copilot", || {
+        register_cli_runtime(&mut registry, "copilot-cli", "copilot", || {
             Arc::new(derrick_tools::CopilotHost::new())
         });
-        register_host(&mut registry, "opencode", || {
+        register_cli_runtime(&mut registry, "opencode-cli", "opencode", || {
             Arc::new(derrick_tools::OpencodeHost::new())
         });
-        register_host(&mut registry, "aider", || {
+        register_cli_runtime(&mut registry, "aider-cli", "aider", || {
             Arc::new(derrick_tools::AiderHost::new())
+        });
+        registry.register("anthropic-api", |model_def, auth| {
+            providers::api::build(providers::api::ApiDialect::Anthropic, model_def, auth)
+        });
+        registry.register("openai-api", |model_def, auth| {
+            providers::api::build(providers::api::ApiDialect::OpenAi, model_def, auth)
+        });
+        registry.register("openai-compatible", |model_def, auth| {
+            providers::api::build(
+                providers::api::ApiDialect::OpenAiCompatible,
+                model_def,
+                auth,
+            )
+        });
+        registry.register("ollama", |model_def, auth| {
+            providers::api::build(providers::api::ApiDialect::Ollama, model_def, auth)
         });
         registry
     }
 
-    /// Adds or replaces a constructor for a provider name.
+    /// Adds or replaces a constructor for a runtime id.
     pub fn register<F>(&mut self, name: &str, constructor: F)
     where
         F: Fn(&ModelDef, &AuthStore) -> Result<Box<dyn Model>, ModelError> + Send + Sync + 'static,
@@ -381,33 +473,37 @@ impl ProviderRegistry {
             .insert(name.to_owned(), Arc::new(constructor));
     }
 
-    /// Builds a model from a model definition.
+    /// Builds a model from a model definition, dispatching on its resolved
+    /// runtime (D79). A legacy `provider:`-only config resolves to the matching
+    /// `*-cli` runtime.
     pub fn build(
         &self,
         model_def: &ModelDef,
         auth: &AuthStore,
     ) -> Result<Box<dyn Model>, ModelError> {
-        let provider = model_def.provider();
+        let runtime = model_def.resolved_runtime();
         let constructor = self
             .constructors
-            .get(provider)
-            .ok_or_else(|| ModelError::UnknownProvider(provider.to_owned()))?;
+            .get(&runtime)
+            .ok_or(ModelError::UnknownProvider(runtime))?;
 
         constructor(model_def, auth)
     }
 }
 
-/// Registers a host-delegated provider for `host` in the registry.
+/// Registers a `*-cli` runtime that delegates to a `derrick-tools` host adapter.
 ///
-/// `make_adapter` constructs a fresh `Arc<dyn HostAdapter>` per built model
-/// (the adapter's `run` takes `&self`; the registry is not `Clone` and owns no
-/// adapter references). The provider name equals the host name.
-fn register_host(
-    registry: &mut ProviderRegistry,
+/// `make_adapter` constructs a fresh `Arc<dyn HostAdapter>` per built model. The
+/// model's reported provider stays the host name (e.g. `claude`) for telemetry
+/// and the assay family check.
+fn register_cli_runtime(
+    registry: &mut RuntimeRegistry,
+    runtime: &'static str,
     host: &'static str,
     make_adapter: fn() -> Arc<dyn derrick_tools::HostAdapter>,
 ) {
-    registry.register(host, move |model_def, auth| {
+    let _ = runtime;
+    registry.register(runtime, move |model_def, auth| {
         providers::host_delegated::build_for_host(host, make_adapter(), model_def, auth)
     });
 }

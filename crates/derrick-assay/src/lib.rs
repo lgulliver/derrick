@@ -413,9 +413,10 @@ pub async fn run_reviewer_rounds(
         // review — emit the same same-family warning as the config-time check
         // (DESIGN §7 / D5). Do not block.
         if let Some(msg) = same_family_warning(
-            role_provider(config, PROPOSER_ROLE),
+            role_provider(config, PROPOSER_ROLE).as_deref(),
             reviewer_role,
-            Some("claude"),
+            // D79: the fallback substitutes the claude CLI *runtime*.
+            Some("claude-cli"),
         ) {
             tracing::warn!(
                 step = "assay",
@@ -784,12 +785,19 @@ pub async fn run_reviewer_rounds(
 /// proposer's provider.
 const PROPOSER_ROLE: &str = "proposer";
 
-/// Resolve the provider id bound to `role` via the config role bindings and
+/// Resolve the runtime id bound to `role` via the config role bindings and
 /// model registry. Returns `None` if the role is unbound or the bound model is
 /// unknown. Read-only: consumes existing `derrick-config` APIs only.
-fn role_provider<'a>(config: &'a Config, role: &str) -> Option<&'a str> {
+///
+/// D79: the family check now compares *runtimes* (`claude-cli`, `codex-cli`, …)
+/// rather than the legacy provider name, so it still fires for runtime-only
+/// configs that omit `provider`.
+fn role_provider(config: &Config, role: &str) -> Option<String> {
     let model_name = config.roles().get(role)?;
-    config.models().get(model_name).map(|def| def.provider())
+    config
+        .models()
+        .get(model_name)
+        .map(derrick_config::ModelDef::resolved_runtime)
 }
 
 /// Build a same-family warning for one reviewer if it shares the proposer's
@@ -821,13 +829,16 @@ fn same_family_warnings(config: &Config, reviewers: &[String]) -> Vec<String> {
     let mut warnings = Vec::new();
     for reviewer_role in reviewers {
         let reviewer_provider = role_provider(config, reviewer_role);
-        if let Some(msg) = same_family_warning(proposer_provider, reviewer_role, reviewer_provider)
-        {
+        if let Some(msg) = same_family_warning(
+            proposer_provider.as_deref(),
+            reviewer_role,
+            reviewer_provider.as_deref(),
+        ) {
             tracing::warn!(
                 step = "assay",
                 proposer_role = PROPOSER_ROLE,
                 reviewer = %reviewer_role,
-                provider = reviewer_provider.unwrap_or(""),
+                provider = reviewer_provider.as_deref().unwrap_or(""),
                 "{msg}"
             );
             warnings.push(msg);

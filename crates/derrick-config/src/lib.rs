@@ -12,15 +12,84 @@
 //! values, and references between sections. Host/provider compatibility is
 //! checked by downstream model tooling.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde::de::{self, MapAccess, Visitor};
 use thiserror::Error;
 
 const CONFIG_VERSION: u32 = 1;
+
+/// Maps a legacy host-provider name to its D79 runtime.
+///
+/// The five CLI hosts (`claude`/`codex`/`copilot`/`opencode`/`aider`) each have
+/// a `*-cli` runtime; everything else (the `shell` escape hatch and the opt-in
+/// API/local runtimes such as `ollama`) passes through unchanged. Used to derive
+/// the runtime for legacy configs that name only a `provider`.
+pub fn runtime_for_provider(provider: &str) -> &str {
+    match provider {
+        "claude" => "claude-cli",
+        "codex" => "codex-cli",
+        "copilot" => "copilot-cli",
+        "opencode" => "opencode-cli",
+        "aider" => "aider-cli",
+        other => other,
+    }
+}
+
+/// Builds a legacy host-CLI [`ModelDef`] (provider-only; runtime derived).
+fn host_model(provider: &str, model: &str) -> ModelDef {
+    ModelDef {
+        runtime: None,
+        provider: Some(provider.to_owned()),
+        model: model.to_owned(),
+        cli: None,
+        base_url: None,
+        endpoint: None,
+        auth_env: None,
+        auth_mode: None,
+        params: BTreeMap::new(),
+        capabilities: None,
+        max_tokens: None,
+        temperature: None,
+        cache: None,
+        timeout: None,
+        rate_limit: None,
+        cost_hint: None,
+    }
+}
+
+/// Returns the host CLI binary backing a `*-cli` runtime, or `None` for API,
+/// local, and `shell` runtimes that do not shell out to a managed host.
+pub fn cli_host_for_runtime(runtime: &str) -> Option<&'static str> {
+    match runtime {
+        "claude-cli" => Some("claude"),
+        "codex-cli" => Some("codex"),
+        "copilot-cli" => Some("copilot"),
+        "opencode-cli" => Some("opencode"),
+        "aider-cli" => Some("aider"),
+        _ => None,
+    }
+}
+
+/// The runtimes derrick knows how to invoke (D79). Used by `models check` to
+/// distinguish a typo from a genuinely-unknown runtime.
+pub const KNOWN_RUNTIMES: [&str; 10] = [
+    "claude-cli",
+    "codex-cli",
+    "copilot-cli",
+    "opencode-cli",
+    "aider-cli",
+    "anthropic-api",
+    "openai-api",
+    "openai-compatible",
+    "ollama",
+    "shell",
+];
 
 /// Init-time values substituted into `templates/derrick.yaml.in`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +125,9 @@ pub struct Config {
     guardrails: Guardrails,
     parallelism: Parallelism,
     state: StateConfig,
+    /// Per-stage capability requirements declared under `stages:` (D79). Keyed
+    /// by stage/role name; checked by `derrick models check`.
+    stage_requirements: BTreeMap<String, Vec<String>>,
 }
 
 impl Config {
@@ -72,76 +144,20 @@ impl Config {
         let mut models = HashMap::new();
         models.insert(
             "claude-opus".to_owned(),
-            ModelDef {
-                provider: "claude".to_owned(),
-                model: "claude-opus-4-8".to_owned(),
-                cli: None,
-                max_tokens: None,
-                temperature: None,
-                cache: None,
-                timeout: None,
-                rate_limit: None,
-                cost_hint: None,
-            },
+            host_model("claude", "claude-opus-4-8"),
         );
         models.insert(
             "claude-sonnet".to_owned(),
-            ModelDef {
-                provider: "claude".to_owned(),
-                model: "claude-sonnet-4-6".to_owned(),
-                cli: None,
-                max_tokens: None,
-                temperature: None,
-                cache: None,
-                timeout: None,
-                rate_limit: None,
-                cost_hint: None,
-            },
+            host_model("claude", "claude-sonnet-4-6"),
         );
         models.insert(
             "claude-haiku".to_owned(),
-            ModelDef {
-                provider: "claude".to_owned(),
-                model: "claude-haiku-4-5".to_owned(),
-                cli: None,
-                max_tokens: None,
-                temperature: None,
-                cache: None,
-                timeout: None,
-                rate_limit: None,
-                cost_hint: None,
-            },
+            host_model("claude", "claude-haiku-4-5"),
         );
-        models.insert(
-            "codex-gpt5".to_owned(),
-            ModelDef {
-                provider: "codex".to_owned(),
-                model: "gpt-5.5".to_owned(),
-                cli: None,
-                max_tokens: None,
-                temperature: None,
-                cache: None,
-                timeout: None,
-                rate_limit: None,
-                cost_hint: None,
-            },
-        );
-        models.insert(
-            "copilot".to_owned(),
-            ModelDef {
-                provider: "copilot".to_owned(),
-                // `auto` (D67): the foreman selects the best model within the
-                // copilot host per ticket by complexity.
-                model: "auto".to_owned(),
-                cli: None,
-                max_tokens: None,
-                temperature: None,
-                cache: None,
-                timeout: None,
-                rate_limit: None,
-                cost_hint: None,
-            },
-        );
+        models.insert("codex-gpt5".to_owned(), host_model("codex", "gpt-5.5"));
+        // `auto` (D67): the foreman selects the best model within the copilot
+        // host per ticket by complexity.
+        models.insert("copilot".to_owned(), host_model("copilot", "auto"));
 
         let roles = HashMap::from([
             ("proposer".to_owned(), "claude-opus".to_owned()),
@@ -176,6 +192,7 @@ impl Config {
                 log_runs: true,
                 worktree_root: PathBuf::from(".derrick/worktrees"),
             },
+            stage_requirements: BTreeMap::new(),
         }
     }
 
@@ -261,6 +278,11 @@ impl Config {
     pub fn state(&self) -> &StateConfig {
         &self.state
     }
+
+    /// Returns per-stage capability requirements declared under `stages:` (D79).
+    pub fn stage_requirements(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.stage_requirements
+    }
 }
 
 /// Errors returned while loading or validating derrick configuration.
@@ -330,17 +352,26 @@ impl ModelRegistry {
     }
 }
 
-/// A model provider entry from the `models` section.
+/// A model-alias entry from the `models` section.
 ///
-/// Post-D65 the inference path is host-delegated, so the direct-API fields
-/// (`endpoint`/`region`/`deployment`/`base_url`) are gone and `cli` is
-/// deprecated — it is still parsed (and used by the `shell` escape hatch) but
-/// ignored for host providers.
+/// D79 makes `runtime` the primary dimension: it selects *how* derrick invokes
+/// the model. When `runtime` is omitted, it is derived from `provider` for
+/// backward compatibility (e.g. `provider: claude` → `claude-cli`). API and
+/// local runtimes re-activate the `base_url`/`endpoint`/`auth_*` fields that
+/// D65 had parsed-and-ignored; CLI runtimes continue to ignore them. The `cli`
+/// field remains in use by the `shell` escape hatch only.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelDef {
-    provider: String,
+    runtime: Option<String>,
+    provider: Option<String>,
     model: String,
     cli: Option<String>,
+    base_url: Option<String>,
+    endpoint: Option<String>,
+    auth_env: Option<String>,
+    auth_mode: Option<String>,
+    params: BTreeMap<String, serde_yaml::Value>,
+    capabilities: Option<ModelCapabilities>,
     max_tokens: Option<u32>,
     temperature: Option<f64>,
     cache: Option<bool>,
@@ -350,14 +381,72 @@ pub struct ModelDef {
 }
 
 impl ModelDef {
-    /// Returns the provider identifier.
-    pub fn provider(&self) -> &str {
-        &self.provider
+    /// Returns the explicitly-configured runtime, if any.
+    ///
+    /// Most callers want [`ModelDef::resolved_runtime`], which falls back to the
+    /// provider-derived runtime when this is `None`.
+    pub fn runtime(&self) -> Option<&str> {
+        self.runtime.as_deref()
     }
 
-    /// Returns the provider-specific model name.
+    /// Returns the runtime to invoke, deriving it from the provider when the
+    /// `runtime` field is absent (D79 backward compatibility).
+    ///
+    /// At least one of `runtime`/`provider` is always present after validation,
+    /// so the `shell` fallback is unreachable for a finalized config.
+    pub fn resolved_runtime(&self) -> String {
+        if let Some(runtime) = &self.runtime {
+            return runtime.clone();
+        }
+        self.provider
+            .as_deref()
+            .map(runtime_for_provider)
+            .unwrap_or("shell")
+            .to_owned()
+    }
+
+    /// Returns the provider identifier, if configured.
+    ///
+    /// Provider is *who serves the model* (metadata for auth/cost); the runtime
+    /// determines the invocation path. For legacy host configs this is the host
+    /// name (`claude`, `codex`, …).
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
+    /// Returns the model identifier, forwarded to the runtime untouched.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Returns the API/local-runtime base URL, when set.
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    /// Returns the API/local-runtime endpoint override, when set.
+    pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint.as_deref()
+    }
+
+    /// Returns the env var name holding the runtime's API key, when set.
+    pub fn auth_env(&self) -> Option<&str> {
+        self.auth_env.as_deref()
+    }
+
+    /// Returns the auth mode (e.g. `bearer`), when set.
+    pub fn auth_mode(&self) -> Option<&str> {
+        self.auth_mode.as_deref()
+    }
+
+    /// Returns runtime-specific passthrough parameters.
+    pub fn params(&self) -> &BTreeMap<String, serde_yaml::Value> {
+        &self.params
+    }
+
+    /// Returns the declared model capabilities, when present.
+    pub fn capabilities(&self) -> Option<&ModelCapabilities> {
+        self.capabilities.as_ref()
     }
 
     /// Returns the optional CLI command.
@@ -396,6 +485,47 @@ impl ModelDef {
     /// Returns the optional cost hint.
     pub fn cost_hint(&self) -> Option<&str> {
         self.cost_hint.as_deref()
+    }
+}
+
+/// Declared capabilities for a model alias (D79).
+///
+/// Each boolean capability is tri-state: `None` means the alias does not
+/// declare it (undeclared → a stage requirement WARNs, never FAILs), `Some(true)`
+/// means supported, and `Some(false)` means explicitly unsupported (a matching
+/// stage requirement FAILs). The two windows are pure metadata used by telemetry
+/// and pre-flight checks.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelCapabilities {
+    /// Whether the model can stream tokens.
+    pub streaming: Option<bool>,
+    /// Whether the model supports tool/function calling.
+    pub tools: Option<bool>,
+    /// Whether the model supports a structured JSON output mode.
+    pub json_mode: Option<bool>,
+    /// Whether the model accepts image input.
+    pub vision: Option<bool>,
+    /// Whether the model supports prompt caching.
+    pub prompt_cache: Option<bool>,
+    /// Maximum context window in tokens, when known.
+    pub context_window: Option<u32>,
+    /// Maximum output tokens, when known.
+    pub max_output_tokens: Option<u32>,
+}
+
+impl ModelCapabilities {
+    /// Returns the declared value for a named boolean capability, or `None` when
+    /// the capability is undeclared or not a boolean capability.
+    pub fn declared(&self, capability: &str) -> Option<bool> {
+        match capability {
+            "streaming" => self.streaming,
+            "tools" => self.tools,
+            "json_mode" => self.json_mode,
+            "vision" => self.vision,
+            "prompt_cache" => self.prompt_cache,
+            _ => None,
+        }
     }
 }
 
@@ -1253,15 +1383,83 @@ fn read_layer(path: &Path) -> Result<ConfigLayer, ConfigError> {
         source,
     })?;
 
-    serde_yaml::from_str(&source).map_err(|source: serde_yaml::Error| {
-        let line = source.location().map_or(0, |location| location.line());
-        ConfigError::Syntax {
-            path: path.to_path_buf(),
-            line,
-            message: source.to_string(),
-        }
-    })
+    let mut layer: ConfigLayer =
+        serde_yaml::from_str(&source).map_err(|source: serde_yaml::Error| {
+            let line = source.location().map_or(0, |location| location.line());
+            ConfigError::Syntax {
+                path: path.to_path_buf(),
+                line,
+                message: source.to_string(),
+            }
+        })?;
+    // Expand `ai.preset` here, at the declaring layer, so it participates in the
+    // cross-layer merge with the right precedence (D79).
+    layer.apply_preset()?;
+    Ok(layer)
 }
+
+/// A preset's generated models, as `(alias, runtime, model)` tuples.
+type PresetModels = Vec<(&'static str, &'static str, &'static str)>;
+/// A preset's generated role bindings, as `(role, alias)` tuples.
+type PresetRoles = Vec<(&'static str, &'static str)>;
+
+/// Returns the `(models, roles)` a named preset generates (D79).
+///
+/// Presets are only a starting point — they expand into ordinary config the
+/// user can edit.
+fn preset_definition(preset: &str) -> Result<(PresetModels, PresetRoles), ConfigError> {
+    // Common role wiring shared by the single-runtime presets.
+    let roles_strong_fast = vec![
+        ("proposer", "strong"),
+        ("drafter", "fast"),
+        ("reviewer", "strong"),
+        ("executor", "executor"),
+        ("summariser", "fast"),
+    ];
+    let models = match preset {
+        "cli-defaults" => {
+            return Ok((
+                vec![
+                    ("fast", "claude-cli", "claude-sonnet-4-6"),
+                    ("strong", "claude-cli", "claude-opus-4-8"),
+                    ("reviewer", "codex-cli", "gpt-5.5"),
+                    ("executor", "copilot-cli", "auto"),
+                ],
+                vec![
+                    ("proposer", "strong"),
+                    ("drafter", "fast"),
+                    ("reviewer", "reviewer"),
+                    ("executor", "executor"),
+                    ("summariser", "fast"),
+                ],
+            ));
+        }
+        "claude-only" => vec![
+            ("fast", "claude-cli", "claude-sonnet-4-6"),
+            ("strong", "claude-cli", "claude-opus-4-8"),
+            ("executor", "claude-cli", "claude-opus-4-8"),
+        ],
+        "codex-only" => vec![
+            ("fast", "codex-cli", "gpt-5.5-mini"),
+            ("strong", "codex-cli", "gpt-5.5"),
+            ("executor", "codex-cli", "gpt-5.5"),
+        ],
+        "local-only" => vec![
+            ("fast", "ollama", "qwen2.5-coder:32b"),
+            ("strong", "ollama", "qwen2.5-coder:32b"),
+            ("executor", "ollama", "qwen2.5-coder:32b"),
+        ],
+        other => {
+            return validation(format!(
+                "ai.preset: {other:?} must be one of cli-defaults | claude-only | codex-only | local-only"
+            ));
+        }
+    };
+    Ok((models, roles_strong_fast))
+}
+
+/// The set of presets `ai.preset` accepts (D79). Exposed for the init wizard.
+pub const PRESETS: [&str; 4] = ["cli-defaults", "claude-only", "codex-only", "local-only"];
 
 fn user_config_path() -> Option<PathBuf> {
     env::var_os("HOME").map(|home| PathBuf::from(home).join(".derrick/config.yaml"))
@@ -1458,8 +1656,12 @@ fn parse_force_push(value: &str) -> Result<ForcePush, ConfigError> {
 struct ConfigLayer {
     version: Option<u32>,
     site: Option<SiteLayer>,
+    #[serde(default)]
+    ai: Option<AiLayer>,
     models: Option<HashMap<String, ModelDefLayer>>,
     roles: Option<HashMap<String, String>>,
+    #[serde(default)]
+    stages: Option<HashMap<String, StageBindingLayer>>,
     tools: Option<ToolsLayer>,
     pipeline: Option<Vec<PipelineStepLayer>>,
     guardrails: Option<GuardrailsLayer>,
@@ -1473,8 +1675,10 @@ impl ConfigLayer {
             self.version = other.version;
         }
         merge_nested(&mut self.site, other.site, SiteLayer::merge);
+        merge_scalar(&mut self.ai, other.ai);
         merge_map(&mut self.models, other.models);
         merge_map(&mut self.roles, other.roles);
+        merge_map(&mut self.stages, other.stages);
         merge_nested(&mut self.tools, other.tools, ToolsLayer::merge);
         if other.pipeline.is_some() {
             self.pipeline = other.pipeline;
@@ -1492,6 +1696,32 @@ impl ConfigLayer {
         merge_nested(&mut self.state, other.state, StateLayer::merge);
     }
 
+    /// Expands an `ai.preset` into concrete `models` and `roles` entries (D79).
+    ///
+    /// Applied at the layer that declares the preset (before cross-layer merge)
+    /// so explicitly-configured `models`/`roles` keys always win and preset
+    /// `roles` override lower layers via the normal merge. Inserts only keys not
+    /// already present in this layer.
+    fn apply_preset(&mut self) -> Result<(), ConfigError> {
+        let Some(preset) = self.ai.as_ref().and_then(|ai| ai.preset.as_deref()) else {
+            return Ok(());
+        };
+        let (models, roles) = preset_definition(preset)?;
+        let model_map = self.models.get_or_insert_with(HashMap::new);
+        for (alias, runtime, model) in models {
+            model_map
+                .entry(alias.to_owned())
+                .or_insert_with(|| ModelDefLayer::from_runtime(runtime, model));
+        }
+        let role_map = self.roles.get_or_insert_with(HashMap::new);
+        for (role, alias) in roles {
+            role_map
+                .entry(role.to_owned())
+                .or_insert_with(|| alias.to_owned());
+        }
+        Ok(())
+    }
+
     fn finalize(self) -> Result<Config, ConfigError> {
         let tools = self.tools.unwrap_or_default().finalize()?;
         let guardrails = required(self.guardrails, "guardrails")?.finalize();
@@ -1502,21 +1732,37 @@ impl ConfigLayer {
             .map(PipelineStepLayer::finalize)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let models = ModelRegistry(
+            required(self.models, "models")?
+                .into_iter()
+                .map(|(name, model)| Ok((name, model.finalize()?)))
+                .collect::<Result<HashMap<_, _>, ConfigError>>()?,
+        );
+
+        // Fold stage bindings into role bindings (stage name = role name); a
+        // `stages:` entry overrides a role binding from a lower layer, and
+        // collects any capability requirements for `derrick models check`.
+        let mut roles = required(self.roles, "roles")?;
+        let mut stage_requirements = BTreeMap::new();
+        for (stage, binding) in self.stages.unwrap_or_default() {
+            let (alias, requires) = binding.into_parts();
+            roles.insert(stage.clone(), alias);
+            if !requires.is_empty() {
+                stage_requirements.insert(stage, requires);
+            }
+        }
+
         Ok(Config {
             version: required(self.version, "version")?,
             site: required(self.site, "site")?.finalize()?,
-            models: ModelRegistry(
-                required(self.models, "models")?
-                    .into_iter()
-                    .map(|(name, model)| Ok((name, model.finalize()?)))
-                    .collect::<Result<HashMap<_, _>, ConfigError>>()?,
-            ),
-            roles: RoleBindings(required(self.roles, "roles")?),
+            models,
+            roles: RoleBindings(roles),
             tools,
             pipeline,
             guardrails,
             parallelism: required(self.parallelism, "parallelism")?.finalize()?,
             state: required(self.state, "state")?.finalize()?,
+            stage_requirements,
         })
     }
 }
@@ -1526,6 +1772,7 @@ impl From<Config> for ConfigLayer {
         Self {
             version: Some(config.version),
             site: Some(config.site.into()),
+            ai: None,
             models: Some(
                 config
                     .models
@@ -1535,6 +1782,7 @@ impl From<Config> for ConfigLayer {
                     .collect(),
             ),
             roles: Some(config.roles.0),
+            stages: None,
             tools: Some(config.tools.into()),
             pipeline: Some(config.pipeline.into_iter().map(Into::into).collect()),
             guardrails: Some(config.guardrails.into()),
@@ -1590,23 +1838,36 @@ impl From<Site> for SiteLayer {
     }
 }
 
+/// Deserialize target for the structured (mapping) form of a model alias.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ModelDefLayer {
+struct ModelDefSpec {
+    #[serde(default)]
+    runtime: Option<String>,
+    #[serde(default)]
     provider: Option<String>,
     model: Option<String>,
+    #[serde(default)]
     cli: Option<String>,
-    // Removed in D65 (direct-API fields). Still accepted on the wire so that
-    // pre-D65 `derrick.yaml` files keep loading; dropped at finalize with a
-    // one-line warning. No CONFIG_VERSION bump.
+    // D79 re-activates these for API/local runtimes; ignored (with a warning)
+    // for CLI runtimes.
     #[serde(default)]
     endpoint: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    auth_env: Option<String>,
+    #[serde(default)]
+    auth_mode: Option<String>,
+    #[serde(default)]
+    params: Option<BTreeMap<String, serde_yaml::Value>>,
+    #[serde(default)]
+    capabilities: Option<ModelCapabilities>,
+    // Retained for the deprecation warning only; never used.
     #[serde(default)]
     region: Option<String>,
     #[serde(default)]
     deployment: Option<String>,
-    #[serde(default)]
-    base_url: Option<String>,
     max_tokens: Option<u32>,
     temperature: Option<f64>,
     cache: Option<bool>,
@@ -1615,52 +1876,193 @@ struct ModelDefLayer {
     cost_hint: Option<String>,
 }
 
-/// Maps a legacy provider name to its D65 host-delegated equivalent.
+/// The optional `ai:` section (D79). Currently just a preset selector.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AiLayer {
+    #[serde(default)]
+    preset: Option<String>,
+}
+
+/// A `stages:` entry: either a bare model alias, or a mapping with an explicit
+/// `model` alias and optional capability `requires:` list (D79).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum StageBindingLayer {
+    /// `stage: alias` — bind the stage to a model alias.
+    Alias(String),
+    /// `stage: { model: alias, requires: [tools, …] }`.
+    Structured {
+        /// Model alias this stage binds to.
+        model: String,
+        /// Capability names this stage requires.
+        #[serde(default)]
+        requires: Vec<String>,
+    },
+}
+
+impl StageBindingLayer {
+    /// Splits the binding into `(model_alias, required_capabilities)`.
+    fn into_parts(self) -> (String, Vec<String>) {
+        match self {
+            Self::Alias(alias) => (alias, Vec::new()),
+            Self::Structured { model, requires } => (model, requires),
+        }
+    }
+}
+
+/// A model-alias layer entry. Accepts either the structured mapping form or the
+/// D79 short syntax `runtime:model` (e.g. `claude-cli:claude-sonnet-4-6`).
+#[derive(Clone, Debug, Default)]
+struct ModelDefLayer {
+    spec: ModelDefSpec,
+}
+
+impl<'de> Deserialize<'de> for ModelDefLayer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ModelDefLayerVisitor;
+
+        impl<'de> Visitor<'de> for ModelDefLayerVisitor {
+            type Value = ModelDefLayer;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a `runtime:model` string or a model mapping")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<ModelDefLayer, E>
+            where
+                E: de::Error,
+            {
+                // Split on the FIRST colon only, so model ids that contain a
+                // colon (e.g. `qwen2.5-coder:32b`) survive intact.
+                let (runtime, model) = value
+                    .split_once(':')
+                    .filter(|(r, m)| !r.trim().is_empty() && !m.trim().is_empty())
+                    .ok_or_else(|| {
+                        E::custom(format!(
+                            "short model syntax must be `runtime:model` (got `{value}`)"
+                        ))
+                    })?;
+                Ok(ModelDefLayer {
+                    spec: ModelDefSpec {
+                        runtime: Some(runtime.trim().to_owned()),
+                        model: Some(model.trim().to_owned()),
+                        ..ModelDefSpec::default()
+                    },
+                })
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<ModelDefLayer, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let spec = ModelDefSpec::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(ModelDefLayer { spec })
+            }
+        }
+
+        deserializer.deserialize_any(ModelDefLayerVisitor)
+    }
+}
+
+/// Maps a legacy provider name to its canonical host name.
 ///
-/// One-release compatibility shim so pinned user `derrick.yaml` files that
-/// still name the pre-D65 providers continue to load. Returns the input
-/// unchanged when it is not a known legacy alias.
+/// Compatibility shim so pinned `derrick.yaml` files that still name the
+/// pre-D65 providers continue to load. Returns the input unchanged when it is
+/// not a known legacy alias. Applied only when no explicit `runtime` is set
+/// (D79): with a runtime present, `provider` is preserved verbatim as metadata.
 fn canonical_provider(provider: &str) -> &str {
     match provider {
         "copilot-cli" => "copilot",
-        "anthropic" => "claude",
         "openai-cli" => "codex",
+        // Pre-D65 `anthropic` meant the Anthropic host; with no explicit runtime
+        // it still resolves to the claude CLI. Use `runtime: anthropic-api` for
+        // the direct-API path (D79).
+        "anthropic" => "claude",
         other => other,
     }
 }
 
 impl ModelDefLayer {
+    /// Builds a runtime-keyed layer entry (used by preset expansion).
+    fn from_runtime(runtime: &str, model: &str) -> Self {
+        Self {
+            spec: ModelDefSpec {
+                runtime: Some(runtime.to_owned()),
+                model: Some(model.to_owned()),
+                ..ModelDefSpec::default()
+            },
+        }
+    }
+
     fn finalize(self) -> Result<ModelDef, ConfigError> {
-        let raw_provider = required(self.provider, "models.*.provider")?;
-        let provider = canonical_provider(&raw_provider).to_owned();
-        if provider != raw_provider {
+        let spec = self.spec;
+        let model = required(spec.model, "models.*.model")?;
+
+        // Legacy provider aliases apply only when no explicit runtime is set.
+        let provider = match (&spec.runtime, spec.provider) {
+            (None, Some(raw)) => {
+                let canon = canonical_provider(&raw).to_owned();
+                if canon != raw {
+                    tracing::warn!(
+                        target: "derrick_config",
+                        "provider `{raw}` is a legacy alias; treating it as `{canon}`. \
+                         Prefer the explicit `runtime:` key (D79)."
+                    );
+                }
+                Some(canon)
+            }
+            (Some(_), provider) => provider,
+            (None, None) => None,
+        };
+
+        if spec.runtime.is_none() && provider.is_none() {
+            return validation("models.*: requires `runtime` or `provider` (D79)".to_owned());
+        }
+
+        if spec.region.is_some() || spec.deployment.is_some() {
             tracing::warn!(
                 target: "derrick_config",
-                "provider `{raw_provider}` is a pre-D65 alias; treating it as `{provider}`. \
-                 Update your config to the host name."
+                "models.*.{{region,deployment}} are not used; remove them from your config."
             );
         }
-        if self.endpoint.is_some()
-            || self.region.is_some()
-            || self.deployment.is_some()
-            || self.base_url.is_some()
-        {
+
+        // Resolve the runtime to decide whether endpoint/base_url are meaningful.
+        let runtime_id = spec.runtime.clone().unwrap_or_else(|| {
+            provider
+                .as_deref()
+                .map(runtime_for_provider)
+                .unwrap_or("shell")
+                .to_owned()
+        });
+        let is_cli_runtime = cli_host_for_runtime(&runtime_id).is_some() || runtime_id == "shell";
+        if is_cli_runtime && (spec.endpoint.is_some() || spec.base_url.is_some()) {
             tracing::warn!(
                 target: "derrick_config",
-                "models.*.{{endpoint,region,deployment,base_url}} are removed since D65 \
-                 (host-CLI-only routing); ignoring them. Remove these fields from your config."
+                "models.*.{{endpoint,base_url}} are ignored for CLI runtime `{runtime_id}`."
             );
         }
+
         Ok(ModelDef {
+            runtime: spec.runtime,
             provider,
-            model: required(self.model, "models.*.model")?,
-            cli: self.cli,
-            max_tokens: self.max_tokens,
-            temperature: self.temperature,
-            cache: self.cache,
-            timeout: self.timeout,
-            rate_limit: self.rate_limit,
-            cost_hint: self.cost_hint,
+            model,
+            cli: spec.cli,
+            base_url: spec.base_url,
+            endpoint: spec.endpoint,
+            auth_env: spec.auth_env,
+            auth_mode: spec.auth_mode,
+            params: spec.params.unwrap_or_default(),
+            capabilities: spec.capabilities,
+            max_tokens: spec.max_tokens,
+            temperature: spec.temperature,
+            cache: spec.cache,
+            timeout: spec.timeout,
+            rate_limit: spec.rate_limit,
+            cost_hint: spec.cost_hint,
         })
     }
 }
@@ -1668,19 +2070,30 @@ impl ModelDefLayer {
 impl From<ModelDef> for ModelDefLayer {
     fn from(model: ModelDef) -> Self {
         Self {
-            provider: Some(model.provider),
-            model: Some(model.model),
-            cli: model.cli,
-            endpoint: None,
-            region: None,
-            deployment: None,
-            base_url: None,
-            max_tokens: model.max_tokens,
-            temperature: model.temperature,
-            cache: model.cache,
-            timeout: model.timeout,
-            rate_limit: model.rate_limit,
-            cost_hint: model.cost_hint,
+            spec: ModelDefSpec {
+                runtime: model.runtime,
+                provider: model.provider,
+                model: Some(model.model),
+                cli: model.cli,
+                endpoint: model.endpoint,
+                base_url: model.base_url,
+                auth_env: model.auth_env,
+                auth_mode: model.auth_mode,
+                params: if model.params.is_empty() {
+                    None
+                } else {
+                    Some(model.params)
+                },
+                capabilities: model.capabilities,
+                region: None,
+                deployment: None,
+                max_tokens: model.max_tokens,
+                temperature: model.temperature,
+                cache: model.cache,
+                timeout: model.timeout,
+                rate_limit: model.rate_limit,
+                cost_hint: model.cost_hint,
+            },
         }
     }
 }
@@ -2480,6 +2893,154 @@ state:
         Config::load_from_path(&path)
     }
 
+    /// Wraps a top section (`models`/`roles`/`ai`/`stages`) in the fixed
+    /// scaffolding every config needs, for D79 tests.
+    fn assemble(top: &str) -> String {
+        format!(
+            r#"
+version: 1
+site:
+  name: t
+  prefix: tst
+{top}
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: false
+    role: drafter
+    reviewers: [drafter]
+  substrate:
+    backend: none
+    mode: solo
+  copilot:
+    agent_identity: derrick-hand
+pipeline: []
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#
+        )
+    }
+
+    #[test]
+    fn d79_short_syntax_expands_runtime_and_model() {
+        let yaml =
+            assemble("models:\n  fast: claude-cli:claude-sonnet-4-6\nroles:\n  drafter: fast");
+        let config = load_yaml(&yaml).expect("short syntax should parse");
+        let model = config.models().get("fast").expect("fast model");
+        assert_eq!(model.runtime(), Some("claude-cli"));
+        assert_eq!(model.model(), "claude-sonnet-4-6");
+        assert_eq!(model.provider(), None);
+        assert_eq!(model.resolved_runtime(), "claude-cli");
+    }
+
+    #[test]
+    fn d79_short_syntax_keeps_colon_in_model_id() {
+        // ollama ids carry their own colon (`qwen2.5-coder:32b`); only the first
+        // colon separates runtime from model.
+        let yaml =
+            assemble("models:\n  local: \"ollama:qwen2.5-coder:32b\"\nroles:\n  drafter: local");
+        let config = load_yaml(&yaml).expect("short syntax should parse");
+        let model = config.models().get("local").expect("local model");
+        assert_eq!(model.runtime(), Some("ollama"));
+        assert_eq!(model.model(), "qwen2.5-coder:32b");
+    }
+
+    #[test]
+    fn d79_runtime_derived_from_legacy_provider() {
+        let yaml = assemble(
+            "models:\n  m:\n    provider: claude\n    model: claude-opus-4-8\nroles:\n  drafter: m",
+        );
+        let config = load_yaml(&yaml).expect("legacy provider should parse");
+        let model = config.models().get("m").expect("m model");
+        assert_eq!(model.runtime(), None);
+        assert_eq!(model.resolved_runtime(), "claude-cli");
+        assert_eq!(model.provider(), Some("claude"));
+    }
+
+    #[test]
+    fn d79_missing_runtime_and_provider_is_rejected() {
+        let yaml = assemble("models:\n  m:\n    model: foo\nroles:\n  drafter: m");
+        assert_validation(&yaml, "requires `runtime` or `provider`");
+    }
+
+    #[test]
+    fn d79_preset_cli_defaults_generates_models_and_roles() {
+        let yaml = assemble("ai:\n  preset: cli-defaults");
+        let config = load_yaml(&yaml).expect("preset should expand");
+        for alias in ["fast", "strong", "reviewer", "executor"] {
+            assert!(config.models().get(alias).is_some(), "{alias} should exist");
+        }
+        assert_eq!(config.roles().get("proposer"), Some("strong"));
+        assert_eq!(config.roles().get("drafter"), Some("fast"));
+        assert_eq!(
+            config.models().get("strong").unwrap().resolved_runtime(),
+            "claude-cli"
+        );
+        assert_eq!(
+            config.models().get("executor").unwrap().resolved_runtime(),
+            "copilot-cli"
+        );
+    }
+
+    #[test]
+    fn d79_preset_unknown_is_rejected() {
+        let yaml = assemble("ai:\n  preset: bogus");
+        assert_validation(&yaml, "must be one of cli-defaults");
+    }
+
+    #[test]
+    fn d79_explicit_models_override_preset() {
+        // An explicit `fast` definition beats the preset's `fast`.
+        let yaml = assemble(
+            "ai:\n  preset: cli-defaults\nmodels:\n  fast:\n    runtime: ollama\n    model: llama3.2",
+        );
+        let config = load_yaml(&yaml).expect("preset + override should parse");
+        let fast = config.models().get("fast").expect("fast model");
+        assert_eq!(fast.resolved_runtime(), "ollama");
+        assert_eq!(fast.model(), "llama3.2");
+        // The preset still supplies the other aliases.
+        assert!(config.models().get("strong").is_some());
+    }
+
+    #[test]
+    fn d79_stages_bind_to_roles_and_collect_requires() {
+        let yaml = assemble(
+            "ai:\n  preset: cli-defaults\nstages:\n  plan: strong\n  execute:\n    model: executor\n    requires: [tools]",
+        );
+        let config = load_yaml(&yaml).expect("stages should parse");
+        assert_eq!(config.roles().get("plan"), Some("strong"));
+        assert_eq!(config.roles().get("execute"), Some("executor"));
+        assert_eq!(
+            config.stage_requirements().get("execute"),
+            Some(&vec!["tools".to_owned()])
+        );
+    }
+
+    #[test]
+    fn d79_capabilities_parse() {
+        let yaml = assemble(
+            "models:\n  m:\n    runtime: anthropic-api\n    model: claude-opus-4-8\n    auth_env: ANTHROPIC_API_KEY\n    capabilities:\n      tools: true\n      prompt_cache: false\n      context_window: 200000\nroles:\n  drafter: m",
+        );
+        let config = load_yaml(&yaml).expect("capabilities should parse");
+        let model = config.models().get("m").expect("m model");
+        assert_eq!(model.auth_env(), Some("ANTHROPIC_API_KEY"));
+        let caps = model.capabilities().expect("capabilities present");
+        assert_eq!(caps.declared("tools"), Some(true));
+        assert_eq!(caps.declared("prompt_cache"), Some(false));
+        assert_eq!(caps.declared("vision"), None);
+        assert_eq!(caps.context_window, Some(200_000));
+    }
+
     fn assert_validation(contents: &str, expected: &str) {
         match load_yaml(contents) {
             Err(ConfigError::Validation(message)) => assert!(
@@ -3082,12 +3643,17 @@ state:
         assert_eq!(config.site().name(), "full-site");
         assert_eq!(config.site().prefix(), "full");
         assert_eq!(config.models().as_map().len(), 1);
-        assert_eq!(model.provider(), "azure-openai");
+        assert_eq!(model.provider(), Some("azure-openai"));
+        // No explicit runtime → derived from provider; azure-openai is not a
+        // legacy host alias, so it passes through as its own runtime (D79).
+        assert_eq!(model.runtime(), None);
+        assert_eq!(model.resolved_runtime(), "azure-openai");
         assert_eq!(model.model(), "gpt-5");
         assert_eq!(model.cli(), Some("az ai"));
-        // endpoint/region/deployment/base_url are still accepted on the wire
-        // (the YAML above sets them) but are dropped at finalize per D65, so
-        // they are no longer queryable on ModelDef.
+        // endpoint/base_url are retained post-D79 for non-CLI runtimes; only
+        // region/deployment remain parsed-and-ignored.
+        assert_eq!(model.endpoint(), Some("https://example.test"));
+        assert_eq!(model.base_url(), Some("https://base.example.test"));
         assert_eq!(model.max_tokens(), Some(4096));
         assert_eq!(model.temperature(), Some(0.2));
         assert_eq!(model.cache(), Some(true));

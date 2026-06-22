@@ -1,11 +1,12 @@
-//! `derrick models check` — validate configured models and role bindings
-//! against the curated host catalogue (D65).
+//! `derrick models check` — validate configured models, role bindings, and
+//! stage capability requirements against the runtime registry and host
+//! catalogue (D79, generalising D65).
 //!
 //! The shared [`models_check_core`] is reused by `derrick doctor` and by the
 //! soft (WARN-only) checks emitted at `derrick init` and `derrick run`, so the
 //! three never drift.
 
-use derrick_config::Config;
+use derrick_config::{Config, KNOWN_RUNTIMES, ModelDef, cli_host_for_runtime};
 use derrick_tools::{HostRegistry, ModelChoice, catalogue, parse_model_choice};
 use serde_json::json;
 
@@ -13,9 +14,6 @@ use crate::commands::ModelsArgs;
 use crate::commands::ModelsCommand;
 use crate::exit_code::CliExitCode;
 use crate::output::OutputFormat;
-
-/// The five host CLIs every inference model must route through (D65).
-const HOSTS: [&str; 5] = ["claude", "codex", "copilot", "opencode", "aider"];
 
 /// Severity of a single model-check finding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,23 +67,19 @@ impl ModelCheck {
     }
 }
 
-/// Validates every configured model AND every role binding against the host
-/// catalogue.
+/// Validates every configured model, role binding, and stage requirement
+/// against the runtime registry and host catalogue (D79).
 ///
-/// Two passes (D65):
+/// Three passes:
 ///
-/// 1. **Every configured model** (`config.models()`) is validated on its own,
-///    whether or not a role binds it:
-///    - host not installed → FAIL;
-///    - model id not in the curated catalogue → WARN (never FAIL);
-///    - provider is not one of the five hosts (after the finalize alias remap)
-///      and is not `shell` → FAIL;
-///    - opencode/aider model id lacks a `/` → WARN;
-///    - `shell` → WARN: a legitimate, approved escape hatch, but not a managed
-///      host CLI, so derrick cannot validate its auth/model.
-/// 2. **Every role binding** is checked to resolve to a known model; an unknown
-///    model reference → FAIL. The resolved model itself is not re-validated
-///    here — pass 1 already covered it — so output is not duplicated.
+/// 1. **Every configured model** is validated on its own (whether or not a role
+///    binds it). The runtime decides the rules: a `*-cli` runtime checks host
+///    availability + catalogue (WARN-only on unknown ids); `shell` WARNs; API
+///    and local runtimes check `auth_env`/`base_url`. An unknown runtime FAILs.
+/// 2. **Every role binding** must resolve to a known model (FAIL otherwise).
+/// 3. **Every stage `requires:`** is checked against the bound model's declared
+///    capabilities: explicitly `false` → FAIL; declared `true` → PASS;
+///    undeclared → WARN (never blocks).
 pub(crate) fn models_check_core(config: &Config) -> Vec<ModelCheck> {
     let registry = HostRegistry::with_defaults();
     models_check_core_with(config, &|host| {
@@ -95,18 +89,27 @@ pub(crate) fn models_check_core(config: &Config) -> Vec<ModelCheck> {
     })
 }
 
-/// Catalogue validation with an injectable host-availability probe.
-///
-/// Split out from [`models_check_core`] so tests can supply a deterministic
-/// availability function instead of depending on what is installed on PATH.
+/// Validation with an injectable host-availability probe (real env auth probe).
 fn models_check_core_with(
     config: &Config,
     host_available: &dyn Fn(&str) -> bool,
 ) -> Vec<ModelCheck> {
+    models_check_core_with_probes(config, host_available, &|var| {
+        std::env::var_os(var).is_some()
+    })
+}
+
+/// Validation with injectable host-availability AND env-presence probes, so
+/// tests need not depend on PATH or process environment.
+fn models_check_core_with_probes(
+    config: &Config,
+    host_available: &dyn Fn(&str) -> bool,
+    env_present: &dyn Fn(&str) -> bool,
+) -> Vec<ModelCheck> {
     let mut checks = Vec::new();
 
     // Pass 1: validate every configured model in stable (name-sorted) order.
-    let mut models: Vec<(&str, &derrick_config::ModelDef)> = config
+    let mut models: Vec<(&str, &ModelDef)> = config
         .models()
         .as_map()
         .iter()
@@ -116,17 +119,10 @@ fn models_check_core_with(
 
     for (model_name, model_def) in models {
         let subject = format!("model {model_name}");
-        checks.push(check_model(
-            subject,
-            model_def.provider(),
-            model_def.model(),
-            host_available,
-        ));
+        checks.push(check_model(subject, model_def, host_available, env_present));
     }
 
-    // Pass 2: every role binding must resolve to a known model. The resolved
-    // model is already validated in pass 1, so only the reference is checked
-    // here (no duplicate per-model finding).
+    // Pass 2: every role binding must resolve to a known model.
     let mut roles: Vec<(&str, &str)> = config
         .roles()
         .as_map()
@@ -144,85 +140,158 @@ fn models_check_core_with(
         }
     }
 
+    // Pass 3: stage capability requirements (D79).
+    for (stage, requires) in config.stage_requirements() {
+        let Some(model_name) = config.roles().get(stage) else {
+            continue;
+        };
+        let Some(model_def) = config.models().get(model_name) else {
+            continue; // pass 2 already FAILed the missing binding.
+        };
+        for capability in requires {
+            let subject = format!("stage {stage} requires {capability}");
+            match model_def
+                .capabilities()
+                .and_then(|caps| caps.declared(capability))
+            {
+                Some(true) => checks.push(ModelCheck::pass(
+                    subject,
+                    format!("model `{model_name}` supports `{capability}`"),
+                )),
+                Some(false) => checks.push(ModelCheck::fail(
+                    subject,
+                    format!(
+                        "model `{model_name}` declares `{capability}=false` but stage \
+                         `{stage}` requires it"
+                    ),
+                )),
+                None => checks.push(ModelCheck::warn(
+                    subject,
+                    format!(
+                        "model `{model_name}` does not declare `{capability}`; \
+                         passing through unverified"
+                    ),
+                )),
+            }
+        }
+    }
+
     checks
 }
 
-/// Validates a single configured model's provider + id against the catalogue.
+/// Validates a single configured model, dispatching on its resolved runtime.
 fn check_model(
     subject: String,
-    provider: &str,
+    model_def: &ModelDef,
+    host_available: &dyn Fn(&str) -> bool,
+    env_present: &dyn Fn(&str) -> bool,
+) -> ModelCheck {
+    let runtime = model_def.resolved_runtime();
+
+    // An unknown runtime is a genuine blocker (typo or missing registration).
+    if !KNOWN_RUNTIMES.contains(&runtime.as_str()) {
+        return ModelCheck::fail(subject, format!("runtime `{runtime}` does not exist"));
+    }
+
+    // `shell` is an approved escape hatch, not a managed runtime — can't verify.
+    if runtime == "shell" {
+        return ModelCheck::warn(
+            subject,
+            "shell: unmanaged escape-hatch runtime — derrick cannot validate its auth/model",
+        );
+    }
+
+    match cli_host_for_runtime(&runtime) {
+        Some(host) => check_cli_model(subject, host, &runtime, model_def.model(), host_available),
+        None => check_api_model(subject, &runtime, model_def, env_present),
+    }
+}
+
+/// Validates a CLI-runtime model against host availability + the catalogue.
+fn check_cli_model(
+    subject: String,
+    host: &str,
+    runtime: &str,
     model_id: &str,
     host_available: &dyn Fn(&str) -> bool,
 ) -> ModelCheck {
-    // `shell` is an approved escape hatch, but it is not one of the five
-    // managed host CLIs, so derrick cannot validate its auth or model.
-    if provider == "shell" {
-        return ModelCheck::warn(
-            subject,
-            "shell: unmanaged escape-hatch provider (not a host CLI) — \
-             derrick cannot validate its auth/model",
-        );
-    }
-
-    if !HOSTS.contains(&provider) {
+    // Host binary installed — required even for `auto` (the foreman dispatches
+    // through it, D67).
+    if !host_available(host) {
         return ModelCheck::fail(
             subject,
-            format!(
-                "provider `{provider}` is not one of the five hosts \
-                 (claude, codex, copilot, opencode, aider)"
-            ),
+            format!("runtime `{runtime}` host `{host}` is not installed on PATH"),
         );
     }
 
-    // Rule 1: host binary installed. This runs FIRST — even `auto` requires the
-    // host CLI present, since the foreman dispatches through it (D67). Only the
-    // catalogue model-id validation below is skipped for `auto`.
-    if !host_available(provider) {
-        return ModelCheck::fail(
-            subject,
-            format!("host `{provider}` is not installed on PATH"),
-        );
-    }
-
-    // `auto` (and `auto:<tier>`) is foreman-selected per ticket within the
-    // host, so there is no single id to validate against the catalogue (D67).
-    // The host is present (checked above); only the model-id checks are skipped.
+    // `auto`/`auto:<tier>` is foreman-selected per ticket; no single id to check.
     if matches!(parse_model_choice(model_id), ModelChoice::Auto { .. }) {
         return ModelCheck::pass(
             subject,
-            format!("auto: foreman selects per-ticket within host `{provider}`"),
+            format!("auto: foreman selects per-ticket within runtime `{runtime}`"),
         );
     }
 
-    // Validate the pinned id against the catalogue using the same trimmed form
-    // the dispatch path forwards (parse_model_choice trims), so a quoted,
-    // space-padded pin does not produce a spurious WARN.
     let model_id = model_id.trim();
-
-    // Rule 4: opencode/aider expect provider/model.
-    if (provider == "opencode" || provider == "aider") && !model_id.contains('/') {
+    if (host == "opencode" || host == "aider") && !model_id.contains('/') {
         return ModelCheck::warn(
             subject,
-            format!("host `{provider}` expects a `provider/model` id; `{model_id}` has no `/`"),
+            format!("runtime `{runtime}` expects a `provider/model` id; `{model_id}` has no `/`"),
         );
     }
 
-    // Rule 2: catalogue membership (WARN-only).
-    let normalized = catalogue::normalize(provider, model_id);
-    if catalogue::is_known(provider, &normalized) {
-        ModelCheck::pass(
-            subject,
-            format!("`{model_id}` is a known `{provider}` model"),
-        )
+    let normalized = catalogue::normalize(host, model_id);
+    if catalogue::is_known(host, &normalized) {
+        ModelCheck::pass(subject, format!("`{model_id}` is a known `{host}` model"))
     } else {
         ModelCheck::warn(
             subject,
             format!(
-                "`{model_id}` is not in the curated `{provider}` catalogue; \
+                "`{model_id}` is not in the curated `{host}` catalogue; \
                  passing it through unverified"
             ),
         )
     }
+}
+
+/// Validates an API/local-runtime model: auth + endpoint preconditions (D79).
+fn check_api_model(
+    subject: String,
+    runtime: &str,
+    model_def: &ModelDef,
+    env_present: &dyn Fn(&str) -> bool,
+) -> ModelCheck {
+    let requires_auth = matches!(runtime, "anthropic-api" | "openai-api");
+    match model_def.auth_env() {
+        Some(env) if !env_present(env) => {
+            return ModelCheck::fail(
+                subject,
+                format!("auth env `{env}` is not set for runtime `{runtime}`"),
+            );
+        }
+        None if requires_auth => {
+            return ModelCheck::fail(
+                subject,
+                format!("runtime `{runtime}` requires an `auth_env` naming its API-key env var"),
+            );
+        }
+        _ => {}
+    }
+
+    if runtime == "openai-compatible"
+        && model_def.base_url().is_none()
+        && model_def.endpoint().is_none()
+    {
+        return ModelCheck::fail(
+            subject,
+            "runtime `openai-compatible` requires a `base_url`".to_owned(),
+        );
+    }
+
+    ModelCheck::pass(
+        subject,
+        format!("runtime `{runtime}` configured; model id passed through unverified"),
+    )
 }
 
 /// Number of FAIL-level findings.
@@ -462,12 +531,15 @@ state:
 
     #[test]
     fn unknown_provider_is_fail() {
-        // `azure-openai` is not a host and is not aliased to one.
+        // `azure-openai` is neither a host alias nor a known runtime, so its
+        // derived runtime does not exist — a genuine blocker (D79).
         let config = config_with_model("azure-openai", "gpt-5");
         let checks = models_check_core_with(&config, &|_| true);
-        assert!(checks.iter().any(
-            |c| c.level == CheckLevel::Fail && c.message.contains("not one of the five hosts")
-        ));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.level == CheckLevel::Fail && c.message.contains("does not exist"))
+        );
     }
 
     #[test]
@@ -513,8 +585,8 @@ state:
         assert!(
             checks.iter().any(|c| c.subject == "model extra"
                 && c.level == CheckLevel::Fail
-                && c.message.contains("not one of the five hosts")),
-            "an unbound model with a non-host provider must FAIL"
+                && c.message.contains("does not exist")),
+            "an unbound model with an unknown runtime must FAIL"
         );
     }
 
@@ -541,5 +613,142 @@ state:
         let checks = models_check_core_with(&config, &|_| true);
         assert_eq!(fail_count(&checks), 0);
         assert!(checks.iter().any(|c| c.level == CheckLevel::Pass));
+    }
+
+    /// Loads a config from a custom `models`/`roles`/`stages` top section.
+    fn config_top(top: &str) -> Config {
+        let yaml = format!(
+            r#"
+version: 1
+site:
+  name: test
+  prefix: tst
+{top}
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  assay:
+    enabled: false
+    role: drafter
+    reviewers: [drafter]
+  substrate:
+    backend: none
+    mode: solo
+  copilot:
+    agent_identity: derrick-hand
+pipeline: []
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("derrick.yaml");
+        let mut file = std::fs::File::create(&path).expect("create");
+        file.write_all(yaml.as_bytes()).expect("write");
+        Config::load_from_path(&path).expect("config should load")
+    }
+
+    #[test]
+    fn d79_unknown_runtime_is_fail() {
+        let config = config_top(
+            "models:\n  m:\n    runtime: bogus-runtime\n    model: x\nroles:\n  drafter: m",
+        );
+        let checks = models_check_core_with(&config, &|_| true);
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.level == CheckLevel::Fail && c.message.contains("does not exist"))
+        );
+    }
+
+    #[test]
+    fn d79_api_runtime_without_auth_env_is_fail() {
+        let config = config_top(
+            "models:\n  m:\n    runtime: openai-api\n    model: gpt-5.5\nroles:\n  drafter: m",
+        );
+        let checks = models_check_core_with_probes(&config, &|_| true, &|_| true);
+        assert!(
+            checks.iter().any(
+                |c| c.level == CheckLevel::Fail && c.message.contains("requires an `auth_env`")
+            )
+        );
+    }
+
+    #[test]
+    fn d79_api_runtime_auth_env_unset_is_fail_but_set_is_pass() {
+        let config = config_top(
+            "models:\n  m:\n    runtime: openai-api\n    model: gpt-5.5\n    auth_env: OPENAI_API_KEY\nroles:\n  drafter: m",
+        );
+        let unset = models_check_core_with_probes(&config, &|_| true, &|_| false);
+        assert!(
+            unset
+                .iter()
+                .any(|c| c.level == CheckLevel::Fail && c.message.contains("is not set"))
+        );
+        let set = models_check_core_with_probes(&config, &|_| true, &|_| true);
+        assert_eq!(fail_count(&set), 0);
+        assert!(set.iter().any(|c| c.level == CheckLevel::Pass));
+    }
+
+    #[test]
+    fn d79_ollama_runtime_needs_no_auth() {
+        let config = config_top(
+            "models:\n  m:\n    runtime: ollama\n    model: qwen2.5-coder:32b\nroles:\n  drafter: m",
+        );
+        let checks = models_check_core_with_probes(&config, &|_| false, &|_| false);
+        assert_eq!(fail_count(&checks), 0);
+        assert!(checks.iter().any(|c| c.level == CheckLevel::Pass));
+    }
+
+    #[test]
+    fn d79_openai_compatible_requires_base_url() {
+        let missing = config_top(
+            "models:\n  m:\n    runtime: openai-compatible\n    model: x\nroles:\n  drafter: m",
+        );
+        let checks = models_check_core_with_probes(&missing, &|_| true, &|_| true);
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.level == CheckLevel::Fail && c.message.contains("requires a `base_url`"))
+        );
+
+        let present = config_top(
+            "models:\n  m:\n    runtime: openai-compatible\n    base_url: http://localhost:8000/v1\n    model: x\nroles:\n  drafter: m",
+        );
+        let checks = models_check_core_with_probes(&present, &|_| true, &|_| true);
+        assert_eq!(fail_count(&checks), 0);
+    }
+
+    #[test]
+    fn d79_stage_requirement_checks() {
+        // `tools=false` declared but required → FAIL; `vision` undeclared but
+        // required → WARN; `streaming=true` declared and required → PASS.
+        let config = config_top(
+            "models:\n  m:\n    runtime: anthropic-api\n    model: claude-opus-4-8\n    auth_env: ANTHROPIC_API_KEY\n    capabilities:\n      tools: false\n      streaming: true\nroles:\n  drafter: m\nstages:\n  a:\n    model: m\n    requires: [tools]\n  b:\n    model: m\n    requires: [vision]\n  c:\n    model: m\n    requires: [streaming]",
+        );
+        let checks = models_check_core_with_probes(&config, &|_| true, &|_| true);
+        assert!(
+            checks.iter().any(
+                |c| c.subject.contains("stage a requires tools") && c.level == CheckLevel::Fail
+            )
+        );
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.subject.contains("stage b requires vision")
+                    && c.level == CheckLevel::Warn)
+        );
+        assert!(checks.iter().any(
+            |c| c.subject.contains("stage c requires streaming") && c.level == CheckLevel::Pass
+        ));
     }
 }
