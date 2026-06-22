@@ -284,7 +284,7 @@ fn check_api_model(
     {
         return ModelCheck::fail(
             subject,
-            "runtime `openai-compatible` requires a `base_url`".to_owned(),
+            "runtime `openai-compatible` requires a `base_url` (or `endpoint`)".to_owned(),
         );
     }
 

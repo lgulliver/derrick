@@ -1440,7 +1440,9 @@ fn preset_definition(preset: &str) -> Result<(PresetModels, PresetRoles), Config
             ("executor", "claude-cli", "claude-opus-4-8"),
         ],
         "codex-only" => vec![
-            ("fast", "codex-cli", "gpt-5.5-mini"),
+            // gpt-5.4-mini is the codex light-tier id in the curated catalogue;
+            // using it keeps freshly generated configs WARN-free.
+            ("fast", "codex-cli", "gpt-5.4-mini"),
             ("strong", "codex-cli", "gpt-5.5"),
             ("executor", "codex-cli", "gpt-5.5"),
         ],

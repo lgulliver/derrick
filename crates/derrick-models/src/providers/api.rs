@@ -12,7 +12,6 @@
 //! `auth_env`, read through the [`AuthStore`] so tests can inject them.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use derrick_config::ModelDef;
@@ -70,6 +69,33 @@ impl ApiDialect {
     }
 }
 
+/// How the API key is presented on the wire (D79 `auth_mode`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthMode {
+    /// `Authorization: Bearer <key>` (OpenAI-style default).
+    Bearer,
+    /// `x-api-key: <key>` (Anthropic-style).
+    ApiKeyHeader,
+}
+
+/// Resolves the configured `auth_mode`, defaulting per dialect, and rejecting
+/// unsupported values early so a typo doesn't silently fall back to bearer.
+#[allow(clippy::result_large_err)]
+fn resolve_auth_mode(raw: Option<&str>, dialect: ApiDialect) -> Result<AuthMode, RuntimeError> {
+    match raw {
+        None => Ok(match dialect {
+            ApiDialect::Anthropic => AuthMode::ApiKeyHeader,
+            _ => AuthMode::Bearer,
+        }),
+        Some("bearer") => Ok(AuthMode::Bearer),
+        Some("x-api-key" | "api-key") => Ok(AuthMode::ApiKeyHeader),
+        Some(other) => Err(RuntimeError::new(
+            dialect.runtime_id(),
+            format!("unsupported auth_mode `{other}` (expected `bearer` or `x-api-key`)"),
+        )),
+    }
+}
+
 /// An HTTP-backed model for an API or local runtime.
 pub(crate) struct HttpApiModel {
     dialect: ApiDialect,
@@ -77,6 +103,7 @@ pub(crate) struct HttpApiModel {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    auth_mode: AuthMode,
     params: BTreeMap<String, serde_yaml::Value>,
     cost_hint: Option<CostHint>,
     client: reqwest::Client,
@@ -115,12 +142,16 @@ pub(crate) fn build(
             .map(|secret| secret.expose().to_owned())
     });
 
+    let auth_mode = resolve_auth_mode(model_def.auth_mode(), dialect)
+        .map_err(|error| ModelError::from(error.with_provider(Some(provider.clone()))))?;
+
     Ok(Box::new(HttpApiModel {
         dialect,
         provider,
         base_url: base_url.trim_end_matches('/').to_owned(),
         model: model_def.model().to_owned(),
         api_key,
+        auth_mode,
         params: model_def.params().clone(),
         cost_hint: builtin_cost_hint(model_def.model()),
         client: reqwest::Client::new(),
@@ -196,13 +227,16 @@ impl HttpApiModel {
             .timeout(request.timeout)
             .json(&self.request_body(request));
 
+        // Anthropic always needs its API-version header regardless of auth mode.
         if self.dialect == ApiDialect::Anthropic {
             builder = builder.header("anthropic-version", "2023-06-01");
-            if let Some(key) = &self.api_key {
-                builder = builder.header("x-api-key", key);
-            }
-        } else if let Some(key) = &self.api_key {
-            builder = builder.bearer_auth(key);
+        }
+
+        if let Some(key) = &self.api_key {
+            builder = match self.auth_mode {
+                AuthMode::Bearer => builder.bearer_auth(key),
+                AuthMode::ApiKeyHeader => builder.header("x-api-key", key),
+            };
         }
 
         if self.dialect.requires_auth() && self.api_key.is_none() {
@@ -297,7 +331,7 @@ impl Model for HttpApiModel {
     }
 
     async fn stream(&self, request: CompletionRequest) -> Result<CompletionStream, ModelError> {
-        let timeout_secs = request.timeout.max(Duration::from_secs(0)).as_secs();
+        // The request timeout is applied on the builder in `build_http_request`.
         let builder = self.build_http_request(&request)?;
 
         let response = builder.send().await.map_err(|error| {
@@ -321,7 +355,6 @@ impl Model for HttpApiModel {
         })?;
 
         let (text, tokens_in, tokens_out) = self.parse_response(&body)?;
-        let _ = timeout_secs;
 
         let events = vec![
             Ok(CompletionEvent::Content { text }),
@@ -349,6 +382,8 @@ fn truncate(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn request(prompt: &str) -> CompletionRequest {
@@ -372,10 +407,36 @@ mod tests {
                 .to_owned(),
             model: "test-model".to_owned(),
             api_key: Some("k".to_owned()),
+            auth_mode: resolve_auth_mode(None, dialect).unwrap(),
             params: BTreeMap::new(),
             cost_hint: None,
             client: reqwest::Client::new(),
         }
+    }
+
+    #[test]
+    fn auth_mode_defaults_per_dialect() {
+        assert_eq!(
+            resolve_auth_mode(None, ApiDialect::OpenAi).unwrap(),
+            AuthMode::Bearer
+        );
+        assert_eq!(
+            resolve_auth_mode(None, ApiDialect::Anthropic).unwrap(),
+            AuthMode::ApiKeyHeader
+        );
+    }
+
+    #[test]
+    fn auth_mode_honours_explicit_value_and_rejects_unknown() {
+        assert_eq!(
+            resolve_auth_mode(Some("x-api-key"), ApiDialect::OpenAi).unwrap(),
+            AuthMode::ApiKeyHeader
+        );
+        assert_eq!(
+            resolve_auth_mode(Some("bearer"), ApiDialect::Anthropic).unwrap(),
+            AuthMode::Bearer
+        );
+        assert!(resolve_auth_mode(Some("oauth"), ApiDialect::OpenAi).is_err());
     }
 
     #[test]

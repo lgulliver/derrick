@@ -399,8 +399,17 @@ impl std::error::Error for RuntimeError {}
 
 impl From<RuntimeError> for ModelError {
     fn from(error: RuntimeError) -> Self {
+        // Preserve the serving provider when it differs from the runtime, so a
+        // failure on e.g. `openai-compatible` + provider `openrouter` keeps both
+        // identities for diagnosis (D79).
+        let provider = match error.provider {
+            Some(serving) if serving != error.runtime => {
+                format!("{serving} via {}", error.runtime)
+            }
+            _ => error.runtime,
+        };
         ModelError::Provider {
-            provider: error.runtime,
+            provider,
             message: error.message,
             retryable: error.retryable,
         }
@@ -502,7 +511,6 @@ fn register_cli_runtime(
     host: &'static str,
     make_adapter: fn() -> Arc<dyn derrick_tools::HostAdapter>,
 ) {
-    let _ = runtime;
     registry.register(runtime, move |model_def, auth| {
         providers::host_delegated::build_for_host(host, make_adapter(), model_def, auth)
     });
