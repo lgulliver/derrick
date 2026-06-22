@@ -425,19 +425,38 @@ async fn probe_host_port(base_url: &str) -> Result<(), String> {
 }
 
 /// Parses `host` and `port` from a URL, defaulting the port by scheme. Minimal
-/// (no `url` crate): handles `scheme://host[:port][/path]`.
+/// (no `url` crate): handles `scheme://[user@]host[:port][/path]` and bracketed
+/// IPv6 literals (`[::1]`, `[::1]:11434`). Returns `None` for an empty authority
+/// or an otherwise unparsable form.
 fn parse_host_port(url: &str) -> Option<(String, u16)> {
     let (scheme, rest) = url.split_once("://")?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let authority = authority.rsplit('@').next().unwrap_or(authority); // strip userinfo
+    if authority.is_empty() {
+        return None;
+    }
     let default_port = if scheme.eq_ignore_ascii_case("https") {
         443
     } else {
         80
     };
+    // Bracketed IPv6 literal: `[host]` or `[host]:port`.
+    if let Some(after_open) = authority.strip_prefix('[') {
+        let (host, tail) = after_open.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        let port = match tail.strip_prefix(':') {
+            Some(port) => port.parse().ok()?,
+            None if tail.is_empty() => default_port,
+            None => return None, // junk after the closing bracket
+        };
+        return Some((host.to_owned(), port));
+    }
     match authority.rsplit_once(':') {
         Some((host, port)) if !host.is_empty() => Some((host.to_owned(), port.parse().ok()?)),
-        _ => Some((authority.to_owned(), default_port)),
+        Some(_) => None, // empty host, e.g. ":80"
+        None => Some((authority.to_owned(), default_port)),
     }
 }
 
@@ -897,6 +916,19 @@ state:
             parse_host_port("http://user@host:8080/x"),
             Some(("host".to_owned(), 8080))
         );
+        // Bracketed IPv6, with and without an explicit port.
+        assert_eq!(
+            parse_host_port("http://[::1]/v1"),
+            Some(("::1".to_owned(), 80))
+        );
+        assert_eq!(
+            parse_host_port("http://[::1]:11434"),
+            Some(("::1".to_owned(), 11434))
+        );
+        // Empty / malformed authorities are unparsable, not ("", default).
+        assert_eq!(parse_host_port("http://"), None);
+        assert_eq!(parse_host_port("http:///path"), None);
+        assert_eq!(parse_host_port("http://:80"), None);
         assert_eq!(parse_host_port("not-a-url"), None);
     }
 }
