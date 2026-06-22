@@ -8,7 +8,7 @@ use derrick_memory::{MemoryPaths, MemoryStore, Seeds};
 use derrick_substrate_native::NativeSubstrate;
 
 use crate::commands::InitArgs;
-use crate::commands::init_wizard::{AiConfigurationStyle, WizardInput, WizardSelection};
+use crate::commands::init_wizard::{WizardInput, WizardSelection};
 use crate::exit_code::CliExitCode;
 use crate::ui;
 use crate::{create_dir_all, current_repo_root, message, native_paths, read_config, write_file};
@@ -65,6 +65,117 @@ impl RoleBindings {
     }
 }
 
+/// A runtime-keyed model definition the wizard can write (D79).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelSpec {
+    pub(crate) runtime: String,
+    pub(crate) model: String,
+    pub(crate) base_url: Option<String>,
+    pub(crate) auth_env: Option<String>,
+}
+
+/// How the wizard wants the `models`/`roles`/`ai` sections written (D79).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AiPlan {
+    /// Bind roles to the template's built-in catalogue aliases (claude-opus …).
+    /// The static `models:` block is preserved; only `roles:` is rewritten.
+    Catalogue(RoleBindings),
+    /// Emit `ai.preset: <name>` and drop the static `models:`/`roles:` blocks;
+    /// the preset generates them at load time.
+    Preset(String),
+    /// Replace `models:` with runtime-keyed aliases and bind `roles:` to them.
+    Custom {
+        /// `(alias, spec)` pairs written under `models:`.
+        models: Vec<(String, ModelSpec)>,
+        /// Role bindings referencing the aliases above.
+        roles: RoleBindings,
+    },
+}
+
+impl AiPlan {
+    /// A one-line label for the preview/summary screens.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Catalogue(_) => "catalogue models".to_owned(),
+            Self::Preset(name) => format!("preset: {name}"),
+            Self::Custom { models, .. } => {
+                let runtime = models
+                    .first()
+                    .map_or("custom", |(_, spec)| spec.runtime.as_str());
+                format!("custom runtime: {runtime}")
+            }
+        }
+    }
+
+    /// The role bindings to display in the preview, when the plan pins them.
+    pub(crate) fn roles(&self) -> Option<&RoleBindings> {
+        match self {
+            Self::Catalogue(roles) | Self::Custom { roles, .. } => Some(roles),
+            Self::Preset(_) => None,
+        }
+    }
+
+    /// Whether the plan's role bindings reference the built-in catalogue (and so
+    /// can be validated against it).
+    pub(crate) fn is_catalogue(&self) -> bool {
+        matches!(self, Self::Catalogue(_))
+    }
+}
+
+/// Serialises a [`ModelSpec`] into a `derrick.yaml` model mapping.
+fn model_spec_mapping(spec: &ModelSpec) -> serde_yaml::Mapping {
+    let mut mapping = serde_yaml::Mapping::new();
+    let mut insert = |key: &str, value: &str| {
+        mapping.insert(
+            serde_yaml::Value::String(key.to_owned()),
+            serde_yaml::Value::String(value.to_owned()),
+        );
+    };
+    insert("runtime", &spec.runtime);
+    insert("model", &spec.model);
+    if let Some(base_url) = &spec.base_url {
+        insert("base_url", base_url);
+    }
+    if let Some(auth_env) = &spec.auth_env {
+        insert("auth_env", auth_env);
+    }
+    mapping
+}
+
+/// Applies an [`AiPlan`] to a parsed `derrick.yaml` root mapping (D79).
+fn apply_ai_plan(root: &mut serde_yaml::Mapping, plan: &AiPlan) {
+    let key = |name: &str| serde_yaml::Value::String(name.to_owned());
+    match plan {
+        AiPlan::Catalogue(roles) => {
+            root.insert(
+                key("roles"),
+                serde_yaml::Value::Mapping(role_mapping_value(roles)),
+            );
+        }
+        AiPlan::Preset(name) => {
+            root.remove(key("models"));
+            root.remove(key("roles"));
+            let mut ai = serde_yaml::Mapping::new();
+            ai.insert(key("preset"), serde_yaml::Value::String(name.clone()));
+            root.insert(key("ai"), serde_yaml::Value::Mapping(ai));
+        }
+        AiPlan::Custom { models, roles } => {
+            let mut models_map = serde_yaml::Mapping::new();
+            for (alias, spec) in models {
+                models_map.insert(
+                    serde_yaml::Value::String(alias.clone()),
+                    serde_yaml::Value::Mapping(model_spec_mapping(spec)),
+                );
+            }
+            root.insert(key("models"), serde_yaml::Value::Mapping(models_map));
+            root.insert(
+                key("roles"),
+                serde_yaml::Value::Mapping(role_mapping_value(roles)),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ResolvedInitOptions {
     greenfield: bool,
@@ -79,8 +190,7 @@ struct ResolvedInitOptions {
     constitution: ConstitutionMode,
     vscode: bool,
     jetbrains: bool,
-    roles: RoleBindings,
-    ai_style: AiConfigurationStyle,
+    ai_plan: AiPlan,
     conventional_commits: bool,
     branch_prefix: String,
 }
@@ -213,7 +323,11 @@ fn resolve_options(
             WizardSelection::Cancelled => Ok(None),
             WizardSelection::Proceed(selection) => {
                 validate_prefix(&selection.prefix)?;
-                validate_role_bindings(&selection.roles, &available_model_ids())?;
+                // Only catalogue plans reference the built-in alias set; custom
+                // runtime aliases and presets are validated by `models check`.
+                if let AiPlan::Catalogue(roles) = &selection.ai_plan {
+                    validate_role_bindings(roles, &available_model_ids())?;
+                }
                 Ok(Some(ResolvedInitOptions {
                     greenfield: selection.greenfield,
                     mode: selection.mode,
@@ -227,8 +341,7 @@ fn resolve_options(
                     constitution: selection.constitution,
                     vscode: selection.vscode,
                     jetbrains: selection.jetbrains,
-                    roles: selection.roles,
-                    ai_style: selection.ai_style,
+                    ai_plan: selection.ai_plan,
                     conventional_commits: selection.conventional_commits,
                     branch_prefix: selection.branch_prefix,
                 }))
@@ -253,8 +366,7 @@ fn resolve_options(
         constitution,
         vscode: args.vscode,
         jetbrains: args.jetbrains,
-        roles,
-        ai_style: AiConfigurationStyle::Recommended,
+        ai_plan: AiPlan::Catalogue(roles),
         conventional_commits: true,
         branch_prefix: "feat/".to_owned(),
     }))
@@ -521,7 +633,7 @@ async fn greenfield_init(
     // D55). Best-effort — failures are logged, not propagated.
     seed_memory(repo_root, &config, false);
 
-    print_summary(&config, resolved.ai_style);
+    print_summary(&config, &resolved.ai_plan);
     Ok(CliExitCode::Success)
 }
 
@@ -540,6 +652,18 @@ fn override_plan_yaml(
 }
 
 fn apply_text_overrides(rendered: &str, resolved: &ResolvedInitOptions) -> String {
+    // Preset/Custom plans restructure the models+roles region, so round-trip
+    // through the serde_yaml writer (the brownfield derrick.yaml is derrick-owned
+    // and freshly rendered from the template, so losing comments here is fine).
+    // The catalogue plan stays line-based to preserve the template's comments.
+    if !resolved.ai_plan.is_catalogue() {
+        return apply_config_overrides(rendered, resolved).unwrap_or_else(|_| rendered.to_owned());
+    }
+    let catalogue_roles = resolved
+        .ai_plan
+        .roles()
+        .expect("catalogue plan always pins roles");
+
     let mut lines = rendered
         .lines()
         .map(std::borrow::ToOwned::to_owned)
@@ -568,11 +692,11 @@ fn apply_text_overrides(rendered: &str, resolved: &ResolvedInitOptions) -> Strin
         }
         let replacement = vec![
             "roles:".to_owned(),
-            format!("  proposer: {}", resolved.roles.proposer),
-            format!("  drafter: {}", resolved.roles.drafter),
-            format!("  reviewer: {}", resolved.roles.reviewer),
-            format!("  executor: {}", resolved.roles.executor),
-            format!("  summariser: {}", resolved.roles.summariser),
+            format!("  proposer: {}", catalogue_roles.proposer),
+            format!("  drafter: {}", catalogue_roles.drafter),
+            format!("  reviewer: {}", catalogue_roles.reviewer),
+            format!("  executor: {}", catalogue_roles.executor),
+            format!("  summariser: {}", catalogue_roles.summariser),
         ];
         lines.splice(roles_start..roles_end, replacement);
     }
@@ -612,11 +736,7 @@ fn apply_config_overrides(
         serde_yaml::Value::String(resolved.mode.as_str().to_owned()),
     );
 
-    let roles = role_mapping_value(&resolved.roles);
-    root.insert(
-        serde_yaml::Value::String("roles".to_owned()),
-        serde_yaml::Value::Mapping(roles),
-    );
+    apply_ai_plan(root, &resolved.ai_plan);
 
     if matches!(resolved.mode, crate::commands::InitMode::Crew) {
         ensure_crew_pipeline(root)?;
@@ -1171,7 +1291,7 @@ fn print_skipped(path: &str) {
     println!("{}", ui::skipped(path));
 }
 
-fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
+fn print_summary(config: &Config, ai_plan: &AiPlan) {
     let steps = config
         .pipeline()
         .iter()
@@ -1181,7 +1301,7 @@ fn print_summary(config: &Config, ai_style: AiConfigurationStyle) {
     let name = config.site().name();
     let mode = mode_name(config.tools().substrate().mode());
     let prefix = config.site().prefix();
-    let ai = ai_style.label();
+    let ai = ai_plan.label();
 
     println!();
     println!("{}", ui::ready(name));
@@ -1458,6 +1578,113 @@ mod tests {
         assert_eq!(roles.proposer, "claude-opus");
         assert_eq!(roles.drafter, "claude-sonnet");
         assert_eq!(roles.reviewer, "codex-gpt5");
+    }
+
+    fn resolved_with(plan: AiPlan) -> ResolvedInitOptions {
+        ResolvedInitOptions {
+            greenfield: true,
+            mode: crate::commands::InitMode::Solo,
+            site_name: "t".to_owned(),
+            prefix: "tst".to_owned(),
+            force: false,
+            yes: true,
+            dry_run: false,
+            no_hooks: true,
+            append_agents_md: false,
+            constitution: ConstitutionMode::Reference,
+            vscode: false,
+            jetbrains: false,
+            ai_plan: plan,
+            conventional_commits: true,
+            branch_prefix: "feat/".to_owned(),
+        }
+    }
+
+    /// Renders the bundled template, applies the AI plan, and loads the result
+    /// as a real [`Config`] — proving the generated `derrick.yaml` parses.
+    fn load_rendered(resolved: &ResolvedInitOptions) -> Config {
+        let rendered = render_init_template(
+            INIT_TEMPLATE,
+            InitTemplateVars {
+                site_name: &resolved.site_name,
+                prefix: &resolved.prefix,
+                mode: resolved.mode.as_str(),
+            },
+        );
+        let out = apply_config_overrides(&rendered, resolved).expect("overrides apply");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("derrick.yaml");
+        std::fs::write(&path, out).expect("write");
+        Config::load_from_path(&path).expect("generated config should load")
+    }
+
+    #[test]
+    fn d79_preset_plan_writes_loadable_preset() {
+        let config = load_rendered(&resolved_with(AiPlan::Preset("cli-defaults".to_owned())));
+        assert!(config.models().get("strong").is_some());
+        assert_eq!(
+            config.models().get("executor").unwrap().resolved_runtime(),
+            "copilot-cli"
+        );
+        assert_eq!(config.roles().get("proposer"), Some("strong"));
+        // The static catalogue models are replaced by the preset's aliases.
+        assert!(config.models().get("claude-opus").is_none());
+    }
+
+    #[test]
+    fn d79_custom_plan_writes_runtime_keyed_model() {
+        let plan = AiPlan::Custom {
+            models: vec![(
+                "default".to_owned(),
+                ModelSpec {
+                    runtime: "ollama".to_owned(),
+                    model: "qwen2.5-coder:32b".to_owned(),
+                    base_url: Some("http://localhost:11434".to_owned()),
+                    auth_env: None,
+                },
+            )],
+            roles: RoleBindings::one_model("default".to_owned()),
+        };
+        let config = load_rendered(&resolved_with(plan));
+        let model = config.models().get("default").expect("default model");
+        assert_eq!(model.resolved_runtime(), "ollama");
+        assert_eq!(model.model(), "qwen2.5-coder:32b");
+        assert_eq!(model.base_url(), Some("http://localhost:11434"));
+        assert_eq!(config.roles().get("executor"), Some("default"));
+        assert!(config.models().get("claude-opus").is_none());
+    }
+
+    #[test]
+    fn d79_catalogue_plan_keeps_static_models() {
+        let plan = AiPlan::Catalogue(recommended_role_bindings(
+            crate::commands::InitMode::Solo,
+            &available_model_ids(),
+        ));
+        let config = load_rendered(&resolved_with(plan));
+        assert!(config.models().get("claude-opus").is_some());
+    }
+
+    #[test]
+    fn d79_brownfield_text_path_handles_preset() {
+        // apply_text_overrides delegates non-catalogue plans to the serde writer.
+        let resolved = resolved_with(AiPlan::Preset("local-only".to_owned()));
+        let rendered = render_init_template(
+            INIT_TEMPLATE,
+            InitTemplateVars {
+                site_name: &resolved.site_name,
+                prefix: &resolved.prefix,
+                mode: resolved.mode.as_str(),
+            },
+        );
+        let out = apply_text_overrides(&rendered, &resolved);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("derrick.yaml");
+        std::fs::write(&path, out).expect("write");
+        let config = Config::load_from_path(&path).expect("loads");
+        assert_eq!(
+            config.models().get("strong").unwrap().resolved_runtime(),
+            "ollama"
+        );
     }
 
     #[test]
