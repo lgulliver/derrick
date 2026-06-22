@@ -11,10 +11,12 @@
 //! happens inside [`Model::stream`]. Auth keys come from the env var named by
 //! `auth_env`, read through the [`AuthStore`] so tests can inject them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::pin::Pin;
 
 use async_trait::async_trait;
 use derrick_config::ModelDef;
+use futures::StreamExt;
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -137,6 +139,9 @@ pub(crate) fn build(
         })?;
 
     // Resolve the API key from the env var named by `auth_env`, via AuthStore.
+    // The key is only ever attached as a request header (never serialised into a
+    // body, error message, or log) and `HttpApiModel` deliberately derives no
+    // `Debug`, so it cannot leak through a `{:?}` of the model (D79).
     let api_key = model_def.auth_env().and_then(|env_var| {
         auth.get(&provider, env_var)
             .map(|secret| secret.expose().to_owned())
@@ -169,8 +174,10 @@ impl HttpApiModel {
         }
     }
 
-    /// Builds the JSON request body for the configured dialect.
-    fn request_body(&self, request: &CompletionRequest) -> Value {
+    /// Builds the JSON request body for the configured dialect. When `stream` is
+    /// set, the dialect's streaming flags are added (and, for OpenAI, usage is
+    /// requested in the final SSE chunk).
+    fn request_body(&self, request: &CompletionRequest, stream: bool) -> Value {
         let mut body = Map::new();
         body.insert("model".to_owned(), json!(self.model));
 
@@ -187,15 +194,26 @@ impl HttpApiModel {
                     "max_tokens".to_owned(),
                     json!(request.max_tokens.unwrap_or(4096)),
                 );
+                if stream {
+                    body.insert("stream".to_owned(), json!(true));
+                }
             }
             ApiDialect::Ollama => {
                 body.insert("messages".to_owned(), json!(chat_messages(request)));
-                body.insert("stream".to_owned(), json!(false));
+                body.insert("stream".to_owned(), json!(stream));
             }
             ApiDialect::OpenAi | ApiDialect::OpenAiCompatible => {
                 body.insert("messages".to_owned(), json!(chat_messages(request)));
                 if let Some(max_tokens) = request.max_tokens {
                     body.insert("max_tokens".to_owned(), json!(max_tokens));
+                }
+                if stream {
+                    body.insert("stream".to_owned(), json!(true));
+                    // Ask for a usage block in the terminal chunk.
+                    body.insert(
+                        "stream_options".to_owned(),
+                        json!({ "include_usage": true }),
+                    );
                 }
             }
         }
@@ -225,7 +243,7 @@ impl HttpApiModel {
             .client
             .post(self.endpoint())
             .timeout(request.timeout)
-            .json(&self.request_body(request));
+            .json(&self.request_body(request, true));
 
         // Anthropic always needs its API-version header regardless of auth mode.
         if self.dialect == ApiDialect::Anthropic {
@@ -252,39 +270,212 @@ impl HttpApiModel {
         RuntimeError::new(self.dialect.runtime_id(), message)
             .with_provider(Some(self.provider.clone()))
     }
+}
 
-    /// Parses a dialect-specific response body into `(text, tokens_in, tokens_out)`.
-    #[allow(clippy::result_large_err)]
-    fn parse_response(&self, body: &Value) -> Result<(String, u32, u32), RuntimeError> {
-        let (text, tokens_in, tokens_out) = match self.dialect {
-            ApiDialect::Anthropic => (
-                body.pointer("/content/0/text").and_then(Value::as_str),
-                body.pointer("/usage/input_tokens").and_then(Value::as_u64),
-                body.pointer("/usage/output_tokens").and_then(Value::as_u64),
-            ),
-            ApiDialect::Ollama => (
-                body.pointer("/message/content").and_then(Value::as_str),
-                body.pointer("/prompt_eval_count").and_then(Value::as_u64),
-                body.pointer("/eval_count").and_then(Value::as_u64),
-            ),
-            ApiDialect::OpenAi | ApiDialect::OpenAiCompatible => (
-                body.pointer("/choices/0/message/content")
-                    .and_then(Value::as_str),
-                body.pointer("/usage/prompt_tokens").and_then(Value::as_u64),
-                body.pointer("/usage/completion_tokens")
-                    .and_then(Value::as_u64),
-            ),
-        };
+/// One semantic piece decoded from a streaming chunk.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StreamPiece {
+    /// A delta of generated text.
+    Delta(String),
+    /// Token-usage update (`tokens_in`, `tokens_out`); either may be `None`.
+    Usage(Option<u32>, Option<u32>),
+}
 
-        let text = text
-            .ok_or_else(|| self.error("response did not contain completion text"))?
-            .to_owned();
-        Ok((
-            text,
-            tokens_in.unwrap_or(0) as u32,
-            tokens_out.unwrap_or(0) as u32,
-        ))
+/// Incremental decoder for a dialect's streaming wire format (SSE for the
+/// OpenAI/Anthropic dialects, newline-delimited JSON for Ollama).
+///
+/// Pure and synchronous: [`push`](StreamParser::push) is fed raw response bytes
+/// (which may split a line or a frame mid-chunk) and returns the text deltas
+/// decoded so far, accumulating token usage internally for the final `End`.
+struct StreamParser {
+    dialect: ApiDialect,
+    buf: Vec<u8>,
+    /// Accumulated `data:` payload for the in-progress SSE frame.
+    sse_data: String,
+    /// `event:` type for the in-progress SSE frame (Anthropic).
+    sse_event: Option<String>,
+    tokens_in: u32,
+    tokens_out: u32,
+}
+
+impl StreamParser {
+    fn new(dialect: ApiDialect) -> Self {
+        Self {
+            dialect,
+            buf: Vec::new(),
+            sse_data: String::new(),
+            sse_event: None,
+            tokens_in: 0,
+            tokens_out: 0,
+        }
     }
+
+    fn is_sse(&self) -> bool {
+        !matches!(self.dialect, ApiDialect::Ollama)
+    }
+
+    /// Feeds a chunk of response bytes and returns any text deltas decoded.
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
+        let mut deltas = Vec::new();
+        for line in take_lines(&mut self.buf) {
+            for piece in self.consume_line(&line) {
+                match piece {
+                    StreamPiece::Delta(text) => deltas.push(text),
+                    StreamPiece::Usage(tin, tout) => {
+                        if let Some(tin) = tin {
+                            self.tokens_in = tin;
+                        }
+                        if let Some(tout) = tout {
+                            self.tokens_out = tout;
+                        }
+                    }
+                }
+            }
+        }
+        deltas
+    }
+
+    /// Processes one decoded line, returning the pieces it yields. For SSE this
+    /// buffers `data:`/`event:` fields and only dispatches on a blank line.
+    fn consume_line(&mut self, line: &str) -> Vec<StreamPiece> {
+        if !self.is_sse() {
+            // NDJSON (Ollama): each non-blank line is a complete JSON object.
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return Vec::new();
+            }
+            return serde_json::from_str::<Value>(trimmed)
+                .ok()
+                .map(|json| interpret_ollama(&json))
+                .unwrap_or_default();
+        }
+
+        if line.is_empty() {
+            // SSE frame boundary: dispatch the accumulated frame.
+            let data = std::mem::take(&mut self.sse_data);
+            let event = self.sse_event.take();
+            if data.is_empty() {
+                return Vec::new();
+            }
+            return self.interpret_sse(event.as_deref(), &data);
+        }
+        if let Some(rest) = line.strip_prefix("data:") {
+            if !self.sse_data.is_empty() {
+                self.sse_data.push('\n');
+            }
+            self.sse_data
+                .push_str(rest.strip_prefix(' ').unwrap_or(rest));
+        } else if let Some(rest) = line.strip_prefix("event:") {
+            self.sse_event = Some(rest.strip_prefix(' ').unwrap_or(rest).to_owned());
+        }
+        // Any other field (`:` comments, `id:`, `retry:`) is ignored.
+        Vec::new()
+    }
+
+    fn interpret_sse(&self, event: Option<&str>, data: &str) -> Vec<StreamPiece> {
+        if data == "[DONE]" {
+            return Vec::new();
+        }
+        let Ok(json) = serde_json::from_str::<Value>(data) else {
+            return Vec::new();
+        };
+        match self.dialect {
+            ApiDialect::Anthropic => interpret_anthropic(event, &json),
+            _ => interpret_openai(&json),
+        }
+    }
+
+    /// Final token counts for the `End` event once the byte stream is exhausted.
+    fn totals(&self) -> (u32, u32) {
+        (self.tokens_in, self.tokens_out)
+    }
+}
+
+/// Drains complete `\n`-terminated lines from `buf`, leaving any partial tail.
+/// Trailing `\r`/`\n` are stripped; the returned line may be empty (an SSE frame
+/// boundary).
+fn take_lines(buf: &mut Vec<u8>) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Some(pos) = buf.iter().position(|&byte| byte == b'\n') {
+        let raw: Vec<u8> = buf.drain(..=pos).collect();
+        let mut line = String::from_utf8_lossy(&raw).into_owned();
+        while line.ends_with('\n') || line.ends_with('\r') {
+            line.pop();
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// Interprets one OpenAI streaming chunk (`choices[].delta.content` + `usage`).
+fn interpret_openai(json: &Value) -> Vec<StreamPiece> {
+    let mut pieces = Vec::new();
+    if let Some(text) = json
+        .pointer("/choices/0/delta/content")
+        .and_then(Value::as_str)
+    {
+        if !text.is_empty() {
+            pieces.push(StreamPiece::Delta(text.to_owned()));
+        }
+    }
+    if json.get("usage").is_some_and(|usage| !usage.is_null()) {
+        pieces.push(StreamPiece::Usage(
+            json.pointer("/usage/prompt_tokens")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+            json.pointer("/usage/completion_tokens")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+        ));
+    }
+    pieces
+}
+
+/// Interprets one Anthropic streaming event by its `event:` type.
+fn interpret_anthropic(event: Option<&str>, json: &Value) -> Vec<StreamPiece> {
+    match event {
+        Some("content_block_delta") => json
+            .pointer("/delta/text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(|text| vec![StreamPiece::Delta(text.to_owned())])
+            .unwrap_or_default(),
+        Some("message_start") => vec![StreamPiece::Usage(
+            json.pointer("/message/usage/input_tokens")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+            None,
+        )],
+        Some("message_delta") => vec![StreamPiece::Usage(
+            None,
+            json.pointer("/usage/output_tokens")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+        )],
+        _ => Vec::new(),
+    }
+}
+
+/// Interprets one Ollama NDJSON chunk (`message.content` + final eval counts).
+fn interpret_ollama(json: &Value) -> Vec<StreamPiece> {
+    let mut pieces = Vec::new();
+    if let Some(text) = json.pointer("/message/content").and_then(Value::as_str) {
+        if !text.is_empty() {
+            pieces.push(StreamPiece::Delta(text.to_owned()));
+        }
+    }
+    if json.get("done").and_then(Value::as_bool) == Some(true) {
+        pieces.push(StreamPiece::Usage(
+            json.get("prompt_eval_count")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+            json.get("eval_count")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+        ));
+    }
+    pieces
 }
 
 /// Joins the system + cached-prefix portions of a request into one system blob.
@@ -349,23 +540,75 @@ impl Model for HttpApiModel {
             ));
         }
 
-        let body: Value = response.json().await.map_err(|error| {
-            self.error(format!("invalid JSON response: {error}"))
-                .retryable(false)
-        })?;
+        // Decode the response body incrementally: emit a `Content` event per
+        // text delta as it arrives, then a single `End` once the byte stream is
+        // exhausted (carrying the accumulated token usage).
+        let state = StreamState {
+            // Map to `Vec<u8>` so the boxed stream's item type doesn't name
+            // `bytes::Bytes` (not a direct dependency).
+            bytes: Box::pin(
+                response
+                    .bytes_stream()
+                    .map(|chunk| chunk.map(|b| b.to_vec())),
+            ),
+            parser: StreamParser::new(self.dialect),
+            queue: VecDeque::new(),
+            ended: false,
+            err: self.error("streaming body error"),
+        };
 
-        let (text, tokens_in, tokens_out) = self.parse_response(&body)?;
+        let stream = futures::stream::unfold(state, |mut state| async move {
+            loop {
+                if let Some(event) = state.queue.pop_front() {
+                    return Some((Ok(event), state));
+                }
+                if state.ended {
+                    return None;
+                }
+                match state.bytes.next().await {
+                    Some(Ok(chunk)) => {
+                        for text in state.parser.push(&chunk) {
+                            state.queue.push_back(CompletionEvent::Content { text });
+                        }
+                        // Loop to drain the queue (or pull more bytes).
+                    }
+                    Some(Err(error)) => {
+                        state.ended = true;
+                        let err = state
+                            .err
+                            .clone()
+                            .retryable(error.is_timeout() || error.is_connect());
+                        return Some((Err(ModelError::from(err)), state));
+                    }
+                    None => {
+                        // Byte stream finished — synthesise the terminal event.
+                        state.ended = true;
+                        let (tokens_in, tokens_out) = state.parser.totals();
+                        return Some((
+                            Ok(CompletionEvent::End {
+                                tokens_in,
+                                tokens_out,
+                                finish_reason: FinishReason::Stop,
+                            }),
+                            state,
+                        ));
+                    }
+                }
+            }
+        });
 
-        let events = vec![
-            Ok(CompletionEvent::Content { text }),
-            Ok(CompletionEvent::End {
-                tokens_in,
-                tokens_out,
-                finish_reason: FinishReason::Stop,
-            }),
-        ];
-        Ok(Box::pin(futures::stream::iter(events)))
+        Ok(Box::pin(stream))
     }
+}
+
+/// Carried state for the streaming `unfold` over the response byte stream.
+struct StreamState {
+    bytes: Pin<Box<dyn futures::Stream<Item = reqwest::Result<Vec<u8>>> + Send>>,
+    parser: StreamParser,
+    queue: VecDeque<CompletionEvent>,
+    ended: bool,
+    /// Pre-built error template (carries runtime + provider) for byte-stream IO.
+    err: RuntimeError,
 }
 
 /// Truncates `text` to at most `max` bytes on a char boundary, for error detail.
@@ -441,7 +684,7 @@ mod tests {
 
     #[test]
     fn openai_body_has_messages_and_model() {
-        let body = model(ApiDialect::OpenAi).request_body(&request("hello"));
+        let body = model(ApiDialect::OpenAi).request_body(&request("hello"), false);
         assert_eq!(body["model"], json!("test-model"));
         assert_eq!(body["messages"][0]["role"], json!("system"));
         assert_eq!(body["messages"][1]["content"], json!("hello"));
@@ -452,17 +695,27 @@ mod tests {
 
     #[test]
     fn anthropic_body_uses_system_and_max_tokens() {
-        let body = model(ApiDialect::Anthropic).request_body(&request("hi"));
+        let body = model(ApiDialect::Anthropic).request_body(&request("hi"), false);
         assert_eq!(body["system"], json!("be terse"));
         assert_eq!(body["messages"][0]["content"], json!("hi"));
         assert_eq!(body["max_tokens"], json!(256));
     }
 
     #[test]
-    fn ollama_body_sets_stream_false() {
-        let body = model(ApiDialect::Ollama).request_body(&request("yo"));
-        assert_eq!(body["stream"], json!(false));
-        assert_eq!(body["messages"][1]["content"], json!("yo"));
+    fn ollama_body_stream_flag_tracks_arg() {
+        let m = model(ApiDialect::Ollama);
+        assert_eq!(
+            m.request_body(&request("yo"), false)["stream"],
+            json!(false)
+        );
+        assert_eq!(m.request_body(&request("yo"), true)["stream"], json!(true));
+    }
+
+    #[test]
+    fn streaming_body_requests_openai_usage() {
+        let body = model(ApiDialect::OpenAi).request_body(&request("x"), true);
+        assert_eq!(body["stream"], json!(true));
+        assert_eq!(body["stream_options"]["include_usage"], json!(true));
     }
 
     #[test]
@@ -472,47 +725,86 @@ mod tests {
             "temperature".to_owned(),
             serde_yaml::Value::Number(serde_yaml::Number::from(0.9)),
         );
-        let body = m.request_body(&request("x"));
+        let body = m.request_body(&request("x"), false);
         assert_eq!(body["temperature"], json!(0.9));
     }
 
+    /// Drains a parser over a sequence of byte chunks into `(text, in, out)`.
+    fn drain(dialect: ApiDialect, chunks: &[&str]) -> (String, u32, u32) {
+        let mut parser = StreamParser::new(dialect);
+        let mut text = String::new();
+        for chunk in chunks {
+            for delta in parser.push(chunk.as_bytes()) {
+                text.push_str(&delta);
+            }
+        }
+        let (tin, tout) = parser.totals();
+        (text, tin, tout)
+    }
+
     #[test]
-    fn parse_openai_response() {
-        let body = json!({
-            "choices": [{ "message": { "content": "hi there" } }],
-            "usage": { "prompt_tokens": 5, "completion_tokens": 2 }
-        });
-        let (text, tin, tout) = model(ApiDialect::OpenAi).parse_response(&body).unwrap();
-        assert_eq!(text, "hi there");
+    fn openai_sse_stream_accumulates_deltas_and_usage() {
+        let (text, tin, tout) = drain(
+            ApiDialect::OpenAi,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
+                "data: [DONE]\n\n",
+            ],
+        );
+        assert_eq!(text, "Hello");
         assert_eq!((tin, tout), (5, 2));
     }
 
     #[test]
-    fn parse_anthropic_response() {
-        let body = json!({
-            "content": [{ "type": "text", "text": "ok" }],
-            "usage": { "input_tokens": 9, "output_tokens": 1 }
-        });
-        let (text, tin, tout) = model(ApiDialect::Anthropic).parse_response(&body).unwrap();
+    fn sse_frame_split_across_chunks_is_reassembled() {
+        // A single data frame delivered in two byte chunks must decode once.
+        let (text, _, _) = drain(
+            ApiDialect::OpenAi,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"con",
+                "tent\":\"split\"}}]}\n\n",
+            ],
+        );
+        assert_eq!(text, "split");
+    }
+
+    #[test]
+    fn anthropic_sse_stream_uses_event_types() {
+        let (text, tin, tout) = drain(
+            ApiDialect::Anthropic,
+            &[
+                "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":9}}}\n\n",
+                "event: content_block_delta\ndata: {\"delta\":{\"text\":\"ok\"}}\n\n",
+                "event: message_delta\ndata: {\"usage\":{\"output_tokens\":1}}\n\n",
+                "event: message_stop\ndata: {}\n\n",
+            ],
+        );
         assert_eq!(text, "ok");
         assert_eq!((tin, tout), (9, 1));
     }
 
     #[test]
-    fn parse_ollama_response() {
-        let body = json!({
-            "message": { "content": "local says hi" },
-            "prompt_eval_count": 3, "eval_count": 7
-        });
-        let (text, tin, tout) = model(ApiDialect::Ollama).parse_response(&body).unwrap();
+    fn ollama_ndjson_stream_accumulates_and_reads_final_counts() {
+        let (text, tin, tout) = drain(
+            ApiDialect::Ollama,
+            &[
+                "{\"message\":{\"content\":\"local \"},\"done\":false}\n",
+                "{\"message\":{\"content\":\"says hi\"},\"done\":false}\n",
+                "{\"message\":{\"content\":\"\"},\"done\":true,\"prompt_eval_count\":3,\"eval_count\":7}\n",
+            ],
+        );
         assert_eq!(text, "local says hi");
         assert_eq!((tin, tout), (3, 7));
     }
 
     #[test]
-    fn missing_text_is_error() {
-        let body = json!({ "choices": [] });
-        assert!(model(ApiDialect::OpenAi).parse_response(&body).is_err());
+    fn take_lines_keeps_partial_tail() {
+        let mut buf = b"a\nb\nc".to_vec();
+        let lines = take_lines(&mut buf);
+        assert_eq!(lines, vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(buf, b"c"); // partial line retained
     }
 
     #[test]
