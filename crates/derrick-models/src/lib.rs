@@ -548,7 +548,10 @@ pub async fn complete_with_retry(
         match model.complete(request.clone()).await {
             Ok(response) => return Ok(response),
             Err(error) if error.is_retryable() && attempt < max_attempts => {
-                let backoff = Duration::from_millis(200 * 2u64.pow(attempt - 1));
+                // Cap the exponent (overflow-safe) and the total backoff at 30s
+                // so a large `max_attempts` can't produce an unbounded sleep.
+                let exponent = (attempt - 1).min(8);
+                let backoff = Duration::from_millis((200u64 << exponent).min(30_000));
                 tokio::time::sleep(backoff).await;
                 attempt += 1;
             }
@@ -629,7 +632,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_succeeds_after_retryable_failures() {
         use std::sync::atomic::{AtomicU32, Ordering};
         let model = FlakyModel {
@@ -655,7 +658,7 @@ mod tests {
         assert_eq!(model.attempts.load(Ordering::SeqCst), 1); // no retry
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_gives_up_after_max_attempts() {
         use std::sync::atomic::{AtomicU32, Ordering};
         let model = FlakyModel {

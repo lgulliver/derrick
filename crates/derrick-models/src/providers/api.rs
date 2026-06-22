@@ -319,21 +319,53 @@ impl StreamParser {
         self.buf.extend_from_slice(chunk);
         let mut deltas = Vec::new();
         for line in take_lines(&mut self.buf) {
-            for piece in self.consume_line(&line) {
-                match piece {
-                    StreamPiece::Delta(text) => deltas.push(text),
-                    StreamPiece::Usage(tin, tout) => {
-                        if let Some(tin) = tin {
-                            self.tokens_in = tin;
-                        }
-                        if let Some(tout) = tout {
-                            self.tokens_out = tout;
-                        }
+            let pieces = self.consume_line(&line);
+            self.ingest(pieces, &mut deltas);
+        }
+        deltas
+    }
+
+    /// Flushes any buffered partial line / dangling SSE frame at end-of-stream,
+    /// returning the final deltas. Servers may close without a trailing newline
+    /// or SSE blank-line terminator, so the last delta/usage would otherwise be
+    /// lost (and token totals left incomplete).
+    fn finish(&mut self) -> Vec<String> {
+        let mut deltas = Vec::new();
+        // A trailing partial line (no terminating `\n`).
+        if !self.buf.is_empty() {
+            let raw = std::mem::take(&mut self.buf);
+            let line = String::from_utf8_lossy(&raw)
+                .trim_end_matches(['\n', '\r'])
+                .to_owned();
+            let pieces = self.consume_line(&line);
+            self.ingest(pieces, &mut deltas);
+        }
+        // A dangling SSE frame whose terminating blank line never arrived.
+        if self.is_sse() && !self.sse_data.is_empty() {
+            let data = std::mem::take(&mut self.sse_data);
+            let event = self.sse_event.take();
+            let pieces = self.interpret_sse(event.as_deref(), &data);
+            self.ingest(pieces, &mut deltas);
+        }
+        deltas
+    }
+
+    /// Routes decoded pieces: text deltas are collected, usage updates the
+    /// running token totals.
+    fn ingest(&mut self, pieces: Vec<StreamPiece>, deltas: &mut Vec<String>) {
+        for piece in pieces {
+            match piece {
+                StreamPiece::Delta(text) => deltas.push(text),
+                StreamPiece::Usage(tin, tout) => {
+                    if let Some(tin) = tin {
+                        self.tokens_in = tin;
+                    }
+                    if let Some(tout) = tout {
+                        self.tokens_out = tout;
                     }
                 }
             }
         }
-        deltas
     }
 
     /// Processes one decoded line, returning the pieces it yields. For SSE this
@@ -345,10 +377,18 @@ impl StreamParser {
             if trimmed.is_empty() {
                 return Vec::new();
             }
-            return serde_json::from_str::<Value>(trimmed)
-                .ok()
-                .map(|json| interpret_ollama(&json))
-                .unwrap_or_default();
+            return match serde_json::from_str::<Value>(trimmed) {
+                Ok(json) => interpret_ollama(&json),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "derrick_models::api",
+                        runtime = self.dialect.runtime_id(),
+                        %error,
+                        "dropping unparseable NDJSON stream line"
+                    );
+                    Vec::new()
+                }
+            };
         }
 
         if line.is_empty() {
@@ -377,8 +417,20 @@ impl StreamParser {
         if data == "[DONE]" {
             return Vec::new();
         }
-        let Ok(json) = serde_json::from_str::<Value>(data) else {
-            return Vec::new();
+        let json = match serde_json::from_str::<Value>(data) {
+            Ok(json) => json,
+            Err(error) => {
+                // Not fatal — providers occasionally emit non-JSON keepalive
+                // frames — but log it so a truncated/error payload isn't lost
+                // silently (the HTTP status guard already rejects error pages).
+                tracing::warn!(
+                    target: "derrick_models::api",
+                    runtime = self.dialect.runtime_id(),
+                    %error,
+                    "dropping unparseable SSE data frame"
+                );
+                return Vec::new();
+            }
         };
         match self.dialect {
             ApiDialect::Anthropic => interpret_anthropic(event, &json),
@@ -574,24 +626,29 @@ impl Model for HttpApiModel {
                     }
                     Some(Err(error)) => {
                         state.ended = true;
-                        let err = state
-                            .err
-                            .clone()
-                            .retryable(error.is_timeout() || error.is_connect());
+                        // Carry the underlying error detail (safe — reqwest's
+                        // Display does not include request headers).
+                        let mut err = state.err.clone();
+                        err.message = format!("streaming body error: {error}");
+                        err.retryable = error.is_timeout() || error.is_connect();
                         return Some((Err(ModelError::from(err)), state));
                     }
                     None => {
-                        // Byte stream finished — synthesise the terminal event.
-                        state.ended = true;
-                        let (tokens_in, tokens_out) = state.parser.totals();
-                        return Some((
-                            Ok(CompletionEvent::End {
+                        // Byte stream finished — flush any buffered partial
+                        // line/frame, then synthesise the terminal event. Queue
+                        // both so the loop drains them in order.
+                        if !state.ended {
+                            for text in state.parser.finish() {
+                                state.queue.push_back(CompletionEvent::Content { text });
+                            }
+                            let (tokens_in, tokens_out) = state.parser.totals();
+                            state.queue.push_back(CompletionEvent::End {
                                 tokens_in,
                                 tokens_out,
                                 finish_reason: FinishReason::Stop,
-                            }),
-                            state,
-                        ));
+                            });
+                            state.ended = true;
+                        }
                     }
                 }
             }
@@ -729,7 +786,8 @@ mod tests {
         assert_eq!(body["temperature"], json!(0.9));
     }
 
-    /// Drains a parser over a sequence of byte chunks into `(text, in, out)`.
+    /// Drains a parser over a sequence of byte chunks into `(text, in, out)`,
+    /// then flushes — mirroring how `stream()` drives the parser at end-of-stream.
     fn drain(dialect: ApiDialect, chunks: &[&str]) -> (String, u32, u32) {
         let mut parser = StreamParser::new(dialect);
         let mut text = String::new();
@@ -738,8 +796,26 @@ mod tests {
                 text.push_str(&delta);
             }
         }
+        for delta in parser.finish() {
+            text.push_str(&delta);
+        }
         let (tin, tout) = parser.totals();
         (text, tin, tout)
+    }
+
+    #[test]
+    fn stream_without_trailing_newline_is_flushed() {
+        // Server closes mid-frame with no terminating blank line: the final
+        // delta and usage must still be emitted via `finish()`.
+        let (text, tin, tout) = drain(
+            ApiDialect::OpenAi,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}",
+            ],
+        );
+        assert_eq!(text, "tail");
+        assert_eq!((tin, tout), (1, 1));
     }
 
     #[test]
