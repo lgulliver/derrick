@@ -529,6 +529,36 @@ impl ModelCapabilities {
     }
 }
 
+/// Returns known-good capability defaults for a well-known model id, matched by
+/// family substring (D79). Lets a stage `requires:` check pass for a capable
+/// model without the user hand-declaring `capabilities:`. Unknown / local models
+/// return all `None` (undeclared → WARN, never FAIL); a model's own declared
+/// capabilities always take precedence over these defaults.
+pub fn builtin_capabilities(model: &str) -> ModelCapabilities {
+    let id = model.to_ascii_lowercase();
+    let caps = |tools, vision, prompt_cache| ModelCapabilities {
+        streaming: Some(true),
+        tools: Some(tools),
+        json_mode: Some(true),
+        vision: Some(vision),
+        prompt_cache: Some(prompt_cache),
+        context_window: None,
+        max_output_tokens: None,
+    };
+    if id.contains("claude") {
+        caps(true, true, true)
+    } else if id.contains("gpt-5")
+        || id.contains("gpt-4o")
+        || id.contains("gpt-4.1")
+        || id.contains("gemini")
+    {
+        caps(true, true, false)
+    } else {
+        // Local / unknown models: assume nothing.
+        ModelCapabilities::default()
+    }
+}
+
 /// Role bindings keyed by role name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoleBindings(HashMap<String, String>);
@@ -3026,6 +3056,19 @@ state:
             config.stage_requirements().get("execute"),
             Some(&vec!["tools".to_owned()])
         );
+    }
+
+    #[test]
+    fn d79_builtin_capabilities_by_family() {
+        assert_eq!(builtin_capabilities("claude-opus-4-8").tools, Some(true));
+        assert_eq!(
+            builtin_capabilities("claude-opus-4-8").prompt_cache,
+            Some(true)
+        );
+        assert_eq!(builtin_capabilities("gpt-5.5").tools, Some(true));
+        assert_eq!(builtin_capabilities("gpt-5.5").prompt_cache, Some(false));
+        // Unknown / local model: nothing assumed.
+        assert_eq!(builtin_capabilities("qwen2.5-coder:32b").tools, None);
     }
 
     #[test]
