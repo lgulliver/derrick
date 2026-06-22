@@ -747,13 +747,13 @@ mod tests {
         let (text, tin, tout) = drain(
             ApiDialect::OpenAi,
             &[
-                "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
-                "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi \"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"there\"}}]}\n\n",
                 "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
                 "data: [DONE]\n\n",
             ],
         );
-        assert_eq!(text, "Hello");
+        assert_eq!(text, "hi there");
         assert_eq!((tin, tout), (5, 2));
     }
 
