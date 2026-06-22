@@ -414,7 +414,7 @@ fn endpoint_base_url(runtime: &str, model_def: &ModelDef) -> Option<String> {
 /// Attempts a TCP connection to the `host:port` parsed from `base_url`, with a
 /// short timeout. Avoids an HTTP-client dependency in the CLI crate.
 async fn probe_host_port(base_url: &str) -> Result<(), String> {
-    let (host, port) = parse_host_port(base_url).ok_or_else(|| "unparseable URL".to_owned())?;
+    let (host, port) = parse_host_port(base_url).ok_or_else(|| "unparsable URL".to_owned())?;
     let addr = format!("{host}:{port}");
     let connect = tokio::net::TcpStream::connect(&addr);
     match tokio::time::timeout(std::time::Duration::from_secs(3), connect).await {
