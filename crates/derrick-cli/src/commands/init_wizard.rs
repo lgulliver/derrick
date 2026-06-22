@@ -201,7 +201,7 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
                 0,
             ));
             let (runtime, default_model) = CLI_RUNTIMES[runtime_index];
-            let model = ask!(ask_text("Model id (or `auto`)", default_model, false));
+            let model = ask!(ask_required_text("Model id (or `auto`)", default_model));
             single_runtime_plan(runtime, &model, None, None)
         }
         // 3. Choose per stage → catalogue alias per role (unchanged mechanism).
@@ -240,7 +240,7 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
                 0,
             ));
             let (runtime, default_auth_env) = API_RUNTIMES[runtime_index];
-            let model = ask!(ask_text("Model id", "", false));
+            let model = ask!(ask_required_text("Model id", ""));
             let base_url = ask!(ask_text(
                 "Base URL (blank for the provider default)",
                 "",
@@ -261,7 +261,7 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
             } else {
                 ("openai-compatible", "http://localhost:8000/v1")
             };
-            let model = ask!(ask_text("Model id", "qwen2.5-coder:32b", false));
+            let model = ask!(ask_required_text("Model id", "qwen2.5-coder:32b"));
             let base_url = ask!(ask_text("Base URL", default_base_url, false));
             single_runtime_plan(runtime, &model, non_empty(base_url), None)
         }
@@ -564,6 +564,23 @@ fn ask_text(
             Err(error) => Ok(Validation::Invalid(error.to_string().into())),
         });
     }
+    inquire_opt(text.prompt())
+}
+
+/// A free-text prompt that rejects a blank/whitespace-only answer, re-asking
+/// until a non-empty value is entered. Used for model ids (D79): an empty id
+/// would otherwise produce `model: ""` in the generated config and fail later
+/// in a confusing way.
+fn ask_required_text(prompt: &str, default: &str) -> Result<Option<String>, crate::CliError> {
+    let text = Text::new(prompt)
+        .with_default(default)
+        .with_validator(|input: &str| {
+            if input.trim().is_empty() {
+                Ok(Validation::Invalid("a value is required".into()))
+            } else {
+                Ok(Validation::Valid)
+            }
+        });
     inquire_opt(text.prompt())
 }
 

@@ -646,18 +646,23 @@ fn override_plan_yaml(
         .iter_mut()
         .find(|write| write.path == Path::new("derrick.yaml"))
     {
-        write.content = apply_text_overrides(&write.content, resolved);
+        write.content = apply_text_overrides(&write.content, resolved)?;
     }
     Ok(())
 }
 
-fn apply_text_overrides(rendered: &str, resolved: &ResolvedInitOptions) -> String {
+fn apply_text_overrides(
+    rendered: &str,
+    resolved: &ResolvedInitOptions,
+) -> Result<String, crate::CliError> {
     // Preset/Custom plans restructure the models+roles region, so round-trip
     // through the serde_yaml writer (the brownfield derrick.yaml is derrick-owned
     // and freshly rendered from the template, so losing comments here is fine).
     // The catalogue plan stays line-based to preserve the template's comments.
     if !resolved.ai_plan.is_catalogue() {
-        return apply_config_overrides(rendered, resolved).unwrap_or_else(|_| rendered.to_owned());
+        // Propagate rather than silently returning the unmodified template — a
+        // swallowed error would write a config missing the chosen runtime.
+        return apply_config_overrides(rendered, resolved);
     }
     let catalogue_roles = resolved
         .ai_plan
@@ -716,7 +721,7 @@ fn apply_text_overrides(rendered: &str, resolved: &ResolvedInitOptions) -> Strin
         }
     }
 
-    format!("{}\n", lines.join("\n"))
+    Ok(format!("{}\n", lines.join("\n")))
 }
 
 fn apply_config_overrides(
@@ -1676,7 +1681,7 @@ mod tests {
                 mode: resolved.mode.as_str(),
             },
         );
-        let out = apply_text_overrides(&rendered, &resolved);
+        let out = apply_text_overrides(&rendered, &resolved).expect("overrides apply");
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("derrick.yaml");
         std::fs::write(&path, out).expect("write");
