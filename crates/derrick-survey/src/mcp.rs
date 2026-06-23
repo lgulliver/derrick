@@ -6,11 +6,11 @@
 //! dirty, and (3) a connect-time incremental build before the first query.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
 use rmcp::service::ServiceExt;
 use rmcp::transport::stdio;
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
@@ -18,9 +18,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::model::BuildOptions;
+use crate::tools;
 use crate::{Survey, SurveyError};
-
-const DEFAULT_LIMIT: usize = 20;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct QueryParams {
@@ -63,13 +62,7 @@ impl SurveyServer {
         &self,
         params: Parameters<QueryParams>,
     ) -> Result<CallToolResult, McpError> {
-        let limit = params.0.limit.unwrap_or(DEFAULT_LIMIT);
-        let hits = self
-            .survey
-            .search(&params.0.query, limit)
-            .await
-            .map_err(internal)?;
-        self.respond(&hits).await
+        tools::answer_search(&self.survey, &self.dirty, &params.0.query, params.0.limit).await
     }
 
     #[tool(
@@ -80,13 +73,7 @@ impl SurveyServer {
         &self,
         params: Parameters<QueryParams>,
     ) -> Result<CallToolResult, McpError> {
-        let limit = params.0.limit.unwrap_or(DEFAULT_LIMIT);
-        let context = self
-            .survey
-            .context(&params.0.query, limit)
-            .await
-            .map_err(internal)?;
-        self.respond(&context).await
+        tools::answer_context(&self.survey, &self.dirty, &params.0.query, params.0.limit).await
     }
 
     #[tool(description = "Show the direct callers and callees of a symbol — its \
@@ -96,12 +83,7 @@ impl SurveyServer {
         &self,
         params: Parameters<ImpactParams>,
     ) -> Result<CallToolResult, McpError> {
-        let impact = self
-            .survey
-            .impact(&params.0.symbol)
-            .await
-            .map_err(internal)?;
-        self.respond(&impact).await
+        tools::answer_impact(&self.survey, &self.dirty, &params.0.symbol).await
     }
 
     #[tool(
@@ -111,42 +93,7 @@ impl SurveyServer {
         `last_build_ts` (Unix seconds)."
     )]
     async fn derrick_survey_status(&self) -> Result<CallToolResult, McpError> {
-        let rebuilding = self.dirty.load(Ordering::Relaxed);
-        let status = self
-            .survey
-            .status_with_flag(rebuilding)
-            .await
-            .map_err(internal)?;
-        self.respond(&status).await
-    }
-
-    /// Serialize a result to JSON, prefixing a staleness banner only when the
-    /// watcher has flagged the index dirty (so the common path stays cheap).
-    async fn respond<T: serde::Serialize>(&self, value: &T) -> Result<CallToolResult, McpError> {
-        let mut contents = Vec::new();
-        let rebuilding = self.dirty.load(Ordering::Relaxed);
-        if rebuilding {
-            if let Ok(status) = self.survey.status_with_flag(true).await {
-                if !status.pending.is_empty() {
-                    let sample: Vec<&str> = status
-                        .pending
-                        .iter()
-                        .take(10)
-                        .map(|p| p.path.as_str())
-                        .collect();
-                    contents.push(Content::text(format!(
-                        "STALE: {} file(s) differ from the index (e.g. {}). \
-                         A rebuild is in progress; Read these files directly if you need current contents.",
-                        status.pending.len(),
-                        sample.join(", ")
-                    )));
-                }
-            }
-        }
-        let json = serde_json::to_string_pretty(value)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        contents.push(Content::text(json));
-        Ok(CallToolResult::success(contents))
+        tools::answer_status(&self.survey, &self.dirty).await
     }
 }
 
@@ -168,10 +115,6 @@ impl ServerHandler for SurveyServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info
     }
-}
-
-fn internal(error: SurveyError) -> McpError {
-    McpError::internal_error(error.to_string(), None)
 }
 
 /// Run the MCP server over stdio until the client disconnects.
