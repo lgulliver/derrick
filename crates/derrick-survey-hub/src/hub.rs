@@ -42,6 +42,26 @@ pub struct WorkspaceEntry {
     refresh_lock: Arc<Mutex<()>>,
 }
 
+/// RAII guard that arms the `dirty` banner for the duration of a rebuild and
+/// clears it on drop. Using a guard (rather than a manual `store(false)` after
+/// the `.await`) keeps the flag correct even if the rebuild future is cancelled
+/// mid-await — otherwise a dropped request would leave the workspace marked as
+/// rebuilding forever.
+struct DirtyGuard<'a>(&'a AtomicBool);
+
+impl<'a> DirtyGuard<'a> {
+    fn arm(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Relaxed);
+        Self(flag)
+    }
+}
+
+impl Drop for DirtyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 impl WorkspaceEntry {
     /// Ensure the index is fresh enough to answer a query, honouring `ttl`.
     ///
@@ -85,10 +105,8 @@ impl WorkspaceEntry {
                 pending = status.pending.len(),
                 "survey hub poll-on-query rebuild"
             );
-            self.dirty.store(true, Ordering::Relaxed);
-            let result = self.survey.build(BuildOptions::default()).await;
-            self.dirty.store(false, Ordering::Relaxed);
-            result?;
+            let _dirty = DirtyGuard::arm(&self.dirty);
+            self.survey.build(BuildOptions::default()).await?;
             tracing::info!(workspace = %self.id, "survey hub rebuilt workspace (poll-on-query)");
         }
 
@@ -102,11 +120,10 @@ impl WorkspaceEntry {
     pub async fn force_refresh(&self) -> Result<IndexStatus, SurveyError> {
         let _refresh = self.refresh_lock.lock().await;
         tracing::info!(workspace = %self.id, "survey hub forced refresh");
-        self.dirty.store(true, Ordering::Relaxed);
-        let result: Result<BuildReport, SurveyError> =
-            self.survey.build(BuildOptions::default()).await;
-        self.dirty.store(false, Ordering::Relaxed);
-        result?;
+        let _report: BuildReport = {
+            let _dirty = DirtyGuard::arm(&self.dirty);
+            self.survey.build(BuildOptions::default()).await?
+        };
         *self.last_checked.lock().await = Instant::now();
         self.survey.status().await
     }
