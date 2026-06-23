@@ -272,12 +272,42 @@ impl WorkspaceEntry {
 
     /// Open a fresh [`Survey`] over the prebuilt `.db` and atomically swap it in,
     /// dropping the old handle. Arms the banner for the duration of the swap.
+    ///
+    /// Guards against a time-of-check/time-of-use race: a producer that
+    /// atomically replaces `db_path` *between* the open and the stat would leave
+    /// us serving the older DB while `last_pushed_stat` records the newer file —
+    /// so every later probe would see "unchanged" and never hot-swap the newer
+    /// index. We re-open until the stat is stable across the open (bounded), so
+    /// the recorded stat always matches the served DB. A perpetually-churning
+    /// file falls back to recording the pre-open stat, which simply biases the
+    /// next probe toward reloading again rather than skipping.
     async fn reload_pushed(&self, db_path: &std::path::Path) -> Result<(), SurveyError> {
+        const MAX_TRIES: usize = 5;
         let _dirty = DirtyGuard::arm(&self.dirty);
-        let fresh = open_pushed_survey(db_path).await?;
-        // Record the stat we just loaded *before* swapping, so a concurrent
-        // probe after the swap compares against the right baseline.
-        *self.last_pushed_stat.lock().await = stat_db(db_path);
+        let mut chosen: Option<(Survey, Option<(u64, u128)>)> = None;
+        for _ in 0..MAX_TRIES {
+            let before = stat_db(db_path);
+            let fresh = open_pushed_survey(db_path).await?;
+            let after = stat_db(db_path);
+            if before == after {
+                // Stable across the open: the recorded stat matches this DB.
+                chosen = Some((fresh, after));
+                break;
+            }
+            // Replaced mid-open: keep this handle but record the pre-open stat so
+            // the next probe still sees a difference and reloads again.
+            chosen = Some((fresh, before));
+            tracing::debug!(
+                workspace = %self.id,
+                source = "pushed",
+                db = %db_path.display(),
+                "survey hub pushed db changed during reload; retrying"
+            );
+        }
+        let (fresh, loaded_stat) = chosen.expect("the reload loop runs at least once");
+        // Record the stat we loaded *before* swapping, so a concurrent probe
+        // after the swap compares against the right baseline.
+        *self.last_pushed_stat.lock().await = loaded_stat;
         *self.survey.write().await = fresh;
         tracing::info!(
             workspace = %self.id,
