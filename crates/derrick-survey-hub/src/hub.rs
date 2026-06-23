@@ -86,7 +86,7 @@ pub struct WorkspaceEntry {
     /// Pushed-only: `(len, mtime)` of the prebuilt `.db` as of the last load, so
     /// the freshness probe can detect an external rewrite and reload. `None` for
     /// Local workspaces and until the first Pushed load records a stat.
-    last_pushed_stat: Arc<Mutex<Option<(u64, i64)>>>,
+    last_pushed_stat: Arc<Mutex<Option<(u64, u128)>>>,
 }
 
 /// RAII guard that arms the `dirty` banner for the duration of a rebuild and
@@ -127,8 +127,10 @@ impl WorkspaceEntry {
 
     /// Freshness and size summary for this workspace, branching on its source.
     ///
-    /// - **Local** — `status()`, which diffs the working tree the hub holds, so
-    ///   `pending` reflects real drift between the tree and the index.
+    /// - **Local** — `status_with_flag(dirty)`, which diffs the working tree the
+    ///   hub holds, so `pending` reflects real drift between the tree and the
+    ///   index; the `dirty` flag propagates the in-flight-rebuild state into the
+    ///   freshness label (preserving the `answer_status` contract).
     /// - **Pushed** — `stats()`, which reports the prebuilt index's counts
     ///   without a tree diff. A pushed index has no working tree (its
     ///   `repo_root` is just the DB's parent dir), so `status()` would
@@ -141,7 +143,10 @@ impl WorkspaceEntry {
     pub async fn status(&self) -> Result<IndexStatus, SurveyError> {
         let survey = self.survey().await;
         match &self.source {
-            WorkspaceSource::Local { .. } => survey.status().await,
+            WorkspaceSource::Local { .. } => {
+                let rebuilding = self.dirty.load(Ordering::Relaxed);
+                survey.status_with_flag(rebuilding).await
+            }
             WorkspaceSource::Pushed { .. } => survey.stats().await,
         }
     }
@@ -284,16 +289,17 @@ impl WorkspaceEntry {
     }
 }
 
-/// Cheap change-detection stat for a pushed `.db`: `(len, mtime_secs)`, or
+/// Cheap change-detection stat for a pushed `.db`: `(len, mtime_nanos)`, or
 /// `None` if the file is missing/unstattable. A change in either field triggers
-/// a reload.
-fn stat_db(path: &std::path::Path) -> Option<(u64, i64)> {
+/// a reload. Nanosecond precision (not whole seconds) so two pushes within the
+/// same second with an identical byte-length are still detected.
+fn stat_db(path: &std::path::Path) -> Option<(u64, u128)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs() as i64);
+        .map_or(0_u128, |d| d.as_nanos());
     Some((meta.len(), mtime))
 }
 

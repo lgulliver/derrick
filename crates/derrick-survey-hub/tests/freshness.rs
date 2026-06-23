@@ -84,6 +84,40 @@ async fn zero_ttl_rebuilds_on_query() {
     );
 }
 
+/// A Local workspace's `status()` must propagate the in-flight-rebuild flag
+/// into its freshness label, preserving the `answer_status` contract: while
+/// `dirty` is set the status reads `"rebuilding"`, not a stale/fresh label.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_status_reflects_in_flight_rebuild() {
+    let repo = tempfile::tempdir().unwrap();
+    seed_repo(repo.path(), "a.rs", "pub fn sym() {}\n");
+
+    // Long TTL so ensure_fresh stays out of the way; we drive `dirty` directly.
+    let hub = Hub::build(&single_repo_config(repo.path(), 3600))
+        .await
+        .unwrap();
+    let id = WorkspaceId::new("repo").unwrap();
+    let entry = hub.entry(&id).await.unwrap();
+
+    // Settled: not rebuilding.
+    let clean = entry.status().await.unwrap();
+    assert_ne!(
+        clean.freshness, "rebuilding",
+        "a settled Local workspace must not report rebuilding: {clean:?}"
+    );
+
+    // Arm the flag as an in-flight rebuild would, and assert the Local status
+    // reflects it (the regression CodeRabbit caught: status() dropped the flag).
+    entry
+        .dirty
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let rebuilding = entry.status().await.unwrap();
+    assert_eq!(
+        rebuilding.freshness, "rebuilding",
+        "Local status must reflect the in-flight rebuild flag: {rebuilding:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn long_ttl_gates_rebuild() {
     let repo = tempfile::tempdir().unwrap();
