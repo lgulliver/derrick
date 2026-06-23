@@ -47,6 +47,7 @@ serde_json = "1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 # HTTP
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# HTTP server host for the survey hub's rmcp streamable-HTTP transport (D80).
 axum = "0.8"
 # Errors and logging
 anyhow = "1"

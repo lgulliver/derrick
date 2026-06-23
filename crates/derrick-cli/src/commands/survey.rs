@@ -20,25 +20,29 @@ use crate::{create_dir_all, current_repo_root, message};
 pub(crate) async fn execute(args: SurveyArgs) -> Result<CliExitCode, crate::CliError> {
     // Setup and Hub don't open the current repo's index — Setup wires up a
     // single repo, and Hub loads its own multi-repo registry. Handle both
-    // before resolving the current repo root / opening the index.
+    // before resolving the current repo root / opening the index; every other
+    // command shares the open-the-current-repo path.
     match args.command {
         SurveyCommand::Setup(setup) => {
             let repo_root = current_repo_root()?;
-            return run_setup(&repo_root, setup);
+            run_setup(&repo_root, setup)
         }
-        SurveyCommand::Hub(hub) => return run_hub(hub).await,
-        _ => {}
-    }
-    let repo_root = current_repo_root()?;
-    let survey = open_survey(&repo_root).await?;
-    match args.command {
-        SurveyCommand::Build(build) => run_build(&survey, build).await,
-        SurveyCommand::Search(query) => run_search(&survey, query).await,
-        SurveyCommand::Context(query) => run_context(&survey, query).await,
-        SurveyCommand::Impact(impact) => run_impact(&survey, impact).await,
-        SurveyCommand::Status(status) => run_status(&survey, status).await,
-        SurveyCommand::Serve(serve) => run_serve(survey, serve).await,
-        SurveyCommand::Setup(_) | SurveyCommand::Hub(_) => unreachable!("handled above"),
+        SurveyCommand::Hub(hub) => run_hub(hub).await,
+        command => {
+            let repo_root = current_repo_root()?;
+            let survey = open_survey(&repo_root).await?;
+            match command {
+                SurveyCommand::Build(build) => run_build(&survey, build).await,
+                SurveyCommand::Search(query) => run_search(&survey, query).await,
+                SurveyCommand::Context(query) => run_context(&survey, query).await,
+                SurveyCommand::Impact(impact) => run_impact(&survey, impact).await,
+                SurveyCommand::Status(status) => run_status(&survey, status).await,
+                SurveyCommand::Serve(serve) => run_serve(survey, serve).await,
+                SurveyCommand::Setup(_) | SurveyCommand::Hub(_) => {
+                    unreachable!("handled above")
+                }
+            }
+        }
     }
 }
 

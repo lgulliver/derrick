@@ -143,8 +143,15 @@ async fn http_search_is_routed_per_workspace() {
     req.arguments = serde_json::json!({ "workspace": "ghost", "query": "shared" })
         .as_object()
         .cloned();
-    let err = client.call_tool(req).await;
-    assert!(err.is_err(), "unknown workspace must error: {err:?}");
+    let err = client
+        .call_tool(req)
+        .await
+        .expect_err("unknown workspace must error");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("unknown workspace") && msg.contains("ghost"),
+        "error should name the unknown workspace: {msg}"
+    );
 
     client.cancel().await.unwrap();
     server.abort();

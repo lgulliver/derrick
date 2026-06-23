@@ -106,6 +106,10 @@ pub enum ConfigError {
     /// Two workspaces shared an id.
     #[error("duplicate workspace id: {0}")]
     DuplicateId(String),
+    /// The bind address was not a loopback address. Phase 1 has no auth, so a
+    /// non-loopback bind would expose every workspace's tools on the network.
+    #[error("hub bind must be a loopback address in phase 1 (no auth yet): {0}")]
+    NonLoopbackBind(SocketAddr),
 }
 
 impl HubConfig {
@@ -123,6 +127,9 @@ impl HubConfig {
     /// Reject empty registries, invalid ids, and duplicate ids early so the
     /// hub never half-starts.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.bind.ip().is_loopback() {
+            return Err(ConfigError::NonLoopbackBind(self.bind));
+        }
         if self.workspaces.is_empty() {
             return Err(ConfigError::NoWorkspaces);
         }
@@ -192,5 +199,15 @@ mod tests {
         let yaml = "bind: 127.0.0.1:7777\nworkspaces: []\n";
         let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(matches!(config.validate(), Err(ConfigError::NoWorkspaces)));
+    }
+
+    #[test]
+    fn rejects_non_loopback_bind() {
+        let yaml = "bind: 0.0.0.0:7777\nworkspaces:\n  - id: a\n    root: /srv/a\n";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::NonLoopbackBind(_))
+        ));
     }
 }

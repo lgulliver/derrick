@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use derrick_survey::{BuildOptions, Survey, SurveyConfig, SurveyError};
 use tokio::sync::RwLock;
 
-use crate::config::{HubConfig, WorkspaceId, WorkspaceIdError};
+use crate::config::{ConfigError, HubConfig, WorkspaceId, WorkspaceIdError};
 
 /// One hosted workspace: its open index plus the dirty flag that drives the
 /// staleness banner. `dirty` is wired in for parity with the stdio server's
@@ -52,6 +52,9 @@ pub enum HubError {
     /// A configured workspace id was invalid.
     #[error("invalid workspace id: {0}")]
     WorkspaceId(#[from] WorkspaceIdError),
+    /// The config failed validation (loopback bind, duplicate ids, ...).
+    #[error("config: {0}")]
+    Config(#[from] ConfigError),
     /// Binding the HTTP listener failed.
     #[error("bind {addr}: {source}")]
     Bind {
@@ -78,6 +81,11 @@ impl Hub {
     /// the index, run a connect-time build, and insert it into the map. Any
     /// failure aborts startup with the offending workspace named.
     pub async fn build(config: &HubConfig) -> Result<Self, HubError> {
+        // `build` is public, so re-validate even though `HubConfig::load`
+        // already does: this enforces the loopback bind and rejects duplicate
+        // ids (which would otherwise silently overwrite in the map below)
+        // before any workspace is opened.
+        config.validate()?;
         let mut entries = BTreeMap::new();
         for workspace in &config.workspaces {
             let id = WorkspaceId::new(workspace.id.clone())?;
