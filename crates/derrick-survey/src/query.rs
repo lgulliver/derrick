@@ -172,15 +172,22 @@ fn file_mtime(meta: &std::fs::Metadata) -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// Status: counts plus the set of files that differ from the working tree.
+/// The summary counts every status query reads, independent of the working
+/// tree: file/symbol/ref totals, the on-disk schema version, and the last-build
+/// timestamp from the `meta` table.
+struct IndexCounts {
+    files: i64,
+    symbols: i64,
+    refs: i64,
+    schema_version: u32,
+    last_build_ts: Option<i64>,
+}
+
+/// Read the tree-independent index counts shared by [`status`] and [`stats`].
 ///
-/// `rebuilding` should be `true` when the background watcher has detected
-/// changes and a rebuild is in progress (used to compute the `freshness` label).
-pub(crate) fn status(
-    conn: &Connection,
-    repo_root: &Path,
-    rebuilding: bool,
-) -> Result<IndexStatus, SurveyError> {
+/// Kept separate from the working-tree diff so a pushed index — which has no
+/// tree to diff against — can report real counts without walking `repo_root`.
+fn read_counts(conn: &Connection) -> Result<IndexCounts, SurveyError> {
     let files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
     let symbols: i64 = conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
     let refs: i64 = conn.query_row("SELECT COUNT(*) FROM refs", [], |r| r.get(0))?;
@@ -196,6 +203,54 @@ pub(crate) fn status(
         )
         .ok()
         .and_then(|s| s.parse::<i64>().ok());
+
+    Ok(IndexCounts {
+        files,
+        symbols,
+        refs,
+        schema_version,
+        last_build_ts,
+    })
+}
+
+/// Stats: the same summary as [`status`] but WITHOUT diffing the working tree.
+///
+/// A pushed index serves a prebuilt `.db` and has no working tree to compare
+/// against (its `repo_root` is just the DB's parent dir), so a tree diff would
+/// spuriously report every indexed file as `deleted`. The `pending` list is
+/// genuinely empty — a pushed index *is* exactly what was built, with no drift
+/// concept — so freshness comes out as the normal "fresh"/timestamped label.
+pub(crate) fn stats(conn: &Connection) -> Result<IndexStatus, SurveyError> {
+    let counts = read_counts(conn)?;
+    let pending = Vec::new();
+    let freshness = compute_freshness(&pending, counts.last_build_ts, false);
+    Ok(IndexStatus {
+        files: counts.files as u64,
+        symbols: counts.symbols as u64,
+        refs: counts.refs as u64,
+        schema_version: counts.schema_version,
+        pending,
+        last_build_ts: counts.last_build_ts,
+        freshness,
+    })
+}
+
+/// Status: counts plus the set of files that differ from the working tree.
+///
+/// `rebuilding` should be `true` when the background watcher has detected
+/// changes and a rebuild is in progress (used to compute the `freshness` label).
+pub(crate) fn status(
+    conn: &Connection,
+    repo_root: &Path,
+    rebuilding: bool,
+) -> Result<IndexStatus, SurveyError> {
+    let IndexCounts {
+        files,
+        symbols,
+        refs,
+        schema_version,
+        last_build_ts,
+    } = read_counts(conn)?;
 
     // Index state: path -> (size, mtime, content_hash). Size and mtime let us
     // skip hashing files whose cheap stat metadata is unchanged.

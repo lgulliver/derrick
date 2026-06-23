@@ -47,13 +47,15 @@ fn two_repos() -> (tempfile::TempDir, tempfile::TempDir, HubConfig) {
         workspaces: vec![
             WorkspaceConfig {
                 id: "repo-a".to_owned(),
-                root: repo_a.path().to_path_buf(),
+                root: Some(repo_a.path().to_path_buf()),
                 db_path: None,
+                pushed_db: None,
             },
             WorkspaceConfig {
                 id: "repo-b".to_owned(),
-                root: repo_b.path().to_path_buf(),
+                root: Some(repo_b.path().to_path_buf()),
                 db_path: None,
+                pushed_db: None,
             },
         ],
     };
@@ -73,7 +75,8 @@ async fn hub_level_search_is_routed_per_workspace() {
 
     // The symbol only exists in A.
     let in_a = entry_a
-        .survey
+        .survey()
+        .await
         .search("alpha_only_symbol", 10)
         .await
         .unwrap();
@@ -82,7 +85,8 @@ async fn hub_level_search_is_routed_per_workspace() {
         "repo-a should contain alpha_only_symbol: {in_a:?}"
     );
     let in_b = entry_b
-        .survey
+        .survey()
+        .await
         .search("alpha_only_symbol", 10)
         .await
         .unwrap();

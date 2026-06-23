@@ -105,6 +105,18 @@ impl HubServer {
             .map_err(tools::internal)
     }
 
+    /// The staleness-banner mode for `entry`, derived from its source. A Local
+    /// workspace is tree-backed so the tree-vs-index banner is meaningful; a
+    /// Pushed workspace has no working tree, so the banner is suppressed (it
+    /// would otherwise fire bogusly during every reload window).
+    fn banner_mode(entry: &WorkspaceEntry) -> tools::BannerMode {
+        if entry.source().is_tree_backed() {
+            tools::BannerMode::TreeBacked
+        } else {
+            tools::BannerMode::None
+        }
+    }
+
     #[tool(
         description = "Full-text search over indexed symbol names and signatures \
         in the given workspace. Requires a `workspace` argument. Returns matching \
@@ -116,7 +128,16 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
-        tools::answer_search(&entry.survey, &entry.dirty, &params.0.query, params.0.limit).await
+        let banner = Self::banner_mode(&entry);
+        let survey = entry.survey().await;
+        tools::answer_search(
+            &survey,
+            &entry.dirty,
+            banner,
+            &params.0.query,
+            params.0.limit,
+        )
+        .await
     }
 
     #[tool(
@@ -130,7 +151,16 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
-        tools::answer_context(&entry.survey, &entry.dirty, &params.0.query, params.0.limit).await
+        let banner = Self::banner_mode(&entry);
+        let survey = entry.survey().await;
+        tools::answer_context(
+            &survey,
+            &entry.dirty,
+            banner,
+            &params.0.query,
+            params.0.limit,
+        )
+        .await
     }
 
     #[tool(
@@ -145,7 +175,9 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
-        tools::answer_impact(&entry.survey, &entry.dirty, &params.0.symbol).await
+        let banner = Self::banner_mode(&entry);
+        let survey = entry.survey().await;
+        tools::answer_impact(&survey, &entry.dirty, banner, &params.0.symbol).await
     }
 
     #[tool(
@@ -161,7 +193,15 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
-        tools::answer_status(&entry.survey, &entry.dirty).await
+        // Source-aware status: Local diffs the working tree, Pushed reports the
+        // prebuilt index's counts without a (nonexistent) tree diff. The shared
+        // `respond` prefixes the staleness banner while a rebuild is in flight
+        // only for a tree-backed (Local) source; a Pushed reload window passes
+        // `BannerMode::None` so it never emits a bogus tree-vs-index banner.
+        let banner = Self::banner_mode(&entry);
+        let status = entry.status().await.map_err(tools::internal)?;
+        let survey = entry.survey().await;
+        tools::respond(&survey, &entry.dirty, banner, &status).await
     }
 
     #[tool(
@@ -192,10 +232,13 @@ impl ServerHandler for HubServer {
              index to query. Use derrick_survey_search to find symbols, \
              derrick_survey_context for architecture questions, derrick_survey_impact \
              before changing a symbol, and derrick_survey_status to check freshness. \
-             Indexes self-heal on a freshness TTL, so reads stay current without \
-             intervention; call derrick_survey_refresh to proactively rebuild a \
-             workspace right after a known change (e.g. from CI) instead of waiting \
-             for the next poll."
+             Workspaces are either Local (the hub holds the working tree and builds \
+             the index itself) or Pushed (the hub serves a prebuilt index placed on \
+             disk by CI). Indexes self-heal on a freshness TTL, so reads stay current \
+             without intervention; call derrick_survey_refresh to reconcile a \
+             workspace immediately after a known change — for Local workspaces it \
+             rebuilds from the working tree, for Pushed workspaces it reloads the \
+             prebuilt index from disk."
                 .to_owned(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
