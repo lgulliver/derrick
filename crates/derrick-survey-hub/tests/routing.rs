@@ -41,6 +41,9 @@ fn two_repos() -> (tempfile::TempDir, tempfile::TempDir, HubConfig) {
     );
     let config = HubConfig {
         bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        // A long TTL keeps the existing routing assertions deterministic: no
+        // poll-on-query rebuild fires mid-test. Freshness tests override this.
+        freshness_ttl_secs: 3600,
         workspaces: vec![
             WorkspaceConfig {
                 id: "repo-a".to_owned(),

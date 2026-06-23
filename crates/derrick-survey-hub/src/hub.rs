@@ -7,17 +7,24 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use derrick_survey::{BuildOptions, Survey, SurveyConfig, SurveyError};
-use tokio::sync::RwLock;
+use derrick_survey::{BuildOptions, BuildReport, IndexStatus, Survey, SurveyConfig, SurveyError};
+use tokio::sync::{Mutex, RwLock};
+use tokio::time::Instant;
 
 use crate::config::{ConfigError, HubConfig, WorkspaceId, WorkspaceIdError};
 
 /// One hosted workspace: its open index plus the dirty flag that drives the
 /// staleness banner. `dirty` is wired in for parity with the stdio server's
-/// `respond` contract; phase 1 has no watcher to flip it, but a per-call status
-/// probe can still surface pending files through the same path.
+/// `respond` contract: phase 2's poll-on-query refresh flips it while a rebuild
+/// is in flight so the banner is accurate.
+///
+/// The entry is cloned per request, but its mutable freshness state lives behind
+/// shared `Arc`s so all clones observe the same `last_checked` instant and share
+/// the same single-flight `refresh_lock`. Holding a clone never holds the hub's
+/// entry-map lock, so a rebuild `.await` cannot block routing of other requests.
 #[derive(Clone)]
 pub struct WorkspaceEntry {
     /// The open survey index.
@@ -26,6 +33,100 @@ pub struct WorkspaceEntry {
     pub dirty: Arc<AtomicBool>,
     /// Repository root, retained for diagnostics.
     pub root: PathBuf,
+    /// Workspace id, retained for log lines on rebuild.
+    pub id: WorkspaceId,
+    /// Instant of the last freshness probe; the poll-on-query TTL gate reads it.
+    last_checked: Arc<Mutex<Instant>>,
+    /// Single-flight guard: only one refresh of this workspace runs at a time.
+    /// Concurrent callers serialize here, then re-check `last_checked` and skip.
+    refresh_lock: Arc<Mutex<()>>,
+}
+
+/// RAII guard that arms the `dirty` banner for the duration of a rebuild and
+/// clears it on drop. Using a guard (rather than a manual `store(false)` after
+/// the `.await`) keeps the flag correct even if the rebuild future is cancelled
+/// mid-await — otherwise a dropped request would leave the workspace marked as
+/// rebuilding forever.
+struct DirtyGuard<'a>(&'a AtomicBool);
+
+impl<'a> DirtyGuard<'a> {
+    fn arm(flag: &'a AtomicBool) -> Self {
+        flag.store(true, Ordering::Relaxed);
+        Self(flag)
+    }
+}
+
+impl Drop for DirtyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+impl WorkspaceEntry {
+    /// Ensure the index is fresh enough to answer a query, honouring `ttl`.
+    ///
+    /// Fast path: if less than `ttl` has elapsed since the last probe, return
+    /// immediately. Otherwise take the single-flight `refresh_lock`, re-check the
+    /// elapsed time (another caller may have just refreshed), and if still due,
+    /// run a cheap `survey.status()` probe. Only when that reports pending files
+    /// is an incremental `survey.build` run; `last_checked` is bumped regardless
+    /// so a clean tree is not re-probed until the next TTL window.
+    ///
+    /// A `ttl` of zero means "always probe": the elapsed gate never short-cuts.
+    /// Under concurrency exactly one caller rebuilds; the rest wait on the lock,
+    /// observe the fresh `last_checked`, and return without rebuilding.
+    pub async fn ensure_fresh(&self, ttl: Duration) -> Result<(), SurveyError> {
+        // Fast path: within the TTL window, nothing to do. A zero TTL disables
+        // this short-cut (elapsed is always >= zero).
+        if ttl > Duration::ZERO {
+            let last = *self.last_checked.lock().await;
+            if last.elapsed() < ttl {
+                return Ok(());
+            }
+        }
+
+        // Single-flight: serialize concurrent refreshers of this workspace.
+        let _refresh = self.refresh_lock.lock().await;
+
+        // Re-check after acquiring the lock: a peer may have refreshed while we
+        // waited, in which case we are within the window again and can skip.
+        if ttl > Duration::ZERO {
+            let last = *self.last_checked.lock().await;
+            if last.elapsed() < ttl {
+                return Ok(());
+            }
+        }
+
+        // Cheap staleness probe. Only rebuild when the tree actually differs.
+        let status = self.survey.status().await?;
+        if !status.pending.is_empty() {
+            tracing::debug!(
+                workspace = %self.id,
+                pending = status.pending.len(),
+                "survey hub poll-on-query rebuild"
+            );
+            let _dirty = DirtyGuard::arm(&self.dirty);
+            self.survey.build(BuildOptions::default()).await?;
+            tracing::info!(workspace = %self.id, "survey hub rebuilt workspace (poll-on-query)");
+        }
+
+        *self.last_checked.lock().await = Instant::now();
+        Ok(())
+    }
+
+    /// Force an incremental rebuild now, regardless of the TTL window, and
+    /// return the post-build status. Backs the `derrick_survey_refresh` tool so
+    /// CI can proactively reconcile the index after a known change.
+    pub async fn force_refresh(&self) -> Result<IndexStatus, SurveyError> {
+        let _refresh = self.refresh_lock.lock().await;
+        tracing::info!(workspace = %self.id, "survey hub forced refresh");
+        let _report: BuildReport = {
+            let _dirty = DirtyGuard::arm(&self.dirty);
+            self.survey.build(BuildOptions::default()).await?
+        };
+        *self.last_checked.lock().await = Instant::now();
+        self.survey.status().await
+    }
 }
 
 /// Errors raised while building or querying the hub.
@@ -72,6 +173,8 @@ pub enum HubError {
 #[derive(Clone)]
 pub struct Hub {
     entries: Arc<RwLock<BTreeMap<WorkspaceId, WorkspaceEntry>>>,
+    /// Poll-on-query freshness TTL, resolved from the registry config.
+    freshness_ttl: Duration,
 }
 
 impl Hub {
@@ -116,18 +219,28 @@ impl Hub {
                     source,
                 })?;
             tracing::info!(workspace = %id, root = %workspace.root.display(), "survey hub opened workspace");
+            // Connect-time build just completed, so the index is fresh now.
             entries.insert(
-                id,
+                id.clone(),
                 WorkspaceEntry {
                     survey,
                     dirty: Arc::new(AtomicBool::new(false)),
                     root: workspace.root.clone(),
+                    id,
+                    last_checked: Arc::new(Mutex::new(Instant::now())),
+                    refresh_lock: Arc::new(Mutex::new(())),
                 },
             );
         }
         Ok(Self {
             entries: Arc::new(RwLock::new(entries)),
+            freshness_ttl: Duration::from_secs(config.freshness_ttl_secs),
         })
+    }
+
+    /// The poll-on-query freshness TTL this hub was built with.
+    pub fn freshness_ttl(&self) -> Duration {
+        self.freshness_ttl
     }
 
     /// Clone the entry for `id`, if hosted. The clone is cheap (`Survey` is an
