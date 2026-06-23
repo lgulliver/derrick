@@ -7,7 +7,8 @@ use inquire::validator::Validation;
 use inquire::{Confirm, MultiSelect, Select, Text};
 
 use crate::commands::init::{
-    RoleBindings, available_model_ids, recommended_role_bindings, validate_prefix,
+    AiPlan, ModelSpec, RoleBindings, available_model_ids, recommended_role_bindings,
+    validate_prefix,
 };
 
 // ─── terminal style ──────────────────────────────────────────────────────────
@@ -35,22 +36,21 @@ fn section_rule(title: &str) -> String {
 
 // ─── types ───────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AiConfigurationStyle {
-    Recommended,
-    OneTool,
-    PerStage,
-}
+/// The CLI runtimes the "one CLI for everything" path offers (D79).
+const CLI_RUNTIMES: [(&str, &str); 5] = [
+    ("claude-cli", "claude-sonnet-4-6"),
+    ("codex-cli", "gpt-5.5"),
+    ("copilot-cli", "auto"),
+    ("opencode-cli", "anthropic/claude-sonnet-4-6"),
+    ("aider-cli", "anthropic/claude-sonnet-4-6"),
+];
 
-impl AiConfigurationStyle {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Recommended => "recommended defaults",
-            Self::OneTool => "one tool for all stages",
-            Self::PerStage => "per-stage configuration",
-        }
-    }
-}
+/// The direct-API runtimes and their default API-key env vars (D79).
+const API_RUNTIMES: [(&str, &str); 3] = [
+    ("anthropic-api", "ANTHROPIC_API_KEY"),
+    ("openai-api", "OPENAI_API_KEY"),
+    ("openai-compatible", "OPENAI_API_KEY"),
+];
 
 pub(crate) struct WizardInput<'a> {
     pub(crate) repo_root: &'a Path,
@@ -77,8 +77,7 @@ pub(crate) struct WizardOutput {
     pub(crate) site_name: String,
     pub(crate) prefix: String,
     pub(crate) mode: crate::commands::InitMode,
-    pub(crate) roles: RoleBindings,
-    pub(crate) ai_style: AiConfigurationStyle,
+    pub(crate) ai_plan: AiPlan,
     pub(crate) constitution: ConstitutionMode,
     pub(crate) append_agents_md: bool,
     pub(crate) no_hooks: bool,
@@ -178,60 +177,99 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
 
     let available_model_ids = available_model_ids();
     let role_defaults = recommended_role_bindings(mode, &available_model_ids);
-    let (ai_style, roles) = match ask!(ask_select(
-        "How would you like to configure AI tools?",
+    let ai_plan = match ask!(ask_select(
+        "How do you want Derrick to use AI?",
         &[
-            "Recommended defaults",
-            "One tool for all stages",
+            "Use my installed AI CLIs (recommended)",
+            "Use one CLI for everything",
             "Choose per stage",
+            "Use API keys / custom provider",
+            "Local / self-hosted (Ollama, LM Studio, vLLM, …)",
         ],
         0,
     )) {
-        0 => (AiConfigurationStyle::Recommended, role_defaults),
+        // 1. Installed CLIs → a preset that generates ordinary config (D79).
+        0 => {
+            let preset_index = ask!(ask_select("Which CLI preset?", &derrick_config::PRESETS, 0,));
+            AiPlan::Preset(derrick_config::PRESETS[preset_index].to_owned())
+        }
+        // 2. One CLI for everything → bind every stage to a single runtime.
         1 => {
-            let selected = ask!(ask_model(
-                "Select one tool/model for all stages",
+            let runtime_index = ask!(ask_select(
+                "Which CLI runtime?",
+                &CLI_RUNTIMES.map(|(runtime, _)| runtime),
+                0,
+            ));
+            let (runtime, default_model) = CLI_RUNTIMES[runtime_index];
+            let model = ask!(ask_required_text("Model id (or `auto`)", default_model));
+            single_runtime_plan(runtime, &model, None, None)
+        }
+        // 3. Choose per stage → catalogue alias per role (unchanged mechanism).
+        2 => AiPlan::Catalogue(RoleBindings {
+            proposer: ask!(ask_model(
+                "Planning / proposal",
+                &input.available_models,
+                role_defaults.proposer.as_str(),
+            )),
+            drafter: ask!(ask_model(
+                "Drafting specs/tasks",
+                &input.available_models,
+                role_defaults.drafter.as_str(),
+            )),
+            reviewer: ask!(ask_model(
+                "Review / critique",
+                &input.available_models,
+                role_defaults.reviewer.as_str(),
+            )),
+            executor: ask!(ask_model(
+                "Execution / implementation",
                 &input.available_models,
                 role_defaults.executor.as_str(),
+            )),
+            summariser: ask!(ask_model(
+                "Summary / handoff",
+                &input.available_models,
+                role_defaults.summariser.as_str(),
+            )),
+        }),
+        // 4. API keys / custom provider.
+        3 => {
+            let runtime_index = ask!(ask_select(
+                "Which API runtime?",
+                &API_RUNTIMES.map(|(runtime, _)| runtime),
+                0,
             ));
-            (
-                AiConfigurationStyle::OneTool,
-                RoleBindings::one_model(selected),
-            )
+            let (runtime, default_auth_env) = API_RUNTIMES[runtime_index];
+            let model = ask!(ask_required_text("Model id", ""));
+            let base_url = ask!(ask_text(
+                "Base URL (blank for the provider default)",
+                "",
+                false,
+            ));
+            let auth_env = ask!(ask_text("API-key env var", default_auth_env, false));
+            single_runtime_plan(runtime, &model, non_empty(base_url), non_empty(auth_env))
         }
-        _ => (
-            AiConfigurationStyle::PerStage,
-            RoleBindings {
-                proposer: ask!(ask_model(
-                    "Planning / proposal",
-                    &input.available_models,
-                    role_defaults.proposer.as_str(),
-                )),
-                drafter: ask!(ask_model(
-                    "Drafting specs/tasks",
-                    &input.available_models,
-                    role_defaults.drafter.as_str(),
-                )),
-                reviewer: ask!(ask_model(
-                    "Review / critique",
-                    &input.available_models,
-                    role_defaults.reviewer.as_str(),
-                )),
-                executor: ask!(ask_model(
-                    "Execution / implementation",
-                    &input.available_models,
-                    role_defaults.executor.as_str(),
-                )),
-                summariser: ask!(ask_model(
-                    "Summary / handoff",
-                    &input.available_models,
-                    role_defaults.summariser.as_str(),
-                )),
-            },
-        ),
+        // 5. Local / self-hosted.
+        _ => {
+            let runtime_index = ask!(ask_select(
+                "Which local runtime?",
+                &["ollama", "openai-compatible (LM Studio / vLLM / LiteLLM)",],
+                0,
+            ));
+            let (runtime, default_base_url) = if runtime_index == 0 {
+                ("ollama", "http://localhost:11434")
+            } else {
+                ("openai-compatible", "http://localhost:8000/v1")
+            };
+            let model = ask!(ask_required_text("Model id", "qwen2.5-coder:32b"));
+            let base_url = ask!(ask_text("Base URL", default_base_url, false));
+            single_runtime_plan(runtime, &model, non_empty(base_url), None)
+        }
     };
 
-    validate_role_models(&roles, &available_model_ids)?;
+    if let AiPlan::Catalogue(roles) = &ai_plan {
+        validate_role_models(roles, &available_model_ids)?;
+    }
 
     let constitution = if greenfield {
         ConstitutionMode::Reference
@@ -311,8 +349,7 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         site_name,
         prefix,
         mode,
-        roles,
-        ai_style,
+        ai_plan,
         constitution,
         append_agents_md,
         no_hooks,
@@ -330,6 +367,36 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
     }
 
     Ok(WizardSelection::Proceed(Box::new(output)))
+}
+
+/// Builds a [`AiPlan::Custom`] that binds every stage to a single runtime/model
+/// alias named `default` (D79). Used by the one-CLI, API, and local paths.
+fn single_runtime_plan(
+    runtime: &str,
+    model: &str,
+    base_url: Option<String>,
+    auth_env: Option<String>,
+) -> AiPlan {
+    let spec = ModelSpec {
+        runtime: runtime.to_owned(),
+        model: model.trim().to_owned(),
+        base_url,
+        auth_env,
+    };
+    AiPlan::Custom {
+        models: vec![("default".to_owned(), spec)],
+        roles: RoleBindings::one_model("default".to_owned()),
+    }
+}
+
+/// Returns `Some(trimmed)` when the user entered a non-blank value, else `None`.
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 /// Keys for the consolidated options multi-select.
@@ -374,8 +441,7 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
         site_name,
         prefix,
         mode,
-        ai_style,
-        roles,
+        ai_plan,
         constitution,
         append_agents_md,
         no_hooks,
@@ -416,7 +482,7 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
     println!("{}", kv("Project", site_name));
     println!("{}", kv("Prefix", prefix));
     println!("{}", kv("Mode", mode.as_str()));
-    println!("{}", kv("AI config", ai_style.label()));
+    println!("{}", kv("AI config", &ai_plan.label()));
     if !greenfield {
         println!("{}", kv("Constitution", constitution_label(*constitution)));
         println!(
@@ -438,11 +504,18 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
     println!("{}", kv("Branch prefix", branch_prefix));
     println!("{blank}");
     println!("{}", section("Role bindings"));
-    println!("{}", sub_kv("Planning", &roles.proposer));
-    println!("{}", sub_kv("Drafting", &roles.drafter));
-    println!("{}", sub_kv("Review", &roles.reviewer));
-    println!("{}", sub_kv("Execution", &roles.executor));
-    println!("{}", sub_kv("Summary", &roles.summariser));
+    match ai_plan.roles() {
+        Some(roles) => {
+            println!("{}", sub_kv("Planning", &roles.proposer));
+            println!("{}", sub_kv("Drafting", &roles.drafter));
+            println!("{}", sub_kv("Review", &roles.reviewer));
+            println!("{}", sub_kv("Execution", &roles.executor));
+            println!("{}", sub_kv("Summary", &roles.summariser));
+        }
+        None => {
+            println!("{}", sub_kv("Generated by", &ai_plan.label()));
+        }
+    }
     println!("{blank}");
     println!("{}", section("Files to write"));
     println!("{}", bullet("derrick.yaml"));
@@ -491,6 +564,23 @@ fn ask_text(
             Err(error) => Ok(Validation::Invalid(error.to_string().into())),
         });
     }
+    inquire_opt(text.prompt())
+}
+
+/// A free-text prompt that rejects a blank/whitespace-only answer, re-asking
+/// until a non-empty value is entered. Used for model ids (D79): an empty id
+/// would otherwise produce `model: ""` in the generated config and fail later
+/// in a confusing way.
+fn ask_required_text(prompt: &str, default: &str) -> Result<Option<String>, crate::CliError> {
+    let text = Text::new(prompt)
+        .with_default(default)
+        .with_validator(|input: &str| {
+            if input.trim().is_empty() {
+                Ok(Validation::Invalid("a value is required".into()))
+            } else {
+                Ok(Validation::Valid)
+            }
+        });
     inquire_opt(text.prompt())
 }
 
@@ -739,19 +829,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ai_style_labels_match_preview_text() {
-        assert_eq!(
-            AiConfigurationStyle::Recommended.label(),
-            "recommended defaults"
-        );
-        assert_eq!(
-            AiConfigurationStyle::OneTool.label(),
-            "one tool for all stages"
-        );
-        assert_eq!(
-            AiConfigurationStyle::PerStage.label(),
-            "per-stage configuration"
-        );
+    fn single_runtime_plan_binds_all_roles_to_one_alias() {
+        let plan = single_runtime_plan("ollama", "  llama3.2 ", Some("u".to_owned()), None);
+        match plan {
+            AiPlan::Custom { models, roles } => {
+                assert_eq!(models.len(), 1);
+                let (alias, spec) = &models[0];
+                assert_eq!(alias, "default");
+                assert_eq!(spec.runtime, "ollama");
+                assert_eq!(spec.model, "llama3.2"); // trimmed
+                assert_eq!(spec.base_url.as_deref(), Some("u"));
+                assert_eq!(roles.executor, "default");
+                assert_eq!(roles.proposer, "default");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_empty_trims_and_nullifies_blanks() {
+        assert_eq!(non_empty("  ".to_owned()), None);
+        assert_eq!(non_empty(" x ".to_owned()), Some("x".to_owned()));
     }
 
     #[test]

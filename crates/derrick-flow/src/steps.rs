@@ -320,9 +320,12 @@ async fn execute_role_step(
         )
         .await?;
         let prompt_len = rendered.len();
-        let response = model
-            .complete(completion_request(rendered, None, None))
-            .await?;
+        let response = derrick_models::complete_with_retry(
+            model.as_ref(),
+            completion_request(rendered, None, None),
+            3,
+        )
+        .await?;
         let actual_tokens_in = response
             .tokens_in
             .max((prompt_len as u32).saturating_div(4));

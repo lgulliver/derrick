@@ -276,6 +276,9 @@ pub(crate) enum ModelsCommand {
 pub(crate) struct ModelsCheckArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
     pub(crate) format: OutputFormat,
+    /// Probe API/local runtime endpoints for reachability (network access).
+    #[arg(long, default_value_t = false)]
+    pub(crate) probe: bool,
 }
 
 #[derive(Debug, Args)]
