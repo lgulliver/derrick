@@ -270,43 +270,14 @@ impl WorkspaceEntry {
         self.reload_pushed(db_path).await
     }
 
-    /// Open a fresh [`Survey`] over the prebuilt `.db` and atomically swap it in,
-    /// dropping the old handle. Arms the banner for the duration of the swap.
-    ///
-    /// Guards against a time-of-check/time-of-use race: a producer that
-    /// atomically replaces `db_path` *between* the open and the stat would leave
-    /// us serving the older DB while `last_pushed_stat` records the newer file —
-    /// so every later probe would see "unchanged" and never hot-swap the newer
-    /// index. We re-open until the stat is stable across the open (bounded), so
-    /// the recorded stat always matches the served DB. A perpetually-churning
-    /// file falls back to recording the pre-open stat, which simply biases the
-    /// next probe toward reloading again rather than skipping.
+    /// Open a fresh [`Survey`] over the prebuilt `.db` (with a stat that matches
+    /// the opened handle — see [`open_pushed_survey_stable`]) and atomically swap
+    /// it in, dropping the old handle. Arms the banner for the duration of the
+    /// swap, and records the loaded stat *before* swapping so a concurrent probe
+    /// after the swap compares against the right baseline.
     async fn reload_pushed(&self, db_path: &std::path::Path) -> Result<(), SurveyError> {
-        const MAX_TRIES: usize = 5;
         let _dirty = DirtyGuard::arm(&self.dirty);
-        let mut chosen: Option<(Survey, Option<(u64, u128)>)> = None;
-        for _ in 0..MAX_TRIES {
-            let before = stat_db(db_path);
-            let fresh = open_pushed_survey(db_path).await?;
-            let after = stat_db(db_path);
-            if before == after {
-                // Stable across the open: the recorded stat matches this DB.
-                chosen = Some((fresh, after));
-                break;
-            }
-            // Replaced mid-open: keep this handle but record the pre-open stat so
-            // the next probe still sees a difference and reloads again.
-            chosen = Some((fresh, before));
-            tracing::debug!(
-                workspace = %self.id,
-                source = "pushed",
-                db = %db_path.display(),
-                "survey hub pushed db changed during reload; retrying"
-            );
-        }
-        let (fresh, loaded_stat) = chosen.expect("the reload loop runs at least once");
-        // Record the stat we loaded *before* swapping, so a concurrent probe
-        // after the swap compares against the right baseline.
+        let (fresh, loaded_stat) = open_pushed_survey_stable(db_path).await?;
         *self.last_pushed_stat.lock().await = loaded_stat;
         *self.survey.write().await = fresh;
         tracing::info!(
@@ -364,6 +335,41 @@ async fn open_pushed_survey(db_path: &std::path::Path) -> Result<Survey, SurveyE
         reader_pool: SurveyConfig::DEFAULT_READER_POOL,
     })
     .await
+}
+
+/// Open the pushed DB and return a `(len, mtime)` stat that is stable across the
+/// open, so the recorded stat always matches the served handle.
+///
+/// Guards a time-of-check/time-of-use race shared by the connect-time open and
+/// the hot-reload path: a producer that atomically replaces `db_path` *between*
+/// the open and the stat would leave the caller serving the older DB while
+/// recording the newer file's stat — so every later probe sees "unchanged" and
+/// never hot-swaps the newer index. We re-open until the pre- and post-open
+/// stats match (bounded); a perpetually-churning file falls back to the pre-open
+/// stat, which simply biases the next probe toward reloading again rather than
+/// skipping.
+async fn open_pushed_survey_stable(
+    db_path: &std::path::Path,
+) -> Result<(Survey, Option<(u64, u128)>), SurveyError> {
+    const MAX_TRIES: usize = 5;
+    let mut chosen: Option<(Survey, Option<(u64, u128)>)> = None;
+    for _ in 0..MAX_TRIES {
+        let before = stat_db(db_path);
+        let fresh = open_pushed_survey(db_path).await?;
+        let after = stat_db(db_path);
+        if before == after {
+            // Stable across the open: the recorded stat matches this DB.
+            return Ok((fresh, after));
+        }
+        // Replaced mid-open: keep this handle but record the pre-open stat so
+        // the next probe still sees a difference and reloads again.
+        chosen = Some((fresh, before));
+        tracing::debug!(
+            db = %db_path.display(),
+            "survey hub pushed db changed during open; retrying"
+        );
+    }
+    Ok(chosen.expect("the open loop runs at least once"))
 }
 
 /// Errors raised while building or querying the hub.
@@ -467,8 +473,11 @@ impl Hub {
                 WorkspaceSourceConfig::Pushed { db_path } => {
                     // Serve the prebuilt DB as-is; do NOT build from a root. A
                     // schema-too-new or open failure surfaces as a workspace error.
-                    let survey = open_pushed_survey(&db_path).await.map_err(workspace_err)?;
-                    let stat = stat_db(&db_path);
+                    // The stable open records a stat matching the served handle,
+                    // closing the same TOCTOU the reload path guards against.
+                    let (survey, stat) = open_pushed_survey_stable(&db_path)
+                        .await
+                        .map_err(workspace_err)?;
                     tracing::info!(
                         workspace = %id,
                         source = "pushed",
