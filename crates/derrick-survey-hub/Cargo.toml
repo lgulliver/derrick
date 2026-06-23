@@ -1,0 +1,36 @@
+[package]
+name = "derrick-survey-hub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+derrick-survey = { path = "../derrick-survey" }
+# justification: shared error type at the crate boundary (anyhow), per house rules.
+anyhow = { workspace = true }
+# justification: typed in-crate errors (registry/workspace validation).
+thiserror = { workspace = true }
+# justification: HTTP host for the rmcp streamable-http server transport.
+axum = { workspace = true }
+# justification: async runtime + TcpListener for the HTTP bind (workspace standard).
+tokio = { workspace = true }
+# justification: multi-repo MCP server over streamable HTTP (D80 hub transport).
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server", "macros"] }
+# justification: JSON schema for the tool parameter structs (matches derrick-survey).
+schemars = { workspace = true }
+# justification: derive for hub.yaml registry config + tool params.
+serde = { workspace = true }
+# justification: parse the hub.yaml registry config.
+serde_yaml = { workspace = true }
+# justification: structured logging per house rules (no println in non-CLI crates).
+tracing = { workspace = true }
+
+[dev-dependencies]
+# justification: real temp repos for the multi-instance routing test (no mocks).
+tempfile = { workspace = true }
+# justification: build tool-call argument objects in the routing test.
+serde_json = { workspace = true }
+# justification: drive the HTTP MCP server from the integration test.
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }

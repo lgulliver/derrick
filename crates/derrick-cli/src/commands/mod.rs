@@ -561,6 +561,12 @@ pub(crate) enum SurveyCommand {
     Status(SurveyStatusArgs),
     /// Run the MCP server over stdio (what coding-agent hosts launch).
     Serve(SurveyServeArgs),
+    /// Run the centralised multi-repo survey hub over streamable HTTP (D80).
+    ///
+    /// Loads a `hub.yaml` registry of workspaces, opens and builds each repo's
+    /// index, and serves the four survey tools over a single HTTP MCP endpoint.
+    /// Each tool call carries a required `workspace` argument selecting the repo.
+    Hub(SurveyHubArgs),
     /// Wire the survey MCP server into this repo without running `derrick init`.
     ///
     /// Creates `.derrick/` (with a `.gitignore` for the index DB) and merges
@@ -613,6 +619,13 @@ pub(crate) struct SurveyServeArgs {
     /// compatibility; stdio MCP is currently the only transport.
     #[arg(long, default_value_t = true)]
     pub(crate) mcp: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SurveyHubArgs {
+    /// Path to the `hub.yaml` registry (bind address + workspaces).
+    #[arg(long)]
+    pub(crate) config: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]
