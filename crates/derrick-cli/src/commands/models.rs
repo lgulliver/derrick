@@ -148,12 +148,17 @@ fn models_check_core_with_probes(
         let Some(model_def) = config.models().get(model_name) else {
             continue; // pass 2 already FAILed the missing binding.
         };
+        // A model's own declared capabilities win; otherwise fall back to the
+        // known-model defaults so `requires:` passes for capable models without
+        // hand-declared `capabilities:` (D79, #4).
+        let builtin = derrick_config::builtin_capabilities(model_def.model());
         for capability in requires {
             let subject = format!("stage {stage} requires {capability}");
-            match model_def
+            let declared = model_def
                 .capabilities()
                 .and_then(|caps| caps.declared(capability))
-            {
+                .or_else(|| builtin.declared(capability));
+            match declared {
                 Some(true) => checks.push(ModelCheck::pass(
                     subject,
                     format!("model `{model_name}` supports `{capability}`"),
@@ -261,6 +266,22 @@ fn check_api_model(
     model_def: &ModelDef,
     env_present: &dyn Fn(&str) -> bool,
 ) -> ModelCheck {
+    // `auto`/`auto:<tier>` is foreman tier-selection, which only exists for the
+    // CLI runtimes (D67). On an API/local runtime the literal `auto` would be
+    // forwarded as a model id and fail at the provider — block it here (#2).
+    if matches!(
+        parse_model_choice(model_def.model()),
+        ModelChoice::Auto { .. }
+    ) {
+        return ModelCheck::fail(
+            subject,
+            format!(
+                "`auto` is only supported on CLI runtimes; runtime `{runtime}` needs a \
+                 concrete model id"
+            ),
+        );
+    }
+
     let requires_auth = matches!(runtime, "anthropic-api" | "openai-api");
     match model_def.auth_env() {
         Some(env) if !env_present(env) => {
@@ -328,10 +349,114 @@ pub(crate) async fn execute(args: ModelsArgs) -> Result<CliExitCode, crate::CliE
             let repo_root = crate::current_repo_root()?;
             let config = Config::load_layered(&repo_root)
                 .map_err(|error| crate::message(error.to_string()))?;
-            let checks = models_check_core(&config);
+            let mut checks = models_check_core(&config);
+            if check_args.probe {
+                checks.extend(probe_endpoints(&config).await);
+            }
             print_checks(&checks, check_args.format)?;
             Ok(CliExitCode::DoctorFailures(fail_count(&checks)))
         }
+    }
+}
+
+/// Probes each API/local-runtime model's endpoint for TCP reachability (D79,
+/// `--probe`). Unreachable endpoints WARN (never FAIL — a probe is advisory and
+/// the endpoint may simply be offline at check time). CLI/shell runtimes are
+/// skipped. Pure network, opt-in.
+async fn probe_endpoints(config: &Config) -> Vec<ModelCheck> {
+    let mut models: Vec<(&str, &ModelDef)> = config
+        .models()
+        .as_map()
+        .iter()
+        .map(|(name, def)| (name.as_str(), def))
+        .collect();
+    models.sort_unstable_by_key(|(name, _)| *name);
+
+    let mut checks = Vec::new();
+    for (model_name, model_def) in models {
+        let runtime = model_def.resolved_runtime();
+        // Only API/local runtimes have a network endpoint to probe.
+        if derrick_config::cli_host_for_runtime(&runtime).is_some() || runtime == "shell" {
+            continue;
+        }
+        let Some(base_url) = endpoint_base_url(&runtime, model_def) else {
+            continue; // openai-compatible without a base_url is already FAILed.
+        };
+        let subject = format!("probe {model_name}");
+        match probe_host_port(&base_url).await {
+            Ok(()) => checks.push(ModelCheck::pass(
+                subject,
+                format!("runtime `{runtime}` endpoint {base_url} is reachable"),
+            )),
+            Err(reason) => checks.push(ModelCheck::warn(
+                subject,
+                format!("runtime `{runtime}` endpoint {base_url} unreachable: {reason}"),
+            )),
+        }
+    }
+    checks
+}
+
+/// Resolves the base URL to probe for an API/local runtime.
+fn endpoint_base_url(runtime: &str, model_def: &ModelDef) -> Option<String> {
+    model_def
+        .base_url()
+        .or_else(|| model_def.endpoint())
+        .map(str::to_owned)
+        .or_else(|| match runtime {
+            "openai-api" => Some("https://api.openai.com/v1".to_owned()),
+            "anthropic-api" => Some("https://api.anthropic.com/v1".to_owned()),
+            "ollama" => Some("http://localhost:11434".to_owned()),
+            _ => None,
+        })
+}
+
+/// Attempts a TCP connection to the `host:port` parsed from `base_url`, with a
+/// short timeout. Avoids an HTTP-client dependency in the CLI crate.
+async fn probe_host_port(base_url: &str) -> Result<(), String> {
+    let (host, port) = parse_host_port(base_url).ok_or_else(|| "unparsable URL".to_owned())?;
+    let addr = format!("{host}:{port}");
+    let connect = tokio::net::TcpStream::connect(&addr);
+    match tokio::time::timeout(std::time::Duration::from_secs(3), connect).await {
+        Ok(Ok(_stream)) => Ok(()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("connection timed out".to_owned()),
+    }
+}
+
+/// Parses `host` and `port` from a URL, defaulting the port by scheme. Minimal
+/// (no `url` crate): handles `scheme://[user@]host[:port][/path]` and bracketed
+/// IPv6 literals (`[::1]`, `[::1]:11434`). Returns `None` for an empty authority
+/// or an otherwise unparsable form.
+fn parse_host_port(url: &str) -> Option<(String, u16)> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = authority.rsplit('@').next().unwrap_or(authority); // strip userinfo
+    if authority.is_empty() {
+        return None;
+    }
+    let default_port = if scheme.eq_ignore_ascii_case("https") {
+        443
+    } else {
+        80
+    };
+    // Bracketed IPv6 literal: `[host]` or `[host]:port`.
+    if let Some(after_open) = authority.strip_prefix('[') {
+        let (host, tail) = after_open.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        let port = match tail.strip_prefix(':') {
+            Some(port) => port.parse().ok()?,
+            None if tail.is_empty() => default_port,
+            None => return None, // junk after the closing bracket
+        };
+        return Some((host.to_owned(), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => Some((host.to_owned(), port.parse().ok()?)),
+        Some(_) => None, // empty host, e.g. ":80"
+        None => Some((authority.to_owned(), default_port)),
     }
 }
 
@@ -730,25 +855,80 @@ state:
 
     #[test]
     fn d79_stage_requirement_checks() {
-        // `tools=false` declared but required → FAIL; `vision` undeclared but
-        // required → WARN; `streaming=true` declared and required → PASS.
+        // mc (claude) declares tools=false explicitly; ml is a local model with
+        // no known capabilities. Expect:
+        //  a: tools on mc      → explicit false beats the builtin default → FAIL
+        //  b: streaming on mc  → undeclared, but builtin claude default → PASS
+        //  c: tools on ml      → undeclared and no builtin → WARN
         let config = config_top(
-            "models:\n  m:\n    runtime: anthropic-api\n    model: claude-opus-4-8\n    auth_env: ANTHROPIC_API_KEY\n    capabilities:\n      tools: false\n      streaming: true\nroles:\n  drafter: m\nstages:\n  a:\n    model: m\n    requires: [tools]\n  b:\n    model: m\n    requires: [vision]\n  c:\n    model: m\n    requires: [streaming]",
+            "models:\n  mc:\n    runtime: anthropic-api\n    model: claude-opus-4-8\n    auth_env: ANTHROPIC_API_KEY\n    capabilities:\n      tools: false\n  ml:\n    runtime: ollama\n    model: qwen2.5-coder:32b\nroles:\n  drafter: mc\nstages:\n  a:\n    model: mc\n    requires: [tools]\n  b:\n    model: mc\n    requires: [streaming]\n  c:\n    model: ml\n    requires: [tools]",
         );
         let checks = models_check_core_with_probes(&config, &|_| true, &|_| true);
         assert!(
             checks.iter().any(
                 |c| c.subject.contains("stage a requires tools") && c.level == CheckLevel::Fail
-            )
+            ),
+            "explicit tools=false must FAIL"
         );
         assert!(
             checks
                 .iter()
-                .any(|c| c.subject.contains("stage b requires vision")
-                    && c.level == CheckLevel::Warn)
+                .any(|c| c.subject.contains("stage b requires streaming")
+                    && c.level == CheckLevel::Pass),
+            "builtin claude streaming default must PASS"
         );
-        assert!(checks.iter().any(
-            |c| c.subject.contains("stage c requires streaming") && c.level == CheckLevel::Pass
-        ));
+        assert!(
+            checks.iter().any(
+                |c| c.subject.contains("stage c requires tools") && c.level == CheckLevel::Warn
+            ),
+            "unknown local model capability must WARN"
+        );
+    }
+
+    #[test]
+    fn d79_auto_on_api_runtime_is_fail() {
+        let config = config_top(
+            "models:\n  m:\n    runtime: openai-api\n    model: auto\n    auth_env: OPENAI_API_KEY\nroles:\n  drafter: m",
+        );
+        let checks = models_check_core_with_probes(&config, &|_| true, &|_| true);
+        assert!(
+            checks.iter().any(|c| c.level == CheckLevel::Fail
+                && c.message.contains("only supported on CLI runtimes")),
+            "`auto` on an API runtime must FAIL"
+        );
+    }
+
+    #[test]
+    fn parse_host_port_defaults_and_explicit() {
+        assert_eq!(
+            parse_host_port("http://localhost:11434"),
+            Some(("localhost".to_owned(), 11434))
+        );
+        assert_eq!(
+            parse_host_port("https://api.openai.com/v1"),
+            Some(("api.openai.com".to_owned(), 443))
+        );
+        assert_eq!(
+            parse_host_port("http://example.test/path"),
+            Some(("example.test".to_owned(), 80))
+        );
+        assert_eq!(
+            parse_host_port("http://user@host:8080/x"),
+            Some(("host".to_owned(), 8080))
+        );
+        // Bracketed IPv6, with and without an explicit port.
+        assert_eq!(
+            parse_host_port("http://[::1]/v1"),
+            Some(("::1".to_owned(), 80))
+        );
+        assert_eq!(
+            parse_host_port("http://[::1]:11434"),
+            Some(("::1".to_owned(), 11434))
+        );
+        // Empty / malformed authorities are unparsable, not ("", default).
+        assert_eq!(parse_host_port("http://"), None);
+        assert_eq!(parse_host_port("http:///path"), None);
+        assert_eq!(parse_host_port("http://:80"), None);
+        assert_eq!(parse_host_port("not-a-url"), None);
     }
 }
