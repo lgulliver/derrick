@@ -14,6 +14,7 @@ mod mcp;
 mod model;
 mod parse;
 mod query;
+pub mod tools;
 mod walk;
 mod watch;
 

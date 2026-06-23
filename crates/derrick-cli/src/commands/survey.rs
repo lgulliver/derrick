@@ -10,29 +10,49 @@ use derrick_survey::{
 };
 
 use crate::commands::{
-    SurveyArgs, SurveyBuildArgs, SurveyCommand, SurveyImpactArgs, SurveyQueryArgs, SurveyServeArgs,
-    SurveySetupArgs, SurveyStatusArgs,
+    SurveyArgs, SurveyBuildArgs, SurveyCommand, SurveyHubArgs, SurveyImpactArgs, SurveyQueryArgs,
+    SurveyServeArgs, SurveySetupArgs, SurveyStatusArgs,
 };
 use crate::exit_code::CliExitCode;
 use crate::output::OutputFormat;
 use crate::{create_dir_all, current_repo_root, message};
 
 pub(crate) async fn execute(args: SurveyArgs) -> Result<CliExitCode, crate::CliError> {
-    let repo_root = current_repo_root()?;
-    // Setup doesn't need the index open — handle it before open_survey.
-    if let SurveyCommand::Setup(setup) = args.command {
-        return run_setup(&repo_root, setup);
-    }
-    let survey = open_survey(&repo_root).await?;
+    // Setup and Hub don't open the current repo's index — Setup wires up a
+    // single repo, and Hub loads its own multi-repo registry. Handle both
+    // before resolving the current repo root / opening the index; every other
+    // command shares the open-the-current-repo path.
     match args.command {
-        SurveyCommand::Build(build) => run_build(&survey, build).await,
-        SurveyCommand::Search(query) => run_search(&survey, query).await,
-        SurveyCommand::Context(query) => run_context(&survey, query).await,
-        SurveyCommand::Impact(impact) => run_impact(&survey, impact).await,
-        SurveyCommand::Status(status) => run_status(&survey, status).await,
-        SurveyCommand::Serve(serve) => run_serve(survey, serve).await,
-        SurveyCommand::Setup(_) => unreachable!("handled above"),
+        SurveyCommand::Setup(setup) => {
+            let repo_root = current_repo_root()?;
+            run_setup(&repo_root, setup)
+        }
+        SurveyCommand::Hub(hub) => run_hub(hub).await,
+        command => {
+            let repo_root = current_repo_root()?;
+            let survey = open_survey(&repo_root).await?;
+            match command {
+                SurveyCommand::Build(build) => run_build(&survey, build).await,
+                SurveyCommand::Search(query) => run_search(&survey, query).await,
+                SurveyCommand::Context(query) => run_context(&survey, query).await,
+                SurveyCommand::Impact(impact) => run_impact(&survey, impact).await,
+                SurveyCommand::Status(status) => run_status(&survey, status).await,
+                SurveyCommand::Serve(serve) => run_serve(survey, serve).await,
+                SurveyCommand::Setup(_) | SurveyCommand::Hub(_) => {
+                    unreachable!("handled above")
+                }
+            }
+        }
     }
+}
+
+async fn run_hub(args: SurveyHubArgs) -> Result<CliExitCode, crate::CliError> {
+    let config = derrick_survey_hub::HubConfig::load(&args.config)
+        .map_err(|error| message(format!("survey hub config: {error}")))?;
+    derrick_survey_hub::serve(&config)
+        .await
+        .map_err(|error| message(format!("survey hub: {error}")))?;
+    Ok(CliExitCode::Success)
 }
 
 async fn run_serve(survey: Survey, _args: SurveyServeArgs) -> Result<CliExitCode, crate::CliError> {
