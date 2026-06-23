@@ -20,10 +20,22 @@ pub enum WorkspaceIdError {
     /// The identifier contained whitespace.
     #[error("workspace id must not contain whitespace: {0:?}")]
     Whitespace(String),
+    /// The identifier is not a single URL-safe path segment, so it cannot be
+    /// mounted at `/w/<id>` (D84 path-prefix routing).
+    #[error(
+        "workspace id must be a single URL-safe path segment \
+         (A-Z a-z 0-9 - _ . ~, and not `.`/`..`): {0:?}"
+    )]
+    InvalidPathSegment(String),
 }
 
 impl WorkspaceId {
     /// Validate and wrap a workspace id.
+    ///
+    /// Ids must be a single URL-safe path segment: D84 mounts each workspace at
+    /// the literal route `/w/<id>`, so an id containing `/`, `?`, `#`, … (or the
+    /// traversal segments `.`/`..`) would create a multi-segment or unreachable
+    /// mount. We restrict to the RFC 3986 unreserved set.
     pub fn new(value: impl Into<String>) -> Result<Self, WorkspaceIdError> {
         let value = value.into();
         if value.is_empty() {
@@ -31,6 +43,12 @@ impl WorkspaceId {
         }
         if value.chars().any(char::is_whitespace) {
             return Err(WorkspaceIdError::Whitespace(value));
+        }
+        let url_safe = value.bytes().all(
+            |b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~'),
+        );
+        if !url_safe || value == "." || value == ".." {
+            return Err(WorkspaceIdError::InvalidPathSegment(value));
         }
         Ok(Self(value))
     }
@@ -419,6 +437,25 @@ mod tests {
             Err(WorkspaceIdError::Whitespace(_))
         ));
         assert_eq!(WorkspaceId::new("repo-a").unwrap().as_str(), "repo-a");
+    }
+
+    #[test]
+    fn workspace_id_must_be_a_url_safe_path_segment() {
+        // Unreserved set is accepted (these are valid `/w/<id>` mounts).
+        for ok in ["repo", "repo-a", "my_repo", "v1.2", "a~b", "Repo123"] {
+            assert!(WorkspaceId::new(ok).is_ok(), "{ok:?} should be valid");
+        }
+        // Path-breaking or traversal ids are rejected so `/w/<id>` stays a
+        // single, reachable segment (D84).
+        for bad in ["a/b", "a?b", "a#b", "a b", ".", "..", "a%2Fb"] {
+            assert!(
+                matches!(
+                    WorkspaceId::new(bad),
+                    Err(WorkspaceIdError::InvalidPathSegment(_) | WorkspaceIdError::Whitespace(_))
+                ),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     #[test]
