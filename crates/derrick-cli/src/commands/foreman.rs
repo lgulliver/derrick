@@ -277,7 +277,7 @@ fn resolve_executor(config: &Config) -> Option<(HandKind, ModelChoice)> {
         .unwrap_or("executor");
     let model_name = config.roles().get(executor_role)?;
     let model = config.models().get(model_name)?;
-    let kind = hand_kind_for_executor(model.provider(), model.cli());
+    let kind = hand_kind_for_executor(&model.resolved_runtime(), model.cli());
     let choice = parse_model_choice(model.model().trim());
     Some((kind, choice))
 }

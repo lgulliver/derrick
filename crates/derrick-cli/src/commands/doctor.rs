@@ -252,21 +252,19 @@ fn derive_requirements(config: &Config) -> Requirements {
 }
 
 fn add_model_requirement(model: &ModelDef, requirements: &mut Requirements) {
-    // Post-D65, inference is host-delegated: the provider name equals the host
-    // CLI binary name (after the legacy-alias remap applied at config finalize).
-    // The only non-host provider is `shell`, whose binary comes from its `cli`.
-    match model.provider() {
-        "shell" => {
-            if let Some(cli) = model.cli() {
-                if let Some(binary) = cli.split_whitespace().next() {
-                    requirements.binaries.insert(binary.to_owned());
-                }
+    // D79: the runtime determines the invocation path. A `*-cli` runtime needs
+    // its host binary on PATH; the `shell` runtime needs its `cli` command's
+    // binary. API and local runtimes (anthropic-api, ollama, …) shell out to no
+    // managed binary, so they contribute no PATH requirement here.
+    let runtime = model.resolved_runtime();
+    if runtime == "shell" {
+        if let Some(cli) = model.cli() {
+            if let Some(binary) = cli.split_whitespace().next() {
+                requirements.binaries.insert(binary.to_owned());
             }
         }
-        "claude" | "codex" | "copilot" | "opencode" | "aider" => {
-            requirements.binaries.insert(model.provider().to_owned());
-        }
-        _ => {}
+    } else if let Some(host) = derrick_config::cli_host_for_runtime(&runtime) {
+        requirements.binaries.insert(host.to_owned());
     }
 }
 

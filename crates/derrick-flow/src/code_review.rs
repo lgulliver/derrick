@@ -50,9 +50,12 @@ pub async fn run_code_review(
         &AuthStore::from_env(),
     )
     .await?;
-    let response = model
-        .complete(completion_request(prompt, None, None))
-        .await?;
+    let response = derrick_models::complete_with_retry(
+        model.as_ref(),
+        completion_request(prompt, None, None),
+        3,
+    )
+    .await?;
 
     let verdict = extract_verdict_from_review(&response.text);
 
