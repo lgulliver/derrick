@@ -301,12 +301,13 @@ impl ServerHandler for HubServer {
 /// to `config.bind`, and integration tests bind it to an ephemeral port so they
 /// exercise the exact production middleware stack rather than re-deriving it.
 ///
-/// Validates `config` first: [`AuthRegistry::build`] (and `scope_of`) assume the
-/// auth section already passed [`HubConfig::validate`] (no empty/duplicate
-/// tokens, no wildcard mixed with explicit ids). Because this fn is re-exported,
-/// it re-validates at the boundary so a caller that bypasses [`Hub::build`]
-/// cannot smuggle in an unvalidated config (e.g. `["*", "repo-a"]` collapsing to
-/// `WorkspaceScope::All`).
+/// Validates `config` first: [`AuthRegistry::build`] assumes the auth section
+/// already passed [`HubConfig::validate`] (no empty/whitespace/duplicate tokens,
+/// no wildcard mixed with explicit ids). Because this fn is re-exported, it
+/// re-validates at the boundary so a caller that bypasses [`Hub::build`] cannot
+/// smuggle in an unvalidated config — e.g. an ambiguous `["*", "repo-a"]` scope,
+/// which validation rejects (and which `AuthRegistry::build` would in any case
+/// treat as fail-closed deny-all, never `WorkspaceScope::All`).
 pub fn build_router(hub: Hub, config: &HubConfig) -> Result<axum::Router, HubError> {
     config.validate()?;
     let service = StreamableHttpService::new(
