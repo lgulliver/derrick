@@ -152,6 +152,83 @@ pub fn default_db_path(root: &Path) -> PathBuf {
     root.join(".derrick").join("index.db")
 }
 
+/// A single tool capability a token may be granted (D83).
+///
+/// `Read` covers the read tools (`search`, `context`, `impact`, `status`);
+/// `Refresh` covers `derrick_survey_refresh`. `Upload` is reserved for the
+/// deferred Pushed-upload endpoint — it is modelled so configs can name it and
+/// the type is forward-compatible, but no endpoint consumes it yet.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Capability {
+    /// The read tools: search, context, impact, status.
+    Read,
+    /// The `derrick_survey_refresh` tool.
+    Refresh,
+    /// Reserved for the deferred Pushed-upload endpoint. No endpoint consumes
+    /// it yet.
+    Upload,
+}
+
+/// Which workspaces a token may reach (D83).
+///
+/// Written in `hub.yaml` as a list of ids, or the single wildcard `["*"]` for
+/// every hosted workspace. Resolved from the raw `Vec<String>` in
+/// [`TokenConfig`] during validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceScope {
+    /// Every workspace the hub hosts (the `"*"` wildcard).
+    All,
+    /// An explicit allow-list of workspace ids.
+    Ids(Vec<String>),
+}
+
+/// One bearer token entry as written under `auth.tokens` in `hub.yaml`.
+///
+/// The `token` is the raw secret; `hub.yaml` is operator-controlled, so it is
+/// not hashed. `workspaces` is `["*"]` for all or an explicit id list;
+/// `capabilities` lists the tool capabilities the token holds.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TokenConfig {
+    /// The raw bearer secret. Never logged.
+    pub token: String,
+    /// Workspace ids this token may reach, or `["*"]` for all.
+    pub workspaces: Vec<String>,
+    /// Capabilities this token holds (`read`, `refresh`; `upload` reserved).
+    pub capabilities: Vec<Capability>,
+}
+
+impl TokenConfig {
+    /// Resolve the declared `workspaces` list into a [`WorkspaceScope`],
+    /// treating a lone `"*"` as the wildcard. Mixing `"*"` with explicit ids is
+    /// rejected as ambiguous.
+    fn scope(&self) -> Result<WorkspaceScope, ConfigError> {
+        if self.workspaces.is_empty() {
+            return Err(ConfigError::EmptyTokenWorkspaces);
+        }
+        let wildcard = self.workspaces.iter().any(|w| w == "*");
+        if wildcard {
+            if self.workspaces.len() > 1 {
+                return Err(ConfigError::MixedWildcardScope);
+            }
+            return Ok(WorkspaceScope::All);
+        }
+        Ok(WorkspaceScope::Ids(self.workspaces.clone()))
+    }
+}
+
+/// The optional `auth` section of `hub.yaml` (D83).
+///
+/// When present with at least one token, the hub requires an
+/// `Authorization: Bearer <token>` header and authorizes each tool call against
+/// the matched token's workspace scope and capabilities. When absent (or with
+/// zero tokens) the hub keeps its pre-auth behaviour: loopback-only, no token.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AuthConfig {
+    /// The configured bearer tokens.
+    pub tokens: Vec<TokenConfig>,
+}
+
 /// The parsed `hub.yaml` registry.
 #[derive(Clone, Debug, Deserialize)]
 pub struct HubConfig {
@@ -168,6 +245,12 @@ pub struct HubConfig {
     /// field in `hub.yaml` is supported for backward compatibility.
     #[serde(default = "HubConfig::default_freshness_ttl_secs")]
     pub freshness_ttl_secs: u64,
+    /// Optional bearer-token auth (D83). Absent in pre-auth configs, which keep
+    /// parsing unchanged via `#[serde(default)]`. When configured with ≥1
+    /// token, a non-loopback bind is permitted and every tool call is
+    /// authenticated and authorized.
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
     /// Workspaces this hub hosts.
     pub workspaces: Vec<WorkspaceConfig>,
 }
@@ -213,10 +296,31 @@ pub enum ConfigError {
         /// The offending workspace id.
         id: String,
     },
-    /// The bind address was not a loopback address. Phase 1 has no auth, so a
-    /// non-loopback bind would expose every workspace's tools on the network.
-    #[error("hub bind must be a loopback address in phase 1 (no auth yet): {0}")]
+    /// The bind address was not a loopback address while no auth is configured.
+    /// Without auth a non-loopback bind would expose every workspace's tools on
+    /// the network unauthenticated, so it is rejected; configure `auth` with at
+    /// least one token to bind a non-loopback address (D83).
+    #[error(
+        "hub bind must be a loopback address unless `auth` is configured with \
+         at least one token: {0}"
+    )]
     NonLoopbackBind(SocketAddr),
+    /// An `auth.tokens` entry had an empty `token` secret.
+    #[error("auth: token entry has an empty `token` secret")]
+    EmptyToken,
+    /// An `auth.tokens` entry had an empty `workspaces` list.
+    #[error("auth: token entry has an empty `workspaces` list")]
+    EmptyTokenWorkspaces,
+    /// An `auth.tokens` entry mixed the `"*"` wildcard with explicit ids.
+    #[error("auth: token `workspaces` cannot mix \"*\" with explicit ids")]
+    MixedWildcardScope,
+    /// An `auth.tokens` entry named a workspace that the hub does not host.
+    #[error("auth: token scopes unknown workspace id: {0}")]
+    UnknownScopedWorkspace(String),
+    /// Two `auth.tokens` entries shared the same `token` secret. The secret is
+    /// not included in the error.
+    #[error("auth: duplicate token secret")]
+    DuplicateToken,
 }
 
 impl HubConfig {
@@ -242,7 +346,10 @@ impl HubConfig {
     /// Reject empty registries, invalid ids, and duplicate ids early so the
     /// hub never half-starts.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if !self.bind.ip().is_loopback() {
+        // Bind policy (D83): a non-loopback bind is only safe once auth is
+        // configured with at least one token; otherwise the tools would be
+        // exposed unauthenticated.
+        if !self.bind.ip().is_loopback() && !self.has_auth() {
             return Err(ConfigError::NonLoopbackBind(self.bind));
         }
         if self.workspaces.is_empty() {
@@ -258,7 +365,38 @@ impl HubConfig {
             // half-starts on an ambiguous workspace.
             workspace.source()?;
         }
+        // Validate the auth section (if any): non-empty secrets, non-empty and
+        // known workspace scopes, no duplicate secrets.
+        if let Some(auth) = &self.auth {
+            let mut token_seen = std::collections::HashSet::new();
+            for token in &auth.tokens {
+                if token.token.is_empty() {
+                    return Err(ConfigError::EmptyToken);
+                }
+                if !token_seen.insert(token.token.clone()) {
+                    return Err(ConfigError::DuplicateToken);
+                }
+                match token.scope()? {
+                    WorkspaceScope::All => {}
+                    WorkspaceScope::Ids(ids) => {
+                        for id in ids {
+                            if !seen.contains(&id) {
+                                return Err(ConfigError::UnknownScopedWorkspace(id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Whether auth is configured with at least one token. When `false`, the
+    /// hub keeps its pre-auth behaviour (loopback-only, no token required).
+    pub fn has_auth(&self) -> bool {
+        self.auth
+            .as_ref()
+            .is_some_and(|auth| !auth.tokens.is_empty())
     }
 }
 
@@ -392,12 +530,206 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_loopback_bind() {
+    fn rejects_non_loopback_bind_without_auth() {
         let yaml = "bind: 0.0.0.0:7777\nworkspaces:\n  - id: a\n    root: /srv/a\n";
         let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(matches!(
             config.validate(),
             Err(ConfigError::NonLoopbackBind(_))
+        ));
+    }
+
+    #[test]
+    fn existing_config_without_auth_parses_and_has_no_auth() {
+        // Backward compatibility: a registry written before D83 parses with
+        // `auth` defaulting to None and keeps the loopback-only behaviour.
+        let yaml = "bind: 127.0.0.1:7777\nworkspaces:\n  - id: a\n    root: /srv/a\n";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert!(config.auth.is_none());
+        assert!(!config.has_auth());
+    }
+
+    #[test]
+    fn parses_auth_tokens_with_ids_wildcard_and_capabilities() {
+        let yaml = "\
+bind: 127.0.0.1:7777
+auth:
+  tokens:
+    - token: secret-a
+      workspaces: [\"a\"]
+      capabilities: [\"read\", \"refresh\"]
+    - token: secret-all
+      workspaces: [\"*\"]
+      capabilities: [\"read\"]
+workspaces:
+  - id: a
+    root: /srv/a
+";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert!(config.has_auth());
+        let auth = config.auth.as_ref().unwrap();
+        assert_eq!(auth.tokens.len(), 2);
+        assert_eq!(
+            auth.tokens[0].scope().unwrap(),
+            WorkspaceScope::Ids(vec!["a".to_owned()])
+        );
+        assert_eq!(
+            auth.tokens[0].capabilities,
+            vec![Capability::Read, Capability::Refresh]
+        );
+        assert_eq!(auth.tokens[1].scope().unwrap(), WorkspaceScope::All);
+        assert_eq!(auth.tokens[1].capabilities, vec![Capability::Read]);
+    }
+
+    #[test]
+    fn parses_upload_capability_as_reserved() {
+        // `upload` is reserved/deferred but must parse so configs can name it.
+        let yaml = "\
+bind: 127.0.0.1:7777
+auth:
+  tokens:
+    - token: s
+      workspaces: [\"a\"]
+      capabilities: [\"upload\"]
+workspaces:
+  - id: a
+    root: /srv/a
+";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config.auth.unwrap().tokens[0].capabilities,
+            vec![Capability::Upload]
+        );
+    }
+
+    #[test]
+    fn non_loopback_bind_allowed_when_auth_configured() {
+        let yaml = "\
+bind: 0.0.0.0:7777
+auth:
+  tokens:
+    - token: s
+      workspaces: [\"*\"]
+      capabilities: [\"read\"]
+workspaces:
+  - id: a
+    root: /srv/a
+";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn non_loopback_bind_rejected_when_auth_has_zero_tokens() {
+        let yaml =
+            "bind: 0.0.0.0:7777\nauth:\n  tokens: []\nworkspaces:\n  - id: a\n    root: /srv/a\n";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::NonLoopbackBind(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_token_secret() {
+        let yaml = "\
+bind: 127.0.0.1:7777
+auth:
+  tokens:
+    - token: \"\"
+      workspaces: [\"a\"]
+      capabilities: [\"read\"]
+workspaces:
+  - id: a
+    root: /srv/a
+";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(config.validate(), Err(ConfigError::EmptyToken)));
+    }
+
+    #[test]
+    fn rejects_empty_token_workspaces() {
+        let yaml = "\
+bind: 127.0.0.1:7777
+auth:
+  tokens:
+    - token: s
+      workspaces: []
+      capabilities: [\"read\"]
+workspaces:
+  - id: a
+    root: /srv/a
+";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::EmptyTokenWorkspaces)
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_scoped_workspace() {
+        let yaml = "\
+bind: 127.0.0.1:7777
+auth:
+  tokens:
+    - token: s
+      workspaces: [\"ghost\"]
+      capabilities: [\"read\"]
+workspaces:
+  - id: a
+    root: /srv/a
+";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::UnknownScopedWorkspace(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_token_secrets() {
+        let yaml = "\
+bind: 127.0.0.1:7777
+auth:
+  tokens:
+    - token: dup
+      workspaces: [\"a\"]
+      capabilities: [\"read\"]
+    - token: dup
+      workspaces: [\"*\"]
+      capabilities: [\"refresh\"]
+workspaces:
+  - id: a
+    root: /srv/a
+";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::DuplicateToken)
+        ));
+    }
+
+    #[test]
+    fn rejects_wildcard_mixed_with_ids() {
+        let yaml = "\
+bind: 127.0.0.1:7777
+auth:
+  tokens:
+    - token: s
+      workspaces: [\"*\", \"a\"]
+      capabilities: [\"read\"]
+workspaces:
+  - id: a
+    root: /srv/a
+";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::MixedWildcardScope)
         ));
     }
 }

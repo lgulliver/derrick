@@ -28,6 +28,8 @@ serde_yaml = { workspace = true }
 tracing = { workspace = true }
 # justification: serialize the IndexStatus returned by derrick_survey_refresh.
 serde_json = { workspace = true }
+# justification: constant-time bearer-token comparison so token check is not timing-attackable (D83); no plain `==` on the secret.
+subtle = "2"
 
 [dev-dependencies]
 # justification: real temp repos for the multi-instance routing test (no mocks).

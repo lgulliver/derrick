@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use axum::http::request::Parts;
+use rmcp::handler::server::common::Extension;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
@@ -16,7 +18,8 @@ use serde::Deserialize;
 
 use derrick_survey::tools;
 
-use crate::config::{HubConfig, WorkspaceId};
+use crate::auth::{AuthRegistry, AuthzError, Principal, require_bearer};
+use crate::config::{Capability, HubConfig, WorkspaceId};
 use crate::hub::{Hub, HubError, WorkspaceEntry};
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -64,6 +67,40 @@ impl HubServer {
         Self {
             hub,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Authorize a tool call against the authenticated principal, if any.
+    ///
+    /// When auth is enabled, the bearer middleware has already injected a
+    /// [`Principal`] into the request `parts`; this checks it reaches
+    /// `workspace` and holds `capability`, mapping a refusal to a clear MCP
+    /// error (the authz equivalent of 403). When auth is disabled there is no
+    /// principal and the call is allowed unconditionally — preserving the
+    /// pre-auth, loopback-only behaviour. The workspace authz check runs
+    /// *before* [`Self::resolve`], so an out-of-scope id is reported as
+    /// forbidden rather than leaking whether it is hosted.
+    fn authorize(parts: &Parts, workspace: &str, capability: Capability) -> Result<(), McpError> {
+        let Some(principal) = Principal::from_parts(parts) else {
+            // Auth disabled: no principal was injected, so nothing to enforce.
+            return Ok(());
+        };
+        match principal.authorize(workspace, capability) {
+            Ok(()) => Ok(()),
+            Err(AuthzError::ForbiddenWorkspace) => {
+                tracing::debug!(%workspace, "survey hub: workspace not in token scope");
+                Err(McpError::invalid_request(
+                    format!("forbidden: token is not authorized for workspace {workspace:?}"),
+                    None,
+                ))
+            }
+            Err(AuthzError::MissingCapability(cap)) => {
+                tracing::debug!(%workspace, ?cap, "survey hub: token lacks capability");
+                Err(McpError::invalid_request(
+                    format!("forbidden: token lacks the {cap:?} capability for this tool"),
+                    None,
+                ))
+            }
         }
     }
 
@@ -125,7 +162,9 @@ impl HubServer {
     async fn derrick_survey_search(
         &self,
         params: Parameters<WorkspaceQueryParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        Self::authorize(&parts, &params.0.workspace, Capability::Read)?;
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
         let banner = Self::banner_mode(&entry);
@@ -148,7 +187,9 @@ impl HubServer {
     async fn derrick_survey_context(
         &self,
         params: Parameters<WorkspaceQueryParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        Self::authorize(&parts, &params.0.workspace, Capability::Read)?;
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
         let banner = Self::banner_mode(&entry);
@@ -172,7 +213,9 @@ impl HubServer {
     async fn derrick_survey_impact(
         &self,
         params: Parameters<WorkspaceImpactParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        Self::authorize(&parts, &params.0.workspace, Capability::Read)?;
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
         let banner = Self::banner_mode(&entry);
@@ -190,7 +233,9 @@ impl HubServer {
     async fn derrick_survey_status(
         &self,
         params: Parameters<WorkspaceStatusParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        Self::authorize(&parts, &params.0.workspace, Capability::Read)?;
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
         // Source-aware status: Local diffs the working tree, Pushed reports the
@@ -213,7 +258,9 @@ impl HubServer {
     async fn derrick_survey_refresh(
         &self,
         params: Parameters<WorkspaceRefreshParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        Self::authorize(&parts, &params.0.workspace, Capability::Refresh)?;
         let entry = self.resolve(&params.0.workspace).await?;
         let status = entry.force_refresh().await.map_err(tools::internal)?;
         let json = serde_json::to_string_pretty(&status)
@@ -246,23 +293,52 @@ impl ServerHandler for HubServer {
     }
 }
 
-/// Build the hub from `config`, then serve the survey tools over rmcp's
-/// streamable-HTTP transport bound to `config.bind` (a loopback address) until
-/// the process is shut down.
+/// Assemble the axum [`Router`](axum::Router) that serves `hub`'s survey tools
+/// over rmcp's streamable-HTTP transport, wiring the bearer-auth middleware when
+/// `config.auth` holds at least one token.
 ///
-/// No auth, no per-repo watcher — freshness is connect-time build plus
-/// poll-on-query against `config.freshness_ttl_secs`, with an explicit
-/// `derrick_survey_refresh` tool for proactive rebuilds. The connect-time build
-/// happens inside [`Hub::build`] before the listener is opened.
-pub async fn serve(config: &HubConfig) -> Result<(), HubError> {
-    let hub = Hub::build(config).await?;
+/// This is the single source of truth for the serve wiring: [`serve`] binds it
+/// to `config.bind`, and integration tests bind it to an ephemeral port so they
+/// exercise the exact production middleware stack rather than re-deriving it.
+pub fn build_router(hub: Hub, config: &HubConfig) -> axum::Router {
     let service = StreamableHttpService::new(
         move || Ok(HubServer::new(hub.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
+    let mut app = axum::Router::new().fallback_service(service);
+    if let Some(auth) = &config.auth {
+        if !auth.tokens.is_empty() {
+            let registry = Arc::new(AuthRegistry::build(auth));
+            app = app.layer(axum::middleware::from_fn(move |req, next| {
+                let registry = registry.clone();
+                require_bearer(registry, req, next)
+            }));
+            tracing::info!(
+                tokens = auth.tokens.len(),
+                "survey hub: bearer auth enabled"
+            );
+        }
+    }
+    app
+}
 
-    let app = axum::Router::new().fallback_service(service);
+/// Build the hub from `config`, then serve the survey tools over rmcp's
+/// streamable-HTTP transport bound to `config.bind` (a loopback address) until
+/// the process is shut down.
+///
+/// No per-repo watcher — freshness is connect-time build plus poll-on-query
+/// against `config.freshness_ttl_secs`, with an explicit `derrick_survey_refresh`
+/// tool for proactive rebuilds. The connect-time build happens inside
+/// [`Hub::build`] before the listener is opened.
+///
+/// Auth (D83): when `config.auth` holds ≥1 token, the rmcp service is wrapped in
+/// the [`require_bearer`] middleware so every request is authenticated before
+/// dispatch and each tool call is authorized in-handler against the token's
+/// scope; otherwise the service is served as-is (loopback-only, no token).
+pub async fn serve(config: &HubConfig) -> Result<(), HubError> {
+    let hub = Hub::build(config).await?;
+    let app = build_router(hub, config);
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .map_err(|source| HubError::Bind {
