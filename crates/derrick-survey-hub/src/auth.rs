@@ -68,6 +68,21 @@ impl Principal {
         self.capabilities.contains(&capability)
     }
 
+    /// Filter `configured` down to the workspace ids this principal may reach,
+    /// preserving order. A wildcard (`*`) scope keeps all; an explicit scope
+    /// keeps only the intersection. Used by the discovery tool so a token never
+    /// learns of workspaces outside its scope.
+    pub fn visible_ids<'a, I>(&self, configured: I) -> Vec<String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        configured
+            .into_iter()
+            .filter(|id| self.allows_workspace(id))
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
     /// Authorize a tool call: the principal must reach `workspace` *and* hold
     /// `capability`. The workspace check is applied first so a token never
     /// learns which capabilities gate a workspace it cannot see.

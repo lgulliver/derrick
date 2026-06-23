@@ -24,8 +24,11 @@ use crate::hub::{Hub, HubError, WorkspaceEntry};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WorkspaceQueryParams {
-    /// Workspace id to route this call to (see the server instructions).
-    workspace: String,
+    /// Workspace id to route this call to. Optional when this endpoint is
+    /// already pinned to a workspace (addressed via a `/w/<id>` path); required
+    /// on the root endpoint (see the server instructions).
+    #[serde(default)]
+    workspace: Option<String>,
     /// Search terms (matched against symbol names and signatures).
     query: String,
     /// Maximum number of entry-point hits (default 20).
@@ -35,38 +38,106 @@ struct WorkspaceQueryParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WorkspaceImpactParams {
-    /// Workspace id to route this call to (see the server instructions).
-    workspace: String,
+    /// Workspace id to route this call to. Optional on a `/w/<id>` endpoint,
+    /// required on the root endpoint (see the server instructions).
+    #[serde(default)]
+    workspace: Option<String>,
     /// Symbol name to resolve.
     symbol: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WorkspaceStatusParams {
-    /// Workspace id to route this call to (see the server instructions).
-    workspace: String,
+    /// Workspace id to route this call to. Optional on a `/w/<id>` endpoint,
+    /// required on the root endpoint (see the server instructions).
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WorkspaceRefreshParams {
-    /// Workspace id to route this call to (see the server instructions).
-    workspace: String,
+    /// Workspace id to route this call to. Optional on a `/w/<id>` endpoint,
+    /// required on the root endpoint (see the server instructions).
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
+/// Discovery tool params: no `workspace` argument — it lists the ids the caller
+/// may reach.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListWorkspacesParams {}
+
 /// MCP server fronting a [`Hub`] of survey indexes.
+///
+/// A server is either **unpinned** (the root mount, where every tool requires a
+/// `workspace` argument) or **pinned** to one [`WorkspaceId`] (a `/w/<id>`
+/// mount, where the `workspace` argument is optional and, if present, must match
+/// the pin). [`build_router`] mounts one unpinned root plus one pinned mount per
+/// configured workspace.
 #[derive(Clone)]
 pub struct HubServer {
     hub: Hub,
+    /// The workspace this server is pinned to, if any. `None` for the root
+    /// mount (every tool then requires an explicit `workspace`); `Some(id)` for
+    /// a `/w/<id>` mount (the `workspace` argument becomes optional and is
+    /// defaulted to the pin).
+    pinned: Option<WorkspaceId>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl HubServer {
-    /// Wrap a built [`Hub`] in an MCP server.
+    /// Wrap a built [`Hub`] in an unpinned MCP server (the root mount). Every
+    /// tool call must carry an explicit `workspace` argument.
     pub fn new(hub: Hub) -> Self {
         Self {
             hub,
+            pinned: None,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Wrap a built [`Hub`] in a server pinned to `id` (a `/w/<id>` mount). Tool
+    /// calls may omit the `workspace` argument — it defaults to the pin — and a
+    /// present argument must equal `id` or the call errors rather than silently
+    /// crossing workspaces.
+    pub fn pinned(hub: Hub, id: WorkspaceId) -> Self {
+        Self {
+            hub,
+            pinned: Some(id),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Resolve the effective workspace id for a call from the optional
+    /// `workspace` argument and this server's pin.
+    ///
+    /// - explicit argument present → use it, but if the server is pinned and the
+    ///   argument names a *different* workspace, reject the call rather than
+    ///   silently crossing workspaces;
+    /// - argument absent → use the pin if pinned, else a clear "workspace
+    ///   required" error.
+    ///
+    /// This runs before [`Self::authorize`]/[`Self::resolve`], so authorization
+    /// always applies to the *resolved* id (D83 unchanged).
+    fn workspace_for(&self, argument: Option<&str>) -> Result<String, McpError> {
+        match (argument, &self.pinned) {
+            (Some(arg), Some(pin)) if arg != pin.as_str() => Err(McpError::invalid_params(
+                format!(
+                    "workspace argument {arg:?} does not match this endpoint's pinned \
+                     workspace {:?}; omit the argument or address the root endpoint",
+                    pin.as_str()
+                ),
+                None,
+            )),
+            (Some(arg), _) => Ok(arg.to_owned()),
+            (None, Some(pin)) => Ok(pin.to_string()),
+            (None, None) => Err(McpError::invalid_params(
+                "workspace required: pass a `workspace` argument or address the hub \
+                 via a /w/<id> path"
+                    .to_owned(),
+                None,
+            )),
         }
     }
 
@@ -164,8 +235,9 @@ impl HubServer {
         params: Parameters<WorkspaceQueryParams>,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        Self::authorize(&parts, &params.0.workspace, Capability::Read)?;
-        let entry = self.resolve(&params.0.workspace).await?;
+        let workspace = self.workspace_for(params.0.workspace.as_deref())?;
+        Self::authorize(&parts, &workspace, Capability::Read)?;
+        let entry = self.resolve(&workspace).await?;
         self.ensure_fresh(&entry).await?;
         let banner = Self::banner_mode(&entry);
         let survey = entry.survey().await;
@@ -189,8 +261,9 @@ impl HubServer {
         params: Parameters<WorkspaceQueryParams>,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        Self::authorize(&parts, &params.0.workspace, Capability::Read)?;
-        let entry = self.resolve(&params.0.workspace).await?;
+        let workspace = self.workspace_for(params.0.workspace.as_deref())?;
+        Self::authorize(&parts, &workspace, Capability::Read)?;
+        let entry = self.resolve(&workspace).await?;
         self.ensure_fresh(&entry).await?;
         let banner = Self::banner_mode(&entry);
         let survey = entry.survey().await;
@@ -215,8 +288,9 @@ impl HubServer {
         params: Parameters<WorkspaceImpactParams>,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        Self::authorize(&parts, &params.0.workspace, Capability::Read)?;
-        let entry = self.resolve(&params.0.workspace).await?;
+        let workspace = self.workspace_for(params.0.workspace.as_deref())?;
+        Self::authorize(&parts, &workspace, Capability::Read)?;
+        let entry = self.resolve(&workspace).await?;
         self.ensure_fresh(&entry).await?;
         let banner = Self::banner_mode(&entry);
         let survey = entry.survey().await;
@@ -235,8 +309,9 @@ impl HubServer {
         params: Parameters<WorkspaceStatusParams>,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        Self::authorize(&parts, &params.0.workspace, Capability::Read)?;
-        let entry = self.resolve(&params.0.workspace).await?;
+        let workspace = self.workspace_for(params.0.workspace.as_deref())?;
+        Self::authorize(&parts, &workspace, Capability::Read)?;
+        let entry = self.resolve(&workspace).await?;
         self.ensure_fresh(&entry).await?;
         // Source-aware status: Local diffs the working tree, Pushed reports the
         // prebuilt index's counts without a (nonexistent) tree diff. The shared
@@ -260,10 +335,49 @@ impl HubServer {
         params: Parameters<WorkspaceRefreshParams>,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
-        Self::authorize(&parts, &params.0.workspace, Capability::Refresh)?;
-        let entry = self.resolve(&params.0.workspace).await?;
+        let workspace = self.workspace_for(params.0.workspace.as_deref())?;
+        Self::authorize(&parts, &workspace, Capability::Refresh)?;
+        let entry = self.resolve(&workspace).await?;
         let status = entry.force_refresh().await.map_err(tools::internal)?;
         let json = serde_json::to_string_pretty(&status)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(
+        description = "List the workspace ids this endpoint can reach — call this \
+        first to discover what to pass as the `workspace` argument. Takes no \
+        arguments. The result is scoped to the caller's token: a wildcard token \
+        (or no auth) sees every hosted workspace, a scoped token sees only its \
+        own. A /w/<id> endpoint lists just its pinned workspace."
+    )]
+    async fn derrick_survey_list_workspaces(
+        &self,
+        _params: Parameters<ListWorkspacesParams>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        // On a pinned (/w/<id>) mount the listing is exactly that one id —
+        // provided the principal can reach it; otherwise it is empty, matching
+        // how the other tools refuse to confirm a workspace outside scope. On
+        // the root mount the listing is every configured id, intersected with
+        // the principal's scope.
+        let candidates: Vec<String> = match &self.pinned {
+            Some(pin) => vec![pin.to_string()],
+            None => self
+                .hub
+                .workspace_ids()
+                .await
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        };
+        let visible = match Principal::from_parts(&parts) {
+            // Auth disabled: no principal, so every candidate is visible.
+            None => candidates,
+            // Auth enabled: keep only the ids the token's scope reaches.
+            Some(principal) => principal.visible_ids(candidates.iter().map(String::as_str)),
+        };
+        let json = serde_json::to_string_pretty(&visible)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -275,8 +389,12 @@ impl ServerHandler for HubServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(
             "Query derrick's native code-graph indexes across several repositories. \
-             Every tool takes a required `workspace` argument selecting which repo's \
-             index to query. Use derrick_survey_search to find symbols, \
+             Call derrick_survey_list_workspaces first to discover which workspace \
+             ids you can reach. Each query tool then takes a `workspace` argument \
+             selecting which repo's index to query: required on the root endpoint, \
+             but optional when you address the hub via a /w/<id> path (which pins \
+             the endpoint to that workspace; a `workspace` argument passed there \
+             must match the pinned id). Use derrick_survey_search to find symbols, \
              derrick_survey_context for architecture questions, derrick_survey_impact \
              before changing a symbol, and derrick_survey_status to check freshness. \
              Workspaces are either Local (the hub holds the working tree and builds \
@@ -308,14 +426,36 @@ impl ServerHandler for HubServer {
 /// smuggle in an unvalidated config — e.g. an ambiguous `["*", "repo-a"]` scope,
 /// which validation rejects (and which `AuthRegistry::build` would in any case
 /// treat as fail-closed deny-all, never `WorkspaceScope::All`).
+///
+/// Routing (D84): the root path serves an *unpinned* [`HubServer`] (every tool
+/// needs an explicit `workspace` argument); additionally, each configured
+/// workspace gets a *pinned* mount at the literal path `/w/<id>` backed by a
+/// `HubServer::pinned`, where the `workspace` argument is optional. Literal
+/// paths avoid path-parameter extraction. The bearer-auth layer is applied last,
+/// so it wraps the root mount and every `/w/<id>` mount uniformly — authorization
+/// still runs in-handler against the *resolved* workspace (D83 unchanged).
 pub fn build_router(hub: Hub, config: &HubConfig) -> Result<axum::Router, HubError> {
     config.validate()?;
-    let service = StreamableHttpService::new(
-        move || Ok(HubServer::new(hub.clone())),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
-    );
-    let mut app = axum::Router::new().fallback_service(service);
+    let new_service = |server: HubServer| {
+        StreamableHttpService::new(
+            move || Ok(server.clone()),
+            Arc::new(LocalSessionManager::default()),
+            StreamableHttpServerConfig::default(),
+        )
+    };
+
+    let mut app = axum::Router::new();
+    // Pinned per-workspace mounts at literal `/w/<id>` paths. `config.validate()`
+    // has already accepted every id, so `WorkspaceId::new` cannot fail here.
+    for workspace in &config.workspaces {
+        let id = WorkspaceId::new(workspace.id.clone())?;
+        let path = format!("/w/{id}");
+        let pinned = new_service(HubServer::pinned(hub.clone(), id));
+        app = app.nest_service(&path, pinned);
+    }
+    // Root mount (unpinned): every tool requires an explicit `workspace`.
+    app = app.fallback_service(new_service(HubServer::new(hub)));
+
     if let Some(auth) = &config.auth {
         if !auth.tokens.is_empty() {
             let registry = Arc::new(AuthRegistry::build(auth));
