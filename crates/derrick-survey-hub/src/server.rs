@@ -227,7 +227,9 @@ impl HubServer {
 
     #[tool(
         description = "Full-text search over indexed symbol names and signatures \
-        in the given workspace. Requires a `workspace` argument. Returns matching \
+        in the given workspace. The `workspace` argument is required on the root \
+        endpoint and optional on a `/w/<id>` endpoint (where any value passed \
+        must match the pinned id). Returns matching \
         symbols with file:line locations."
     )]
     async fn derrick_survey_search(
@@ -254,7 +256,9 @@ impl HubServer {
     #[tool(
         description = "Resolve a query to entry-point symbols plus the symbols \
         they reference in the given workspace — the one-call answer to an \
-        architecture question. Requires a `workspace` argument."
+        architecture question. The `workspace` argument is required on the root \
+        endpoint and optional on a `/w/<id>` endpoint (where any value passed \
+        must match the pinned id)."
     )]
     async fn derrick_survey_context(
         &self,
@@ -279,8 +283,10 @@ impl HubServer {
 
     #[tool(
         description = "Show the direct callers and callees of a symbol in the \
-        given workspace — its impact radius before you change it. Requires a \
-        `workspace` argument. Matching is by name, so results may include \
+        given workspace — its impact radius before you change it. The \
+        `workspace` argument is required on the root endpoint and optional on a \
+        `/w/<id>` endpoint (where any value passed must match the pinned id). \
+        Matching is by name, so results may include \
         unrelated symbols that share the name."
     )]
     async fn derrick_survey_impact(
@@ -299,8 +305,9 @@ impl HubServer {
 
     #[tool(
         description = "Index freshness and size summary for the given workspace, \
-        including files that differ from the working tree. Requires a \
-        `workspace` argument. The response includes a `freshness` field \
+        including files that differ from the working tree. The `workspace` \
+        argument is required on the root endpoint and optional on a `/w/<id>` \
+        endpoint (where any value passed must match the pinned id). The response includes a `freshness` field \
         (\"fresh\" | \"rebuilding\" | \"stale since <ts>\") and an optional \
         `last_build_ts` (Unix seconds)."
     )]
@@ -326,7 +333,9 @@ impl HubServer {
 
     #[tool(
         description = "Force an incremental rebuild of the given workspace's index \
-        now, then return its post-build status. Requires a `workspace` argument. \
+        now, then return its post-build status. The `workspace` argument is \
+        required on the root endpoint and optional on a `/w/<id>` endpoint \
+        (where any value passed must match the pinned id). \
         Use this after a known change (e.g. from CI) to reconcile the index \
         immediately instead of waiting for the poll-on-query freshness window."
     )]
