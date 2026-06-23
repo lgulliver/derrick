@@ -105,6 +105,18 @@ impl HubServer {
             .map_err(tools::internal)
     }
 
+    /// The staleness-banner mode for `entry`, derived from its source. A Local
+    /// workspace is tree-backed so the tree-vs-index banner is meaningful; a
+    /// Pushed workspace has no working tree, so the banner is suppressed (it
+    /// would otherwise fire bogusly during every reload window).
+    fn banner_mode(entry: &WorkspaceEntry) -> tools::BannerMode {
+        if entry.source().is_tree_backed() {
+            tools::BannerMode::TreeBacked
+        } else {
+            tools::BannerMode::None
+        }
+    }
+
     #[tool(
         description = "Full-text search over indexed symbol names and signatures \
         in the given workspace. Requires a `workspace` argument. Returns matching \
@@ -116,8 +128,16 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
+        let banner = Self::banner_mode(&entry);
         let survey = entry.survey().await;
-        tools::answer_search(&survey, &entry.dirty, &params.0.query, params.0.limit).await
+        tools::answer_search(
+            &survey,
+            &entry.dirty,
+            banner,
+            &params.0.query,
+            params.0.limit,
+        )
+        .await
     }
 
     #[tool(
@@ -131,8 +151,16 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
+        let banner = Self::banner_mode(&entry);
         let survey = entry.survey().await;
-        tools::answer_context(&survey, &entry.dirty, &params.0.query, params.0.limit).await
+        tools::answer_context(
+            &survey,
+            &entry.dirty,
+            banner,
+            &params.0.query,
+            params.0.limit,
+        )
+        .await
     }
 
     #[tool(
@@ -147,8 +175,9 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
+        let banner = Self::banner_mode(&entry);
         let survey = entry.survey().await;
-        tools::answer_impact(&survey, &entry.dirty, &params.0.symbol).await
+        tools::answer_impact(&survey, &entry.dirty, banner, &params.0.symbol).await
     }
 
     #[tool(
@@ -166,11 +195,13 @@ impl HubServer {
         self.ensure_fresh(&entry).await?;
         // Source-aware status: Local diffs the working tree, Pushed reports the
         // prebuilt index's counts without a (nonexistent) tree diff. The shared
-        // `respond` still prefixes the staleness banner while a rebuild is in
-        // flight, keeping behaviour identical to the other tools.
+        // `respond` prefixes the staleness banner while a rebuild is in flight
+        // only for a tree-backed (Local) source; a Pushed reload window passes
+        // `BannerMode::None` so it never emits a bogus tree-vs-index banner.
+        let banner = Self::banner_mode(&entry);
         let status = entry.status().await.map_err(tools::internal)?;
         let survey = entry.survey().await;
-        tools::respond(&survey, &entry.dirty, &status).await
+        tools::respond(&survey, &entry.dirty, banner, &status).await
     }
 
     #[tool(

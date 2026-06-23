@@ -62,7 +62,14 @@ impl SurveyServer {
         &self,
         params: Parameters<QueryParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::answer_search(&self.survey, &self.dirty, &params.0.query, params.0.limit).await
+        tools::answer_search(
+            &self.survey,
+            &self.dirty,
+            tools::BannerMode::TreeBacked,
+            &params.0.query,
+            params.0.limit,
+        )
+        .await
     }
 
     #[tool(
@@ -73,7 +80,14 @@ impl SurveyServer {
         &self,
         params: Parameters<QueryParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::answer_context(&self.survey, &self.dirty, &params.0.query, params.0.limit).await
+        tools::answer_context(
+            &self.survey,
+            &self.dirty,
+            tools::BannerMode::TreeBacked,
+            &params.0.query,
+            params.0.limit,
+        )
+        .await
     }
 
     #[tool(description = "Show the direct callers and callees of a symbol — its \
@@ -83,7 +97,13 @@ impl SurveyServer {
         &self,
         params: Parameters<ImpactParams>,
     ) -> Result<CallToolResult, McpError> {
-        tools::answer_impact(&self.survey, &self.dirty, &params.0.symbol).await
+        tools::answer_impact(
+            &self.survey,
+            &self.dirty,
+            tools::BannerMode::TreeBacked,
+            &params.0.symbol,
+        )
+        .await
     }
 
     #[tool(
@@ -93,7 +113,7 @@ impl SurveyServer {
         `last_build_ts` (Unix seconds)."
     )]
     async fn derrick_survey_status(&self) -> Result<CallToolResult, McpError> {
-        tools::answer_status(&self.survey, &self.dirty).await
+        tools::answer_status(&self.survey, &self.dirty, tools::BannerMode::TreeBacked).await
     }
 }
 

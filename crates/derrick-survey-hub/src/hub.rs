@@ -42,6 +42,14 @@ impl WorkspaceSource {
             WorkspaceSource::Pushed { .. } => "pushed",
         }
     }
+
+    /// Whether this workspace is backed by a working tree, which decides whether
+    /// the tree-vs-index staleness banner is meaningful. `Local` holds a tree;
+    /// `Pushed` serves a prebuilt `.db` with no tree, so the banner is bogus and
+    /// must be suppressed.
+    pub fn is_tree_backed(&self) -> bool {
+        matches!(self, WorkspaceSource::Local { .. })
+    }
 }
 
 /// One hosted workspace: its open index plus the dirty flag that drives the

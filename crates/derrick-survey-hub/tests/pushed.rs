@@ -16,10 +16,18 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use derrick_survey::{BuildOptions, Survey, SurveyConfig};
-use derrick_survey_hub::{Hub, HubConfig, WorkspaceConfig, WorkspaceId, WorkspaceSource};
+use derrick_survey_hub::{
+    Hub, HubConfig, HubServer, WorkspaceConfig, WorkspaceId, WorkspaceSource,
+};
+use rmcp::model::CallToolRequestParams;
+use rmcp::service::ServiceExt;
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 /// Produce a prebuilt index `.db` at `db_path`, exactly as CI would push one:
 /// build the index into a *fresh* temp file, fully close it (checkpointing WAL),
@@ -404,6 +412,163 @@ async fn mixed_local_and_pushed_route_correctly() {
             .any(|h| h.name == "pushed_only_symbol"),
         "local workspace must not contain pushed_only_symbol: {local_lacks_pushed:?}"
     );
+}
+
+/// Serve `hub` over an ephemeral loopback HTTP listener and connect an rmcp
+/// client. Returns the client and the server task (abort it when done).
+async fn serve_and_connect(
+    hub: Hub,
+) -> (
+    rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let service = StreamableHttpService::new(
+        move || Ok(HubServer::new(hub.clone())),
+        std::sync::Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    let app = axum::Router::new().fallback_service(service);
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let transport = StreamableHttpClientTransport::from_uri(format!("http://{addr}/"));
+    let client = ().serve(transport).await.unwrap();
+    (client, server)
+}
+
+/// Call `tool` with `args` and return the joined text content.
+async fn call_text(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tool: &str,
+    args: serde_json::Value,
+) -> String {
+    let mut req = CallToolRequestParams::default();
+    req.name = tool.to_owned().into();
+    req.arguments = args.as_object().cloned();
+    let result = client.call_tool(req).await.unwrap();
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect()
+}
+
+/// A Pushed workspace must NOT emit a staleness banner even when its `dirty`
+/// flag is armed (as it is during/around a `reload_pushed` window). The banner
+/// is a tree-vs-index diff, and a pushed index has no working tree, so the diff
+/// would bogusly report every indexed file as differing. We arm `dirty` on the
+/// shared entry (the same `Arc<AtomicBool>` the request path observes) and prove
+/// search/status come back with the payload but no `STALE:` text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pushed_dirty_does_not_emit_stale_banner() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("prebuilt.db");
+    build_prebuilt_db(&db_path, "pub fn pushed_symbol() {}\n").await;
+
+    // Long TTL so ensure_fresh's gate short-cuts: it never reloads and never
+    // clears the dirty flag we arm below.
+    let hub = Hub::build(&pushed_config(&db_path, 3600)).await.unwrap();
+    let id = WorkspaceId::new("pushed").unwrap();
+    // Arm dirty on the shared entry; the request path observes the same Arc.
+    let entry = hub.entry(&id).await.unwrap();
+    entry.dirty.store(true, Ordering::Relaxed);
+
+    let (client, server) = serve_and_connect(hub).await;
+
+    let search = call_text(
+        &client,
+        "derrick_survey_search",
+        serde_json::json!({ "workspace": "pushed", "query": "pushed_symbol" }),
+    )
+    .await;
+    assert!(
+        !search.contains("STALE:"),
+        "a dirty pushed workspace must not emit a tree-vs-index banner: {search}"
+    );
+    assert!(
+        search.contains("pushed_symbol"),
+        "the search payload is still served: {search}"
+    );
+
+    let status = call_text(
+        &client,
+        "derrick_survey_status",
+        serde_json::json!({ "workspace": "pushed" }),
+    )
+    .await;
+    assert!(
+        !status.contains("STALE:"),
+        "a dirty pushed workspace status must not emit a banner: {status}"
+    );
+    assert!(
+        status.contains("\"freshness\""),
+        "the status payload is still served: {status}"
+    );
+
+    client.cancel().await.unwrap();
+    server.abort();
+}
+
+/// A Local workspace must STILL emit the staleness banner when dirty + a
+/// divergent tree, proving the source-aware change leaves Local (and therefore
+/// the stdio server, which always passes `TreeBacked`) behaviour unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_dirty_and_pending_still_emits_stale_banner() {
+    let local_repo = tempfile::tempdir().unwrap();
+    std::fs::write(local_repo.path().join("a.rs"), "pub fn local_symbol() {}\n").unwrap();
+    std::fs::create_dir_all(local_repo.path().join(".derrick")).unwrap();
+
+    // Long TTL so ensure_fresh does not rebuild mid-test and clear dirty.
+    let config = HubConfig {
+        bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        freshness_ttl_secs: 3600,
+        workspaces: vec![WorkspaceConfig {
+            id: "local".to_owned(),
+            root: Some(local_repo.path().to_path_buf()),
+            db_path: None,
+            pushed_db: None,
+        }],
+    };
+    let hub = Hub::build(&config).await.unwrap();
+    let id = WorkspaceId::new("local").unwrap();
+
+    // Diverge the tree from the index (an unindexed file) so `pending` is
+    // non-empty, then arm dirty on the shared entry to arm the banner path.
+    std::fs::write(
+        local_repo.path().join("extra.rs"),
+        "pub fn extra_symbol() {}\n",
+    )
+    .unwrap();
+    let entry = hub.entry(&id).await.unwrap();
+    entry.dirty.store(true, Ordering::Relaxed);
+
+    let (client, server) = serve_and_connect(hub).await;
+
+    let search = call_text(
+        &client,
+        "derrick_survey_search",
+        serde_json::json!({ "workspace": "local", "query": "local_symbol" }),
+    )
+    .await;
+    assert!(
+        search.contains("STALE:"),
+        "a dirty local workspace with a divergent tree must emit the banner: {search}"
+    );
+    assert!(
+        search.contains("extra.rs"),
+        "the banner should name the pending file: {search}"
+    );
+    assert!(
+        search.contains("local_symbol"),
+        "the search payload is still served after the banner: {search}"
+    );
+
+    client.cancel().await.unwrap();
+    server.abort();
 }
 
 /// A Pushed workspace pointed at a missing `.db` fails to build with a clear
