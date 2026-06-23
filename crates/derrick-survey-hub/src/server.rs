@@ -164,8 +164,13 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
+        // Source-aware status: Local diffs the working tree, Pushed reports the
+        // prebuilt index's counts without a (nonexistent) tree diff. The shared
+        // `respond` still prefixes the staleness banner while a rebuild is in
+        // flight, keeping behaviour identical to the other tools.
+        let status = entry.status().await.map_err(tools::internal)?;
         let survey = entry.survey().await;
-        tools::answer_status(&survey, &entry.dirty).await
+        tools::respond(&survey, &entry.dirty, &status).await
     }
 
     #[tool(

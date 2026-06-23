@@ -117,6 +117,27 @@ impl WorkspaceEntry {
         &self.source
     }
 
+    /// Freshness and size summary for this workspace, branching on its source.
+    ///
+    /// - **Local** — `status()`, which diffs the working tree the hub holds, so
+    ///   `pending` reflects real drift between the tree and the index.
+    /// - **Pushed** — `stats()`, which reports the prebuilt index's counts
+    ///   without a tree diff. A pushed index has no working tree (its
+    ///   `repo_root` is just the DB's parent dir), so `status()` would
+    ///   spuriously report every indexed file as `deleted` and read `stale`;
+    ///   `stats()` returns an empty `pending` and a fresh label, which is
+    ///   correct — a pushed index *is* exactly what was built.
+    ///
+    /// Clones the served [`Survey`] out under a short read guard, then runs the
+    /// query lock-free (see [`Self::survey`]).
+    pub async fn status(&self) -> Result<IndexStatus, SurveyError> {
+        let survey = self.survey().await;
+        match &self.source {
+            WorkspaceSource::Local { .. } => survey.status().await,
+            WorkspaceSource::Pushed { .. } => survey.stats().await,
+        }
+    }
+
     /// Ensure the index is fresh enough to answer a query, honouring `ttl`.
     ///
     /// Fast path: if less than `ttl` has elapsed since the last probe, return
@@ -211,7 +232,7 @@ impl WorkspaceEntry {
             }
         }
         *self.last_checked.lock().await = Instant::now();
-        self.survey().await.status().await
+        self.status().await
     }
 
     /// Reload a Pushed workspace only when the on-disk `.db` changed.

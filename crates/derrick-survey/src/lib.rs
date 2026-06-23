@@ -185,4 +185,22 @@ impl Survey {
     pub async fn status(&self) -> Result<IndexStatus, SurveyError> {
         self.status_with_flag(false).await
     }
+
+    /// Size summary WITHOUT diffing the working tree: the same [`IndexStatus`]
+    /// shape as [`status`](Self::status), but `pending` is always empty and
+    /// freshness is the normal "fresh"/timestamped label.
+    ///
+    /// Use this for a pushed index, which serves a prebuilt `.db` and has no
+    /// working tree to diff against (its `repo_root` is merely the DB's parent
+    /// directory). Calling `status()` on such an index would walk that directory
+    /// and spuriously report every indexed file as `deleted`; `stats()` reports
+    /// the real counts the index was built with and never touches `repo_root`.
+    pub async fn stats(&self) -> Result<IndexStatus, SurveyError> {
+        let readers = std::sync::Arc::clone(&self.inner.readers);
+        tokio::task::spawn_blocking(move || {
+            let lease = readers.lease()?;
+            query::stats(lease.connection()?)
+        })
+        .await?
+    }
 }

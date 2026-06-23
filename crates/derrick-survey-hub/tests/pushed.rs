@@ -129,6 +129,71 @@ async fn pushed_workspace_serves_prebuilt_db() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pushed_status_is_fresh_not_everything_deleted() {
+    // A pushed `.db` lives in a dir with NO working tree alongside it. The old
+    // bug: status() walked that dir, found none of the indexed files, and
+    // reported every file `deleted` + freshness `stale`. The source-aware
+    // status path must instead report empty pending + a non-stale label.
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("prebuilt.db");
+    build_prebuilt_db(
+        &db_path,
+        "pub fn one() {}\npub fn two() {}\npub fn three() {}\n",
+    )
+    .await;
+
+    let hub = Hub::build(&pushed_config(&db_path, 3600)).await.unwrap();
+    let id = WorkspaceId::new("pushed").unwrap();
+    let entry = hub.entry(&id).await.unwrap();
+
+    let status = entry.status().await.unwrap();
+    assert!(
+        status.pending.is_empty(),
+        "a pushed index has no working tree to diff; pending must be empty \
+         (the previous bogus 'everything deleted' is gone): {status:?}"
+    );
+    assert!(
+        !status.freshness.starts_with("stale"),
+        "a pushed index must not read stale: {status:?}"
+    );
+    assert_eq!(status.freshness, "fresh");
+    assert_eq!(
+        status.files, 1,
+        "the prebuilt index covers one source file (lib.rs): {status:?}"
+    );
+    assert!(
+        status.symbols >= 3,
+        "the prebuilt index holds the three baked symbols: {status:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pushed_force_refresh_returns_fresh_status() {
+    // force_refresh (the `derrick_survey_refresh` return value) must come back
+    // with the source-aware status: empty pending + fresh, not the old bogus
+    // "everything deleted / stale".
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("prebuilt.db");
+    build_prebuilt_db(&db_path, "pub fn refreshed_symbol() {}\n").await;
+
+    let hub = Hub::build(&pushed_config(&db_path, 3600)).await.unwrap();
+    let id = WorkspaceId::new("pushed").unwrap();
+    let entry = hub.entry(&id).await.unwrap();
+
+    let status = entry.force_refresh().await.unwrap();
+    assert!(
+        status.pending.is_empty(),
+        "force_refresh on a pushed index must return empty pending: {status:?}"
+    );
+    assert!(
+        !status.freshness.starts_with("stale"),
+        "force_refresh on a pushed index must not read stale: {status:?}"
+    );
+    assert_eq!(status.freshness, "fresh");
+    assert_eq!(status.files, 1, "one source file in the prebuilt index");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pushed_force_refresh_hot_swaps_new_db() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("prebuilt.db");
