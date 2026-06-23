@@ -74,7 +74,7 @@ async fn spawn_hub(config: &HubConfig) -> (String, tokio::task::JoinHandle<()>) 
 
     // Use the production wiring (build_router) so the test exercises the exact
     // middleware stack, including the bearer-auth layer.
-    let app = build_router(hub, config);
+    let app = build_router(hub, config).expect("valid hub config builds a router");
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
@@ -126,7 +126,17 @@ async fn missing_or_bad_token_is_rejected_and_valid_token_accepted() {
             &uri, None,
         )))
         .await;
-    assert!(no_token.is_err(), "missing token must be rejected");
+    let no_token_msg = format!(
+        "{:?}",
+        no_token.expect_err("missing token must be rejected")
+    )
+    .to_lowercase();
+    assert!(
+        no_token_msg.contains("401")
+            || no_token_msg.contains("unauthorized")
+            || no_token_msg.contains("authrequired"),
+        "expected an unauthorized (401) error for a missing token, got: {no_token_msg}"
+    );
 
     // Bad token: same rejection.
     let bad = ()
@@ -135,7 +145,13 @@ async fn missing_or_bad_token_is_rejected_and_valid_token_accepted() {
             Some("nope"),
         )))
         .await;
-    assert!(bad.is_err(), "unknown token must be rejected");
+    let bad_msg = format!("{:?}", bad.expect_err("unknown token must be rejected")).to_lowercase();
+    assert!(
+        bad_msg.contains("401")
+            || bad_msg.contains("unauthorized")
+            || bad_msg.contains("authrequired"),
+        "expected an unauthorized (401) error for an unknown token, got: {bad_msg}"
+    );
 
     // Valid token: the handshake succeeds and a read is served.
     let client = ()

@@ -24,7 +24,6 @@
 //! [`serve`]: crate::serve
 //! [`StreamableHttpService`]: rmcp::transport::streamable_http_server::StreamableHttpService
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::Request;
@@ -97,10 +96,25 @@ impl Principal {
 /// the bearer check is not timing-attackable.
 #[derive(Clone)]
 pub struct AuthRegistry {
-    // Keyed by the raw secret only to dedup at build time; lookups iterate and
-    // compare in constant time rather than hashing, so a near-miss secret is
-    // not distinguishable by timing.
-    entries: Arc<HashMap<String, Principal>>,
+    // One entry per configured token. Each stores a fixed-length BLAKE3 digest
+    // of the secret (not the raw, variable-length secret): the constant-time
+    // compare in `resolve` then runs over equal-length inputs, so timing leaks
+    // neither the matched position nor the secret's length. Duplicate secrets
+    // are already rejected by `HubConfig::validate`.
+    entries: Arc<[AuthEntry]>,
+}
+
+/// One resolved token: the digest we compare against and the principal it
+/// grants. Never stores the raw secret.
+#[derive(Clone)]
+struct AuthEntry {
+    token_digest: [u8; 32],
+    principal: Principal,
+}
+
+/// Fixed-length digest of a token secret, so comparisons are length-independent.
+fn token_digest(token: &[u8]) -> [u8; 32] {
+    *blake3::hash(token).as_bytes()
 }
 
 impl AuthRegistry {
@@ -108,55 +122,60 @@ impl AuthRegistry {
     /// validated by [`HubConfig::validate`](crate::HubConfig::validate)
     /// (non-empty, unique, known scopes); this only materializes the lookup.
     pub fn build(auth: &AuthConfig) -> Self {
-        let mut entries = HashMap::with_capacity(auth.tokens.len());
-        for token in &auth.tokens {
-            entries.insert(
-                token.token.clone(),
-                Principal {
-                    scope: scope_of(token),
+        let entries: Vec<AuthEntry> = auth
+            .tokens
+            .iter()
+            .map(|token| AuthEntry {
+                token_digest: token_digest(token.token.as_bytes()),
+                principal: Principal {
+                    // Single source of scope parsing (shared with validate()): a
+                    // mixed `["*", id]` scope is rejected there, and if it ever
+                    // reaches here unvalidated we fail closed (deny-all) rather
+                    // than collapsing to `All`.
+                    scope: token
+                        .scope()
+                        .unwrap_or_else(|_| WorkspaceScope::Ids(Vec::new())),
                     capabilities: token.capabilities.clone().into(),
                 },
-            );
-        }
+            })
+            .collect();
         Self {
-            entries: Arc::new(entries),
+            entries: entries.into(),
         }
     }
 
-    /// Resolve a presented secret to its [`Principal`], comparing every
-    /// configured secret in constant time. Returns `None` for an unknown
-    /// secret. The token value is never logged.
+    /// Resolve a presented secret to its [`Principal`], comparing fixed-length
+    /// digests of every configured secret in constant time. Returns `None` for
+    /// an unknown secret. The token value is never logged. Comparing digests
+    /// (rather than the raw secrets) keeps the timing independent of the
+    /// presented token's length as well as its content and position.
     fn resolve(&self, presented: &str) -> Option<Principal> {
-        let presented = presented.as_bytes();
+        let presented = token_digest(presented.as_bytes());
         let mut matched: Option<&Principal> = None;
-        // Iterate all entries with a constant-time compare so neither a length
-        // mismatch nor an early byte difference shortens the loop. We do not
-        // break on the first hit, to keep timing independent of position.
-        for (secret, principal) in self.entries.iter() {
-            let equal: bool = secret.as_bytes().ct_eq(presented).into();
+        // Iterate every entry with an equal-length constant-time compare; we do
+        // not break on the first hit, to keep timing independent of position.
+        for entry in self.entries.iter() {
+            let equal: bool = entry
+                .token_digest
+                .as_slice()
+                .ct_eq(presented.as_slice())
+                .into();
             if equal {
-                matched = Some(principal);
+                matched = Some(&entry.principal);
             }
         }
         matched.cloned()
     }
 }
 
-/// Resolve a token's declared workspaces into a [`WorkspaceScope`], mirroring
-/// the validated config rule (a lone `"*"` is the wildcard).
-fn scope_of(token: &crate::config::TokenConfig) -> WorkspaceScope {
-    if token.workspaces.iter().any(|w| w == "*") {
-        WorkspaceScope::All
-    } else {
-        WorkspaceScope::Ids(token.workspaces.clone())
-    }
-}
-
-/// Extract a bearer token from an `Authorization` header value.
+/// Extract a bearer token from an `Authorization` header value. The scheme is
+/// matched case-insensitively per RFC 9110 §11.1 (`Bearer`, `bearer`, `BEARER`,
+/// …), and the credential is trimmed.
 fn bearer(value: &str) -> Option<&str> {
-    let rest = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))?;
+    let (scheme, rest) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
     let token = rest.trim();
     if token.is_empty() { None } else { Some(token) }
 }
@@ -197,14 +216,22 @@ pub async fn require_bearer(
 /// Small helper so the 401 path stays a one-liner without pulling in extra
 /// response machinery.
 trait Unauthorized {
-    /// Build a bare `401 Unauthorized` response.
+    /// Build a `401 Unauthorized` response carrying the `WWW-Authenticate`
+    /// challenge that RFC 7235 §3.1 requires on every 401.
     fn into_response_401(self) -> Response;
 }
 
 impl Unauthorized for StatusCode {
     fn into_response_401(self) -> Response {
         use axum::response::IntoResponse;
-        self.into_response()
+        let mut response = self.into_response();
+        // RFC 7235 §3.1: a 401 MUST carry at least one challenge so conforming
+        // clients can discover the expected scheme.
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Bearer"),
+        );
+        response
     }
 }
 
@@ -266,7 +293,11 @@ mod tests {
     fn bearer_parsing() {
         assert_eq!(bearer("Bearer abc"), Some("abc"));
         assert_eq!(bearer("bearer abc"), Some("abc"));
+        // Scheme is case-insensitive (RFC 9110 §11.1).
+        assert_eq!(bearer("BEARER abc"), Some("abc"));
+        assert_eq!(bearer("bEaReR abc"), Some("abc"));
         assert_eq!(bearer("Bearer   "), None);
         assert_eq!(bearer("Basic abc"), None);
+        assert_eq!(bearer("Bearer"), None);
     }
 }

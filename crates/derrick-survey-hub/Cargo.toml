@@ -30,6 +30,8 @@ tracing = { workspace = true }
 serde_json = { workspace = true }
 # justification: constant-time bearer-token comparison so token check is not timing-attackable (D83); no plain `==` on the secret.
 subtle = "2"
+# justification: fixed-length digest of bearer tokens so the constant-time compare is length-independent (D83); workspace-pinned, already used by derrick-survey.
+blake3 = { workspace = true }
 
 [dev-dependencies]
 # justification: real temp repos for the multi-instance routing test (no mocks).

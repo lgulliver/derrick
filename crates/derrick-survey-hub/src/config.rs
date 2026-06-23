@@ -201,8 +201,11 @@ pub struct TokenConfig {
 impl TokenConfig {
     /// Resolve the declared `workspaces` list into a [`WorkspaceScope`],
     /// treating a lone `"*"` as the wildcard. Mixing `"*"` with explicit ids is
-    /// rejected as ambiguous.
-    fn scope(&self) -> Result<WorkspaceScope, ConfigError> {
+    /// rejected as ambiguous. This is the single source of scope parsing —
+    /// `validate()` calls it to reject bad configs, and `AuthRegistry::build`
+    /// calls it at construction so the runtime scope can never diverge from what
+    /// validation accepted.
+    pub(crate) fn scope(&self) -> Result<WorkspaceScope, ConfigError> {
         if self.workspaces.is_empty() {
             return Err(ConfigError::EmptyTokenWorkspaces);
         }
@@ -370,10 +373,14 @@ impl HubConfig {
         if let Some(auth) = &self.auth {
             let mut token_seen = std::collections::HashSet::new();
             for token in &auth.tokens {
-                if token.token.is_empty() {
+                // Reject empty, whitespace-only, or whitespace-padded secrets:
+                // bearer parsing trims the presented credential, so such a token
+                // would pass validation yet never authenticate.
+                let secret = token.token.as_str();
+                if secret.trim().is_empty() || secret != secret.trim() {
                     return Err(ConfigError::EmptyToken);
                 }
-                if !token_seen.insert(token.token.clone()) {
+                if !token_seen.insert(secret.to_owned()) {
                     return Err(ConfigError::DuplicateToken);
                 }
                 match token.scope()? {

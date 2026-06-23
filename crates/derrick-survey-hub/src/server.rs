@@ -300,7 +300,15 @@ impl ServerHandler for HubServer {
 /// This is the single source of truth for the serve wiring: [`serve`] binds it
 /// to `config.bind`, and integration tests bind it to an ephemeral port so they
 /// exercise the exact production middleware stack rather than re-deriving it.
-pub fn build_router(hub: Hub, config: &HubConfig) -> axum::Router {
+///
+/// Validates `config` first: [`AuthRegistry::build`] (and `scope_of`) assume the
+/// auth section already passed [`HubConfig::validate`] (no empty/duplicate
+/// tokens, no wildcard mixed with explicit ids). Because this fn is re-exported,
+/// it re-validates at the boundary so a caller that bypasses [`Hub::build`]
+/// cannot smuggle in an unvalidated config (e.g. `["*", "repo-a"]` collapsing to
+/// `WorkspaceScope::All`).
+pub fn build_router(hub: Hub, config: &HubConfig) -> Result<axum::Router, HubError> {
+    config.validate()?;
     let service = StreamableHttpService::new(
         move || Ok(HubServer::new(hub.clone())),
         Arc::new(LocalSessionManager::default()),
@@ -320,12 +328,13 @@ pub fn build_router(hub: Hub, config: &HubConfig) -> axum::Router {
             );
         }
     }
-    app
+    Ok(app)
 }
 
 /// Build the hub from `config`, then serve the survey tools over rmcp's
-/// streamable-HTTP transport bound to `config.bind` (a loopback address) until
-/// the process is shut down.
+/// streamable-HTTP transport bound to the validated `config.bind` address until
+/// the process is shut down. The bind may be non-loopback only when auth is
+/// configured (D83); otherwise validation keeps it loopback-only.
 ///
 /// No per-repo watcher — freshness is connect-time build plus poll-on-query
 /// against `config.freshness_ttl_secs`, with an explicit `derrick_survey_refresh`
@@ -338,7 +347,7 @@ pub fn build_router(hub: Hub, config: &HubConfig) -> axum::Router {
 /// scope; otherwise the service is served as-is (loopback-only, no token).
 pub async fn serve(config: &HubConfig) -> Result<(), HubError> {
     let hub = Hub::build(config).await?;
-    let app = build_router(hub, config);
+    let app = build_router(hub, config)?;
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
         .map_err(|source| HubError::Bind {
