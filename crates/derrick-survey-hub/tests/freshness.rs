@@ -33,6 +33,7 @@ fn single_repo_config(root: &Path, ttl_secs: u64) -> HubConfig {
     HubConfig {
         bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         freshness_ttl_secs: ttl_secs,
+        auth: None,
         workspaces: vec![WorkspaceConfig {
             id: "repo".to_owned(),
             root: Some(root.to_path_buf()),

@@ -98,6 +98,7 @@ fn pushed_config(db_path: &Path, ttl_secs: u64) -> HubConfig {
     HubConfig {
         bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         freshness_ttl_secs: ttl_secs,
+        auth: None,
         workspaces: vec![WorkspaceConfig {
             id: "pushed".to_owned(),
             root: None,
@@ -336,6 +337,7 @@ async fn mixed_local_and_pushed_route_correctly() {
     let config = HubConfig {
         bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         freshness_ttl_secs: 3600,
+        auth: None,
         workspaces: vec![
             WorkspaceConfig {
                 id: "local".to_owned(),
@@ -526,6 +528,7 @@ async fn local_dirty_and_pending_still_emits_stale_banner() {
     let config = HubConfig {
         bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         freshness_ttl_secs: 3600,
+        auth: None,
         workspaces: vec![WorkspaceConfig {
             id: "local".to_owned(),
             root: Some(local_repo.path().to_path_buf()),

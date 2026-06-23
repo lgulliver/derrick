@@ -44,6 +44,7 @@ fn two_repos() -> (tempfile::TempDir, tempfile::TempDir, HubConfig) {
         // A long TTL keeps the existing routing assertions deterministic: no
         // poll-on-query rebuild fires mid-test. Freshness tests override this.
         freshness_ttl_secs: 3600,
+        auth: None,
         workspaces: vec![
             WorkspaceConfig {
                 id: "repo-a".to_owned(),
