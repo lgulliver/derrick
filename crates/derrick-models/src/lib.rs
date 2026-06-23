@@ -533,6 +533,33 @@ pub async fn resolve_role(
     ProviderRegistry::with_defaults().build(model_def, auth)
 }
 
+/// Completes a request, retrying on **retryable** errors (transient subprocess
+/// failures, HTTP 429/5xx, timeouts) with exponential backoff (D79).
+///
+/// Up to `max_attempts` total attempts; non-retryable errors return immediately.
+/// `max_attempts <= 1` disables retries. Backoff is `200ms * 2^(attempt-1)`.
+pub async fn complete_with_retry(
+    model: &dyn Model,
+    request: CompletionRequest,
+    max_attempts: u32,
+) -> Result<CompletionResponse, ModelError> {
+    let mut attempt: u32 = 1;
+    loop {
+        match model.complete(request.clone()).await {
+            Ok(response) => return Ok(response),
+            Err(error) if error.is_retryable() && attempt < max_attempts => {
+                // Cap the exponent (overflow-safe) and the total backoff at 30s
+                // so a large `max_attempts` can't produce an unbounded sleep.
+                let exponent = (attempt - 1).min(8);
+                let backoff = Duration::from_millis((200u64 << exponent).min(30_000));
+                tokio::time::sleep(backoff).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,6 +571,104 @@ mod tests {
             out_per_mtok: 15.0,
         };
         assert_eq!(hint.estimate_usd(0, 0), 0.0);
+    }
+
+    /// A `Model` that fails a fixed number of times before succeeding, used to
+    /// exercise `complete_with_retry`.
+    struct FlakyModel {
+        remaining_failures: std::sync::atomic::AtomicU32,
+        retryable: bool,
+        attempts: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl Model for FlakyModel {
+        fn name(&self) -> &str {
+            "flaky"
+        }
+        fn provider(&self) -> &str {
+            "test"
+        }
+        fn cost_hint(&self) -> Option<&CostHint> {
+            None
+        }
+        async fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionStream, ModelError> {
+            unreachable!("complete is overridden")
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, ModelError> {
+            use std::sync::atomic::Ordering;
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if self.remaining_failures.load(Ordering::SeqCst) > 0 {
+                self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+                return Err(ModelError::Provider {
+                    provider: "test".to_owned(),
+                    message: "transient".to_owned(),
+                    retryable: self.retryable,
+                });
+            }
+            Ok(CompletionResponse {
+                text: "ok".to_owned(),
+                tokens_in: 0,
+                tokens_out: 0,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+    }
+
+    fn request() -> CompletionRequest {
+        CompletionRequest {
+            cached_prefix: None,
+            prompt: "hi".to_owned(),
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            timeout: Duration::from_secs(1),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_succeeds_after_retryable_failures() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let model = FlakyModel {
+            remaining_failures: AtomicU32::new(1),
+            retryable: true,
+            attempts: AtomicU32::new(0),
+        };
+        let response = complete_with_retry(&model, request(), 3).await.unwrap();
+        assert_eq!(response.text, "ok");
+        assert_eq!(model.attempts.load(Ordering::SeqCst), 2); // one retry
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_retry_non_retryable() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let model = FlakyModel {
+            remaining_failures: AtomicU32::new(1),
+            retryable: false,
+            attempts: AtomicU32::new(0),
+        };
+        let error = complete_with_retry(&model, request(), 3).await.unwrap_err();
+        assert!(!error.is_retryable());
+        assert_eq!(model.attempts.load(Ordering::SeqCst), 1); // no retry
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_gives_up_after_max_attempts() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let model = FlakyModel {
+            remaining_failures: AtomicU32::new(10),
+            retryable: true,
+            attempts: AtomicU32::new(0),
+        };
+        let error = complete_with_retry(&model, request(), 2).await.unwrap_err();
+        assert!(error.is_retryable());
+        assert_eq!(model.attempts.load(Ordering::SeqCst), 2); // capped
     }
 
     #[test]

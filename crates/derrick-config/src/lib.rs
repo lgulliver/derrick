@@ -529,6 +529,36 @@ impl ModelCapabilities {
     }
 }
 
+/// Returns known-good capability defaults for a well-known model id, matched by
+/// family substring (D79). Lets a stage `requires:` check pass for a capable
+/// model without the user hand-declaring `capabilities:`. Unknown / local models
+/// return all `None` (undeclared → WARN, never FAIL); a model's own declared
+/// capabilities always take precedence over these defaults.
+pub fn builtin_capabilities(model: &str) -> ModelCapabilities {
+    let id = model.to_ascii_lowercase();
+    let caps = |tools, vision, prompt_cache| ModelCapabilities {
+        streaming: Some(true),
+        tools: Some(tools),
+        json_mode: Some(true),
+        vision: Some(vision),
+        prompt_cache: Some(prompt_cache),
+        context_window: None,
+        max_output_tokens: None,
+    };
+    if id.contains("claude") {
+        caps(true, true, true)
+    } else if id.contains("gpt-5")
+        || id.contains("gpt-4o")
+        || id.contains("gpt-4.1")
+        || id.contains("gemini")
+    {
+        caps(true, true, false)
+    } else {
+        // Local / unknown models: assume nothing.
+        ModelCapabilities::default()
+    }
+}
+
 /// Role bindings keyed by role name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoleBindings(HashMap<String, String>);
@@ -1725,7 +1755,6 @@ impl ConfigLayer {
     }
 
     fn finalize(self) -> Result<Config, ConfigError> {
-        let tools = self.tools.unwrap_or_default().finalize()?;
         let guardrails = required(self.guardrails, "guardrails")?.finalize();
         let pipeline = self
             .pipeline
@@ -1741,18 +1770,17 @@ impl ConfigLayer {
                 .collect::<Result<HashMap<_, _>, ConfigError>>()?,
         );
 
-        // Fold stage bindings into role bindings (stage name = role name); a
-        // `stages:` entry overrides a role binding from a lower layer, and
-        // collects any capability requirements for `derrick models check`.
+        // Fold stage bindings into role bindings and, for a multi-model `assay`
+        // stage, into the assay reviewer list — so this must run before the
+        // tools (assay) layer is finalized.
         let mut roles = required(self.roles, "roles")?;
-        let mut stage_requirements = BTreeMap::new();
-        for (stage, binding) in self.stages.unwrap_or_default() {
-            let (alias, requires) = binding.into_parts();
-            roles.insert(stage.clone(), alias);
-            if !requires.is_empty() {
-                stage_requirements.insert(stage, requires);
-            }
-        }
+        let mut tools_layer = self.tools.unwrap_or_default();
+        let stage_requirements = apply_stages(
+            self.stages.unwrap_or_default(),
+            &mut roles,
+            &mut tools_layer,
+        )?;
+        let tools = tools_layer.finalize()?;
 
         Ok(Config {
             version: required(self.version, "version")?,
@@ -1767,6 +1795,60 @@ impl ConfigLayer {
             stage_requirements,
         })
     }
+}
+
+/// Folds `stages:` entries into role bindings and, for a multi-model `assay`
+/// stage, into the assay reviewer list (D79). Returns per-stage capability
+/// requirements. A `stages:` entry overrides a role binding from a lower layer.
+fn apply_stages(
+    stages: HashMap<String, StageBindingLayer>,
+    roles: &mut HashMap<String, String>,
+    tools: &mut ToolsLayer,
+) -> Result<BTreeMap<String, Vec<String>>, ConfigError> {
+    let mut requirements = BTreeMap::new();
+    for (stage, binding) in stages {
+        match binding {
+            StageBindingLayer::Alias(alias) => {
+                roles.insert(stage, alias);
+            }
+            StageBindingLayer::Structured { model, requires } => {
+                roles.insert(stage.clone(), model);
+                if !requires.is_empty() {
+                    requirements.insert(stage, requires);
+                }
+            }
+            StageBindingLayer::Multi(aliases) => {
+                // A list of models only makes sense for assay (multi-reviewer).
+                if stage != "assay" {
+                    return validation(format!(
+                        "stages.{stage}: a list of models is only supported for the `assay` \
+                         stage (multi-reviewer); use a single alias or `{{ model, requires }}`"
+                    ));
+                }
+                if aliases.is_empty() {
+                    return validation(
+                        "stages.assay: the reviewer list must be non-empty".to_owned(),
+                    );
+                }
+                // Synthesise one reviewer role per alias and point the assay
+                // config at them (enabling assay).
+                let reviewer_roles: Vec<String> = aliases
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, alias)| {
+                        let role = format!("assay-reviewer-{}", index + 1);
+                        roles.insert(role.clone(), alias);
+                        role
+                    })
+                    .collect();
+                let assay = tools.assay.get_or_insert_with(AssayLayer::default);
+                assay.enabled = Some(true);
+                assay.role = Some(reviewer_roles[0].clone());
+                assay.reviewers = Some(reviewer_roles);
+            }
+        }
+    }
+    Ok(requirements)
 }
 
 impl From<Config> for ConfigLayer {
@@ -1886,13 +1968,17 @@ struct AiLayer {
     preset: Option<String>,
 }
 
-/// A `stages:` entry: either a bare model alias, or a mapping with an explicit
-/// `model` alias and optional capability `requires:` list (D79).
+/// A `stages:` entry (D79): a bare model alias, a list of aliases (multi-model —
+/// only meaningful for the `assay` stage, where it drives multi-reviewer assay),
+/// or a mapping with an explicit `model` alias and optional capability
+/// `requires:` list.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 enum StageBindingLayer {
     /// `stage: alias` — bind the stage to a model alias.
     Alias(String),
+    /// `stage: [alias, …]` — multiple model aliases (assay reviewers).
+    Multi(Vec<String>),
     /// `stage: { model: alias, requires: [tools, …] }`.
     Structured {
         /// Model alias this stage binds to.
@@ -1901,16 +1987,6 @@ enum StageBindingLayer {
         #[serde(default)]
         requires: Vec<String>,
     },
-}
-
-impl StageBindingLayer {
-    /// Splits the binding into `(model_alias, required_capabilities)`.
-    fn into_parts(self) -> (String, Vec<String>) {
-        match self {
-            Self::Alias(alias) => (alias, Vec::new()),
-            Self::Structured { model, requires } => (model, requires),
-        }
-    }
 }
 
 /// A model-alias layer entry. Accepts either the structured mapping form or the
@@ -3026,6 +3102,50 @@ state:
             config.stage_requirements().get("execute"),
             Some(&vec!["tools".to_owned()])
         );
+    }
+
+    #[test]
+    fn d79_builtin_capabilities_by_family() {
+        assert_eq!(builtin_capabilities("claude-opus-4-8").tools, Some(true));
+        assert_eq!(
+            builtin_capabilities("claude-opus-4-8").prompt_cache,
+            Some(true)
+        );
+        assert_eq!(builtin_capabilities("gpt-5.5").tools, Some(true));
+        assert_eq!(builtin_capabilities("gpt-5.5").prompt_cache, Some(false));
+        // Unknown / local model: nothing assumed.
+        assert_eq!(builtin_capabilities("qwen2.5-coder:32b").tools, None);
+    }
+
+    #[test]
+    fn d79_multi_model_assay_stage_wires_reviewers() {
+        let yaml = assemble(
+            "ai:\n  preset: cli-defaults\nstages:\n  assay:\n    - strong\n    - reviewer\n    - fast",
+        );
+        let config = load_yaml(&yaml).expect("multi-reviewer assay should parse");
+        // Each alias becomes a synthesised reviewer role bound to that model.
+        assert_eq!(config.roles().get("assay-reviewer-1"), Some("strong"));
+        assert_eq!(config.roles().get("assay-reviewer-2"), Some("reviewer"));
+        assert_eq!(config.roles().get("assay-reviewer-3"), Some("fast"));
+        // Assay is enabled and points at the synthesised reviewers in order.
+        let assay = config.tools().assay();
+        assert!(assay.enabled());
+        assert_eq!(assay.role(), "assay-reviewer-1");
+        assert_eq!(
+            assay.reviewers(),
+            &[
+                "assay-reviewer-1".to_owned(),
+                "assay-reviewer-2".to_owned(),
+                "assay-reviewer-3".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn d79_multi_model_non_assay_stage_is_rejected() {
+        let yaml =
+            assemble("ai:\n  preset: cli-defaults\nstages:\n  plan:\n    - fast\n    - strong");
+        assert_validation(&yaml, "only supported for the `assay` stage");
     }
 
     #[test]
