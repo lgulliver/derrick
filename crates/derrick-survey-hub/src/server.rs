@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
@@ -40,6 +40,12 @@ struct WorkspaceImpactParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WorkspaceStatusParams {
+    /// Workspace id to route this call to (see the server instructions).
+    workspace: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct WorkspaceRefreshParams {
     /// Workspace id to route this call to (see the server instructions).
     workspace: String,
 }
@@ -88,6 +94,17 @@ impl HubServer {
         }
     }
 
+    /// Poll-on-query freshness: bring `entry` up to date if its TTL has lapsed,
+    /// mapping any rebuild failure to an MCP internal error. A no-op within the
+    /// TTL window, and self-flighting under concurrency (see
+    /// [`WorkspaceEntry::ensure_fresh`]).
+    async fn ensure_fresh(&self, entry: &WorkspaceEntry) -> Result<(), McpError> {
+        entry
+            .ensure_fresh(self.hub.freshness_ttl())
+            .await
+            .map_err(tools::internal)
+    }
+
     #[tool(
         description = "Full-text search over indexed symbol names and signatures \
         in the given workspace. Requires a `workspace` argument. Returns matching \
@@ -98,6 +115,7 @@ impl HubServer {
         params: Parameters<WorkspaceQueryParams>,
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
+        self.ensure_fresh(&entry).await?;
         tools::answer_search(&entry.survey, &entry.dirty, &params.0.query, params.0.limit).await
     }
 
@@ -111,6 +129,7 @@ impl HubServer {
         params: Parameters<WorkspaceQueryParams>,
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
+        self.ensure_fresh(&entry).await?;
         tools::answer_context(&entry.survey, &entry.dirty, &params.0.query, params.0.limit).await
     }
 
@@ -125,6 +144,7 @@ impl HubServer {
         params: Parameters<WorkspaceImpactParams>,
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
+        self.ensure_fresh(&entry).await?;
         tools::answer_impact(&entry.survey, &entry.dirty, &params.0.symbol).await
     }
 
@@ -140,7 +160,25 @@ impl HubServer {
         params: Parameters<WorkspaceStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
+        self.ensure_fresh(&entry).await?;
         tools::answer_status(&entry.survey, &entry.dirty).await
+    }
+
+    #[tool(
+        description = "Force an incremental rebuild of the given workspace's index \
+        now, then return its post-build status. Requires a `workspace` argument. \
+        Use this after a known change (e.g. from CI) to reconcile the index \
+        immediately instead of waiting for the poll-on-query freshness window."
+    )]
+    async fn derrick_survey_refresh(
+        &self,
+        params: Parameters<WorkspaceRefreshParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self.resolve(&params.0.workspace).await?;
+        let status = entry.force_refresh().await.map_err(tools::internal)?;
+        let json = serde_json::to_string_pretty(&status)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
 
@@ -153,7 +191,11 @@ impl ServerHandler for HubServer {
              Every tool takes a required `workspace` argument selecting which repo's \
              index to query. Use derrick_survey_search to find symbols, \
              derrick_survey_context for architecture questions, derrick_survey_impact \
-             before changing a symbol, and derrick_survey_status to check freshness."
+             before changing a symbol, and derrick_survey_status to check freshness. \
+             Indexes self-heal on a freshness TTL, so reads stay current without \
+             intervention; call derrick_survey_refresh to proactively rebuild a \
+             workspace right after a known change (e.g. from CI) instead of waiting \
+             for the next poll."
                 .to_owned(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -161,13 +203,14 @@ impl ServerHandler for HubServer {
     }
 }
 
-/// Build the hub from `config`, then serve the four tools over rmcp's
+/// Build the hub from `config`, then serve the survey tools over rmcp's
 /// streamable-HTTP transport bound to `config.bind` (a loopback address) until
 /// the process is shut down.
 ///
-/// Phase 1: no auth, no per-repo watcher — freshness is connect-time build plus
-/// poll-on-query. The build happens inside [`Hub::build`] before the listener
-/// is opened.
+/// No auth, no per-repo watcher — freshness is connect-time build plus
+/// poll-on-query against `config.freshness_ttl_secs`, with an explicit
+/// `derrick_survey_refresh` tool for proactive rebuilds. The connect-time build
+/// happens inside [`Hub::build`] before the listener is opened.
 pub async fn serve(config: &HubConfig) -> Result<(), HubError> {
     let hub = Hub::build(config).await?;
     let service = StreamableHttpService::new(

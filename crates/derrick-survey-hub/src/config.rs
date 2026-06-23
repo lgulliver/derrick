@@ -79,6 +79,17 @@ pub fn default_db_path(root: &Path) -> PathBuf {
 pub struct HubConfig {
     /// Loopback address to bind the HTTP server to (e.g. `127.0.0.1:7000`).
     pub bind: SocketAddr,
+    /// Poll-on-query freshness TTL, in seconds.
+    ///
+    /// A read tool only re-probes a workspace for staleness once this many
+    /// seconds have elapsed since its last check; within the window, queries
+    /// skip the probe and answer from the open index. A value of `0` means
+    /// "always probe on every query" (no caching of the freshness check).
+    ///
+    /// Defaults to [`HubConfig::DEFAULT_FRESHNESS_TTL_SECS`]. Omitting the
+    /// field in `hub.yaml` is supported for backward compatibility.
+    #[serde(default = "HubConfig::default_freshness_ttl_secs")]
+    pub freshness_ttl_secs: u64,
     /// Workspaces this hub hosts.
     pub workspaces: Vec<WorkspaceConfig>,
 }
@@ -113,6 +124,14 @@ pub enum ConfigError {
 }
 
 impl HubConfig {
+    /// Default poll-on-query freshness TTL when `hub.yaml` omits the field.
+    pub const DEFAULT_FRESHNESS_TTL_SECS: u64 = 60;
+
+    /// Serde default for [`HubConfig::freshness_ttl_secs`].
+    fn default_freshness_ttl_secs() -> u64 {
+        Self::DEFAULT_FRESHNESS_TTL_SECS
+    }
+
     /// Load and validate a `hub.yaml` from disk.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
@@ -199,6 +218,25 @@ mod tests {
         let yaml = "bind: 127.0.0.1:7777\nworkspaces: []\n";
         let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(matches!(config.validate(), Err(ConfigError::NoWorkspaces)));
+    }
+
+    #[test]
+    fn freshness_ttl_defaults_when_omitted() {
+        // Backward compatibility: a registry written before the TTL field still
+        // parses, falling back to the documented default.
+        let yaml = "bind: 127.0.0.1:7777\nworkspaces:\n  - id: a\n    root: /srv/a\n";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.freshness_ttl_secs,
+            HubConfig::DEFAULT_FRESHNESS_TTL_SECS
+        );
+    }
+
+    #[test]
+    fn freshness_ttl_is_parsed_when_present() {
+        let yaml = "bind: 127.0.0.1:7777\nfreshness_ttl_secs: 0\nworkspaces:\n  - id: a\n    root: /srv/a\n";
+        let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.freshness_ttl_secs, 0);
     }
 
     #[test]

@@ -26,6 +26,8 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 # justification: structured logging per house rules (no println in non-CLI crates).
 tracing = { workspace = true }
+# justification: serialize the IndexStatus returned by derrick_survey_refresh.
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # justification: real temp repos for the multi-instance routing test (no mocks).
