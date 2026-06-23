@@ -19,6 +19,8 @@ mod config;
 mod hub;
 mod server;
 
-pub use config::{ConfigError, HubConfig, WorkspaceConfig, WorkspaceId, WorkspaceIdError};
-pub use hub::{Hub, HubError, WorkspaceEntry};
+pub use config::{
+    ConfigError, HubConfig, WorkspaceConfig, WorkspaceId, WorkspaceIdError, WorkspaceSourceConfig,
+};
+pub use hub::{Hub, HubError, WorkspaceEntry, WorkspaceSource};
 pub use server::{HubServer, serve};

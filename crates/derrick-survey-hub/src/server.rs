@@ -116,7 +116,8 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
-        tools::answer_search(&entry.survey, &entry.dirty, &params.0.query, params.0.limit).await
+        let survey = entry.survey().await;
+        tools::answer_search(&survey, &entry.dirty, &params.0.query, params.0.limit).await
     }
 
     #[tool(
@@ -130,7 +131,8 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
-        tools::answer_context(&entry.survey, &entry.dirty, &params.0.query, params.0.limit).await
+        let survey = entry.survey().await;
+        tools::answer_context(&survey, &entry.dirty, &params.0.query, params.0.limit).await
     }
 
     #[tool(
@@ -145,7 +147,8 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
-        tools::answer_impact(&entry.survey, &entry.dirty, &params.0.symbol).await
+        let survey = entry.survey().await;
+        tools::answer_impact(&survey, &entry.dirty, &params.0.symbol).await
     }
 
     #[tool(
@@ -161,7 +164,8 @@ impl HubServer {
     ) -> Result<CallToolResult, McpError> {
         let entry = self.resolve(&params.0.workspace).await?;
         self.ensure_fresh(&entry).await?;
-        tools::answer_status(&entry.survey, &entry.dirty).await
+        let survey = entry.survey().await;
+        tools::answer_status(&survey, &entry.dirty).await
     }
 
     #[tool(
@@ -192,10 +196,13 @@ impl ServerHandler for HubServer {
              index to query. Use derrick_survey_search to find symbols, \
              derrick_survey_context for architecture questions, derrick_survey_impact \
              before changing a symbol, and derrick_survey_status to check freshness. \
-             Indexes self-heal on a freshness TTL, so reads stay current without \
-             intervention; call derrick_survey_refresh to proactively rebuild a \
-             workspace right after a known change (e.g. from CI) instead of waiting \
-             for the next poll."
+             Workspaces are either Local (the hub holds the working tree and builds \
+             the index itself) or Pushed (the hub serves a prebuilt index placed on \
+             disk by CI). Indexes self-heal on a freshness TTL, so reads stay current \
+             without intervention; call derrick_survey_refresh to reconcile a \
+             workspace immediately after a known change — for Local workspaces it \
+             rebuilds from the working tree, for Pushed workspaces it reloads the \
+             prebuilt index from disk."
                 .to_owned(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();

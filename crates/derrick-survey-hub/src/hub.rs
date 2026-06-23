@@ -14,7 +14,35 @@ use derrick_survey::{BuildOptions, BuildReport, IndexStatus, Survey, SurveyConfi
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
 
-use crate::config::{ConfigError, HubConfig, WorkspaceId, WorkspaceIdError};
+use crate::config::{ConfigError, HubConfig, WorkspaceId, WorkspaceIdError, WorkspaceSourceConfig};
+
+/// How a hosted workspace's index is sourced (D82), with paths already resolved
+/// to absolute form. The query layer (`search`/`context`/`impact`/`status`) is
+/// identical across sources; only the build/refresh path branches.
+#[derive(Clone, Debug)]
+pub enum WorkspaceSource {
+    /// The hub holds a working tree and builds/refreshes the index itself.
+    Local {
+        /// Absolute repository root the index covers.
+        root: PathBuf,
+    },
+    /// The hub serves a prebuilt `.db` placed on disk by an operator or CI, and
+    /// hot-swaps it atomically when the file changes.
+    Pushed {
+        /// Absolute path to the prebuilt index `.db`.
+        db_path: PathBuf,
+    },
+}
+
+impl WorkspaceSource {
+    /// A short, log-friendly tag for the source kind.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            WorkspaceSource::Local { .. } => "local",
+            WorkspaceSource::Pushed { .. } => "pushed",
+        }
+    }
+}
 
 /// One hosted workspace: its open index plus the dirty flag that drives the
 /// staleness banner. `dirty` is wired in for parity with the stdio server's
@@ -25,14 +53,21 @@ use crate::config::{ConfigError, HubConfig, WorkspaceId, WorkspaceIdError};
 /// shared `Arc`s so all clones observe the same `last_checked` instant and share
 /// the same single-flight `refresh_lock`. Holding a clone never holds the hub's
 /// entry-map lock, so a rebuild `.await` cannot block routing of other requests.
+///
+/// The served index lives behind an `RwLock` so a Pushed workspace can hot-swap
+/// it without tearing in-flight queries: the query path clones the [`Survey`]
+/// out under a short read guard (the clone is a cheap `Arc` bump) and then runs
+/// the query lock-free, a Local incremental rebuild runs under a read guard
+/// (`Survey::build` takes `&self`), and a Pushed reload swaps the handle under a
+/// write guard. No lock is ever held across the query `.await`.
 #[derive(Clone)]
 pub struct WorkspaceEntry {
-    /// The open survey index.
-    pub survey: Survey,
-    /// Whether a rebuild is believed to be in progress (arms the banner).
+    /// The open survey index, swappable for Pushed hot-reload.
+    survey: Arc<RwLock<Survey>>,
+    /// Whether a rebuild/reload is believed to be in progress (arms the banner).
     pub dirty: Arc<AtomicBool>,
-    /// Repository root, retained for diagnostics.
-    pub root: PathBuf,
+    /// How this workspace is sourced; the build/refresh path branches on it.
+    source: WorkspaceSource,
     /// Workspace id, retained for log lines on rebuild.
     pub id: WorkspaceId,
     /// Instant of the last freshness probe; the poll-on-query TTL gate reads it.
@@ -40,6 +75,10 @@ pub struct WorkspaceEntry {
     /// Single-flight guard: only one refresh of this workspace runs at a time.
     /// Concurrent callers serialize here, then re-check `last_checked` and skip.
     refresh_lock: Arc<Mutex<()>>,
+    /// Pushed-only: `(len, mtime)` of the prebuilt `.db` as of the last load, so
+    /// the freshness probe can detect an external rewrite and reload. `None` for
+    /// Local workspaces and until the first Pushed load records a stat.
+    last_pushed_stat: Arc<Mutex<Option<(u64, i64)>>>,
 }
 
 /// RAII guard that arms the `dirty` banner for the duration of a rebuild and
@@ -63,18 +102,37 @@ impl Drop for DirtyGuard<'_> {
 }
 
 impl WorkspaceEntry {
+    /// Clone the served [`Survey`] handle out from under a short read guard.
+    ///
+    /// The clone is a cheap `Arc` bump; the caller then runs the (async) query
+    /// lock-free, so a concurrent Pushed hot-swap never tears an in-flight read.
+    /// The read guard is released before this returns, so it is never held
+    /// across a query `.await`.
+    pub async fn survey(&self) -> Survey {
+        self.survey.read().await.clone()
+    }
+
+    /// How this workspace is sourced (Local vs Pushed), for diagnostics.
+    pub fn source(&self) -> &WorkspaceSource {
+        &self.source
+    }
+
     /// Ensure the index is fresh enough to answer a query, honouring `ttl`.
     ///
     /// Fast path: if less than `ttl` has elapsed since the last probe, return
     /// immediately. Otherwise take the single-flight `refresh_lock`, re-check the
     /// elapsed time (another caller may have just refreshed), and if still due,
-    /// run a cheap `survey.status()` probe. Only when that reports pending files
-    /// is an incremental `survey.build` run; `last_checked` is bumped regardless
-    /// so a clean tree is not re-probed until the next TTL window.
+    /// reconcile by source:
+    /// - **Local** — run a cheap `status()` probe and only run an incremental
+    ///   `build` when the working tree differs.
+    /// - **Pushed** — stat the prebuilt `.db` and only reload+swap when its
+    ///   `mtime`/`len` changed since the last load.
     ///
-    /// A `ttl` of zero means "always probe": the elapsed gate never short-cuts.
-    /// Under concurrency exactly one caller rebuilds; the rest wait on the lock,
-    /// observe the fresh `last_checked`, and return without rebuilding.
+    /// `last_checked` is bumped regardless so a clean workspace is not re-probed
+    /// until the next TTL window. A `ttl` of zero means "always probe": the
+    /// elapsed gate never short-cuts. Under concurrency exactly one caller
+    /// reconciles; the rest wait on the lock, observe the fresh `last_checked`,
+    /// and return without work.
     pub async fn ensure_fresh(&self, ttl: Duration) -> Result<(), SurveyError> {
         // Fast path: within the TTL window, nothing to do. A zero TTL disables
         // this short-cut (elapsed is always >= zero).
@@ -97,36 +155,150 @@ impl WorkspaceEntry {
             }
         }
 
-        // Cheap staleness probe. Only rebuild when the tree actually differs.
-        let status = self.survey.status().await?;
-        if !status.pending.is_empty() {
-            tracing::debug!(
-                workspace = %self.id,
-                pending = status.pending.len(),
-                "survey hub poll-on-query rebuild"
-            );
-            let _dirty = DirtyGuard::arm(&self.dirty);
-            self.survey.build(BuildOptions::default()).await?;
-            tracing::info!(workspace = %self.id, "survey hub rebuilt workspace (poll-on-query)");
+        match &self.source {
+            WorkspaceSource::Local { .. } => {
+                // Cheap staleness probe. Only rebuild when the tree differs.
+                let status = self.survey().await.status().await?;
+                if !status.pending.is_empty() {
+                    tracing::debug!(
+                        workspace = %self.id,
+                        source = "local",
+                        pending = status.pending.len(),
+                        "survey hub poll-on-query rebuild"
+                    );
+                    let survey = self.survey().await;
+                    let _dirty = DirtyGuard::arm(&self.dirty);
+                    survey.build(BuildOptions::default()).await?;
+                    tracing::info!(
+                        workspace = %self.id,
+                        source = "local",
+                        "survey hub rebuilt workspace (poll-on-query)"
+                    );
+                }
+            }
+            WorkspaceSource::Pushed { db_path } => {
+                self.reload_pushed_if_changed(db_path).await?;
+            }
         }
 
         *self.last_checked.lock().await = Instant::now();
         Ok(())
     }
 
-    /// Force an incremental rebuild now, regardless of the TTL window, and
-    /// return the post-build status. Backs the `derrick_survey_refresh` tool so
-    /// CI can proactively reconcile the index after a known change.
+    /// Force a refresh now, regardless of the TTL window, and return the
+    /// post-refresh status. Backs the `derrick_survey_refresh` tool.
+    ///
+    /// - **Local** — unconditional incremental rebuild (CI/git-hook reconcile).
+    /// - **Pushed** — unconditional reload+swap of the prebuilt `.db` from disk.
     pub async fn force_refresh(&self) -> Result<IndexStatus, SurveyError> {
         let _refresh = self.refresh_lock.lock().await;
-        tracing::info!(workspace = %self.id, "survey hub forced refresh");
-        let _report: BuildReport = {
-            let _dirty = DirtyGuard::arm(&self.dirty);
-            self.survey.build(BuildOptions::default()).await?
-        };
+        match &self.source {
+            WorkspaceSource::Local { .. } => {
+                tracing::info!(workspace = %self.id, source = "local", "survey hub forced refresh");
+                let survey = self.survey().await;
+                let _report: BuildReport = {
+                    let _dirty = DirtyGuard::arm(&self.dirty);
+                    survey.build(BuildOptions::default()).await?
+                };
+            }
+            WorkspaceSource::Pushed { db_path } => {
+                tracing::info!(
+                    workspace = %self.id,
+                    source = "pushed",
+                    "survey hub forced reload"
+                );
+                self.reload_pushed(db_path).await?;
+            }
+        }
         *self.last_checked.lock().await = Instant::now();
-        self.survey.status().await
+        self.survey().await.status().await
     }
+
+    /// Reload a Pushed workspace only when the on-disk `.db` changed.
+    ///
+    /// Compares cheap stat metadata (`mtime` + `len`) of the currently served
+    /// index against the file on disk and reloads only on a difference. The stat
+    /// of the served index uses the same `db_path` (the file the swap reads
+    /// from), so this is a self-comparison that detects an external rewrite.
+    async fn reload_pushed_if_changed(&self, db_path: &std::path::Path) -> Result<(), SurveyError> {
+        // Snapshot what we last loaded vs. what's on disk now. We compare the
+        // file's own previous stat (recorded at load) against its current stat.
+        let current = stat_db(db_path);
+        let last = *self.last_pushed_stat.lock().await;
+        if current == last {
+            tracing::debug!(
+                workspace = %self.id,
+                source = "pushed",
+                "survey hub pushed db unchanged; no reload"
+            );
+            return Ok(());
+        }
+        self.reload_pushed(db_path).await
+    }
+
+    /// Open a fresh [`Survey`] over the prebuilt `.db` and atomically swap it in,
+    /// dropping the old handle. Arms the banner for the duration of the swap.
+    async fn reload_pushed(&self, db_path: &std::path::Path) -> Result<(), SurveyError> {
+        let _dirty = DirtyGuard::arm(&self.dirty);
+        let fresh = open_pushed_survey(db_path).await?;
+        // Record the stat we just loaded *before* swapping, so a concurrent
+        // probe after the swap compares against the right baseline.
+        *self.last_pushed_stat.lock().await = stat_db(db_path);
+        *self.survey.write().await = fresh;
+        tracing::info!(
+            workspace = %self.id,
+            source = "pushed",
+            db = %db_path.display(),
+            "survey hub reloaded pushed index"
+        );
+        Ok(())
+    }
+}
+
+/// Cheap change-detection stat for a pushed `.db`: `(len, mtime_secs)`, or
+/// `None` if the file is missing/unstattable. A change in either field triggers
+/// a reload.
+fn stat_db(path: &std::path::Path) -> Option<(u64, i64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs() as i64);
+    Some((meta.len(), mtime))
+}
+
+/// Open a [`Survey`] over a prebuilt index `.db` for serving (Pushed mode).
+///
+/// `repo_root` is set to the DB's parent directory: it is only consulted by the
+/// working-tree-diffing `status()` query, which has no tree to diff against for
+/// a pushed index, so search/context/impact are unaffected. Schema portability
+/// is enforced by the survey crate: a pushed DB whose `user_version` exceeds the
+/// supported schema surfaces as `SurveyError::SchemaTooNew`.
+///
+/// The file must already exist: a Pushed source serves an externally-produced
+/// DB, so a missing path is an operator error, not a request to create an empty
+/// index. We surface that as a clear I/O error rather than letting SQLite
+/// create-and-migrate a blank DB that would silently serve no symbols. Returns
+/// a [`SurveyError`] so the reload path (which has no `HubError`) shares it; the
+/// connect-time caller wraps it in [`HubError::Workspace`] to name the workspace.
+async fn open_pushed_survey(db_path: &std::path::Path) -> Result<Survey, SurveyError> {
+    if !db_path.is_file() {
+        return Err(SurveyError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("pushed index db not found: {}", db_path.display()),
+        )));
+    }
+    let repo_root = db_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Survey::open(SurveyConfig {
+        db_path: db_path.to_path_buf(),
+        repo_root,
+        reader_pool: SurveyConfig::DEFAULT_READER_POOL,
+    })
+    .await
 }
 
 /// Errors raised while building or querying the hub.
@@ -192,43 +364,66 @@ impl Hub {
         let mut entries = BTreeMap::new();
         for workspace in &config.workspaces {
             let id = WorkspaceId::new(workspace.id.clone())?;
-            let db_path = workspace.resolved_db_path();
-            if let Some(parent) = db_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|source| HubError::CreateDir {
-                    id: id.to_string(),
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
-            let survey = Survey::open(SurveyConfig {
-                db_path,
-                repo_root: workspace.root.clone(),
-                reader_pool: SurveyConfig::DEFAULT_READER_POOL,
-            })
-            .await
-            .map_err(|source| HubError::Workspace {
+            let workspace_err = |source: SurveyError| HubError::Workspace {
                 id: id.to_string(),
                 source,
-            })?;
-            // Connect-time freshness: reconcile the index with the tree once.
-            survey
-                .build(BuildOptions::default())
-                .await
-                .map_err(|source| HubError::Workspace {
-                    id: id.to_string(),
-                    source,
-                })?;
-            tracing::info!(workspace = %id, root = %workspace.root.display(), "survey hub opened workspace");
-            // Connect-time build just completed, so the index is fresh now.
+            };
+            let source = workspace.source()?;
+            let (survey, resolved_source, last_pushed_stat) = match source {
+                WorkspaceSourceConfig::Local { root, db_path } => {
+                    // Ensure the index DB's parent directory exists, open it, and
+                    // run a connect-time build so the index is fresh on startup.
+                    if let Some(parent) = db_path.parent() {
+                        std::fs::create_dir_all(parent).map_err(|err| HubError::CreateDir {
+                            id: id.to_string(),
+                            path: parent.to_path_buf(),
+                            source: err,
+                        })?;
+                    }
+                    let survey = Survey::open(SurveyConfig {
+                        db_path,
+                        repo_root: root.clone(),
+                        reader_pool: SurveyConfig::DEFAULT_READER_POOL,
+                    })
+                    .await
+                    .map_err(workspace_err)?;
+                    survey
+                        .build(BuildOptions::default())
+                        .await
+                        .map_err(workspace_err)?;
+                    tracing::info!(
+                        workspace = %id,
+                        source = "local",
+                        root = %root.display(),
+                        "survey hub opened workspace"
+                    );
+                    (survey, WorkspaceSource::Local { root }, None)
+                }
+                WorkspaceSourceConfig::Pushed { db_path } => {
+                    // Serve the prebuilt DB as-is; do NOT build from a root. A
+                    // schema-too-new or open failure surfaces as a workspace error.
+                    let survey = open_pushed_survey(&db_path).await.map_err(workspace_err)?;
+                    let stat = stat_db(&db_path);
+                    tracing::info!(
+                        workspace = %id,
+                        source = "pushed",
+                        db = %db_path.display(),
+                        "survey hub opened workspace"
+                    );
+                    (survey, WorkspaceSource::Pushed { db_path }, stat)
+                }
+            };
+            // Connect-time open (Local also built) just completed: index is fresh.
             entries.insert(
                 id.clone(),
                 WorkspaceEntry {
-                    survey,
+                    survey: Arc::new(RwLock::new(survey)),
                     dirty: Arc::new(AtomicBool::new(false)),
-                    root: workspace.root.clone(),
+                    source: resolved_source,
                     id,
                     last_checked: Arc::new(Mutex::new(Instant::now())),
                     refresh_lock: Arc::new(Mutex::new(())),
+                    last_pushed_stat: Arc::new(Mutex::new(last_pushed_stat)),
                 },
             );
         }

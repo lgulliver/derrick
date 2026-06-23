@@ -35,8 +35,9 @@ fn single_repo_config(root: &Path, ttl_secs: u64) -> HubConfig {
         freshness_ttl_secs: ttl_secs,
         workspaces: vec![WorkspaceConfig {
             id: "repo".to_owned(),
-            root: root.to_path_buf(),
+            root: Some(root.to_path_buf()),
             db_path: None,
+            pushed_db: None,
         }],
     }
 }
@@ -55,7 +56,12 @@ async fn zero_ttl_rebuilds_on_query() {
 
     // First query: only the original symbol is indexed.
     entry.ensure_fresh(hub.freshness_ttl()).await.unwrap();
-    let before = entry.survey.search("late_symbol", 10).await.unwrap();
+    let before = entry
+        .survey()
+        .await
+        .search("late_symbol", 10)
+        .await
+        .unwrap();
     assert!(
         !before.iter().any(|h| h.name == "late_symbol"),
         "late_symbol should not exist before it is written: {before:?}"
@@ -66,7 +72,12 @@ async fn zero_ttl_rebuilds_on_query() {
 
     // Next query re-probes (TTL 0), sees the pending file, and rebuilds.
     entry.ensure_fresh(hub.freshness_ttl()).await.unwrap();
-    let after = entry.survey.search("late_symbol", 10).await.unwrap();
+    let after = entry
+        .survey()
+        .await
+        .search("late_symbol", 10)
+        .await
+        .unwrap();
     assert!(
         after.iter().any(|h| h.name == "late_symbol"),
         "poll-on-query rebuild should surface late_symbol: {after:?}"
@@ -90,7 +101,12 @@ async fn long_ttl_gates_rebuild() {
 
     // Query inside the TTL window: the gate short-cuts, so no rebuild happens.
     entry.ensure_fresh(hub.freshness_ttl()).await.unwrap();
-    let found = entry.survey.search("gated_symbol", 10).await.unwrap();
+    let found = entry
+        .survey()
+        .await
+        .search("gated_symbol", 10)
+        .await
+        .unwrap();
     assert!(
         !found.iter().any(|h| h.name == "gated_symbol"),
         "a long TTL must gate the rebuild, hiding gated_symbol: {found:?}"
@@ -102,7 +118,12 @@ async fn long_ttl_gates_rebuild() {
         status.pending.is_empty(),
         "force_refresh should leave no pending files: {status:?}"
     );
-    let after = entry.survey.search("gated_symbol", 10).await.unwrap();
+    let after = entry
+        .survey()
+        .await
+        .search("gated_symbol", 10)
+        .await
+        .unwrap();
     assert!(
         after.iter().any(|h| h.name == "gated_symbol"),
         "force_refresh should surface gated_symbol: {after:?}"
@@ -131,7 +152,12 @@ async fn concurrent_queries_are_single_flight_and_correct() {
         let entry = entry.clone();
         handles.push(tokio::spawn(async move {
             entry.ensure_fresh(ttl).await.unwrap();
-            entry.survey.search("raced_symbol", 10).await.unwrap()
+            entry
+                .survey()
+                .await
+                .search("raced_symbol", 10)
+                .await
+                .unwrap()
         }));
     }
 
@@ -143,7 +169,12 @@ async fn concurrent_queries_are_single_flight_and_correct() {
     // At least one racer ran after the rebuild; re-probe once more to be sure the
     // index converged regardless of interleaving.
     entry.ensure_fresh(ttl).await.unwrap();
-    let final_hits = entry.survey.search("raced_symbol", 10).await.unwrap();
+    let final_hits = entry
+        .survey()
+        .await
+        .search("raced_symbol", 10)
+        .await
+        .unwrap();
     assert!(
         any_found || final_hits.iter().any(|h| h.name == "raced_symbol"),
         "concurrent poll-on-query should converge on raced_symbol"
