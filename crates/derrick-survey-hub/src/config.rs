@@ -181,7 +181,10 @@ mod tests {
     fn rejects_duplicate_ids() {
         let yaml = "bind: 127.0.0.1:7777\nworkspaces:\n  - id: a\n    root: /srv/a\n  - id: a\n    root: /srv/a2\n";
         let config: HubConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(matches!(config.validate(), Err(ConfigError::DuplicateId(_))));
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::DuplicateId(_))
+        ));
     }
 
     #[test]

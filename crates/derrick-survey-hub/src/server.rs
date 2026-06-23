@@ -177,13 +177,12 @@ pub async fn serve(config: &HubConfig) -> Result<(), HubError> {
     );
 
     let app = axum::Router::new().fallback_service(service);
-    let listener =
-        tokio::net::TcpListener::bind(config.bind)
-            .await
-            .map_err(|source| HubError::Bind {
-                addr: config.bind.to_string(),
-                source,
-            })?;
+    let listener = tokio::net::TcpListener::bind(config.bind)
+        .await
+        .map_err(|source| HubError::Bind {
+            addr: config.bind.to_string(),
+            source,
+        })?;
     tracing::info!(addr = %config.bind, "survey hub listening");
     axum::serve(listener, app).await.map_err(HubError::Serve)?;
     Ok(())

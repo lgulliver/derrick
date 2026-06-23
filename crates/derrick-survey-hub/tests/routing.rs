@@ -69,19 +69,31 @@ async fn hub_level_search_is_routed_per_workspace() {
     let entry_b = hub.entry(&repo_b).await.unwrap();
 
     // The symbol only exists in A.
-    let in_a = entry_a.survey.search("alpha_only_symbol", 10).await.unwrap();
+    let in_a = entry_a
+        .survey
+        .search("alpha_only_symbol", 10)
+        .await
+        .unwrap();
     assert!(
         in_a.iter().any(|h| h.name == "alpha_only_symbol"),
         "repo-a should contain alpha_only_symbol: {in_a:?}"
     );
-    let in_b = entry_b.survey.search("alpha_only_symbol", 10).await.unwrap();
+    let in_b = entry_b
+        .survey
+        .search("alpha_only_symbol", 10)
+        .await
+        .unwrap();
     assert!(
         !in_b.iter().any(|h| h.name == "alpha_only_symbol"),
         "repo-b must not contain alpha_only_symbol: {in_b:?}"
     );
 
     // Unknown workspace ids are simply absent from the map.
-    assert!(hub.entry(&WorkspaceId::new("nope").unwrap()).await.is_none());
+    assert!(
+        hub.entry(&WorkspaceId::new("nope").unwrap())
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
