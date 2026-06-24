@@ -6,7 +6,44 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] — 2026-06-24
+
 ### Added
+- **Centralised multi-repo survey hub — `derrick survey hub` (D80).** A new
+  `derrick-survey-hub` crate wraps the repo-agnostic `derrick-survey` engine
+  (tree-sitter extraction, SQLite+FTS5, search/context/impact/status) to serve
+  **N** indexed repositories from one long-lived process over rmcp's streamable
+  HTTP transport, configured by a `hub.yaml` workspace registry. The per-repo
+  stdio server (D57) is untouched — the hub is purely additive. Each of the four
+  survey tools takes a `workspace` argument selecting which repo's index to
+  query.
+- **Hub freshness — poll-on-query TTL + explicit refresh (D81).** Each workspace
+  carries a `last_checked` timestamp; a query past the configured
+  `freshness_ttl_secs` triggers a cheap staleness probe and, if files changed, an
+  incremental rebuild before answering — a self-healing floor — with a
+  single-flight guard against duplicate concurrent rebuilds. A workspace-scoped
+  `derrick_survey_refresh` tool forces an immediate rebuild for CI/git-hook
+  push-style proactivity.
+- **Hub workspace sourcing — Local vs Pushed (D82).** A `WorkspaceSource`
+  abstraction lets each workspace be either `Local { root }` (the hub holds a
+  working tree and builds the index itself, D81 freshness applies) or
+  `Pushed { db_path }` (an operator or CI places a prebuilt `.db` on disk; the
+  hub opens, serves, and **atomically hot-swaps** it when the file changes).
+  Modes may be mixed within one `hub.yaml`. Cross-version safety reuses the
+  existing `PRAGMA user_version` / `SchemaTooNew` guard.
+- **Hub authentication — scoped bearer tokens (D83).** An optional `auth` section
+  in `hub.yaml` lists bearer tokens, each granting a set of workspace ids (or
+  `*`) and capabilities (`read`, `refresh`; `upload` reserved). Clients present
+  `Authorization: Bearer <token>`; the hub authenticates in constant time and
+  authorizes per-workspace per-capability. A non-loopback bind is rejected unless
+  `auth` is configured; TLS is terminated by a reverse proxy.
+- **Hub routing — discovery tool + path-prefix mounts (D84).** A new
+  `derrick_survey_list_workspaces` tool enumerates the workspace ids a caller's
+  token may reach (auth-scoped). In addition to the default root endpoint (where
+  every tool takes an explicit `workspace`), the hub serves each workspace at a
+  pinned path `/w/<id>` where the `workspace` argument is optional — clean
+  per-site URLs a reverse proxy can route without wildcard DNS. Workspace ids are
+  validated as single URL-safe path segments.
 - **Factory view — 8th tab in `derrick observe` (D78).** An animated ASCII
   factory floor of workers, driven by the new structured hand telemetry
   (D75/D76/D77). Each registered hand is a workstation with a unicode avatar
