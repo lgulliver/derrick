@@ -336,6 +336,7 @@ What's landed and tested:
 - ✅ `PipelineStepStarted` event — bridges live run telemetry into the persisted event log so `derrick observe` sees mid-step liveness (D77)
 - ✅ Tiered memory with tag index and lesson retrieval
 - ✅ `derrick survey` — native code-graph index (SQLite + FTS5) over Rust/TS/JS/Python/Go/C#/Java/Kotlin; MCP server (`survey serve --mcp`) so agents query symbols/callers/impact instead of fanning out across reads; debounced watcher keeps it fresh
+- ✅ `derrick survey hub` — centralised multi-repo survey server over streamable HTTP: one always-on process indexes N repos, with per-call workspace routing, scoped bearer-token auth, and Local-or-Pushed index sourcing (D80–D84). See [docs/survey.md](./docs/survey.md#multi-repo-hub)
 - ✅ `derrick init` — brownfield-safe, VS Code + JetBrains opt-in, Codex instructions
 - ✅ `derrick doctor` — live squash-merge policy check via GitHub API
 - ✅ PR stacking: `stack show / restack / submit` — native engine (plain git + gh, D72); topological cascade restack with per-subtree conflict isolation (D73); whole-stack submit with base retargeting; stack navigation table maintained in each PR body
