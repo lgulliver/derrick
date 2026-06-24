@@ -226,7 +226,7 @@ Call **`derrick_survey_list_workspaces`** first to discover which workspace ids 
 ### Workspace sourcing — Local vs Pushed (D82)
 
 - **Local (`root`)** — the hub holds the working tree and builds the index itself. Freshness follows the poll-TTL + refresh model below. This is the same behaviour as the per-repo server, just hosted.
-- **Pushed (`pushed_db`)** — the hub never sees source. An operator or CI builds `index.db` where the code lives (`derrick survey build`) and places it at `pushed_db` (rsync / shared volume / scp). The hub opens it read-only and **atomically hot-swaps** to a new version when the file changes. Cross-version safety is automatic: a DB built by a newer schema is rejected cleanly rather than mis-served.
+- **Pushed (`pushed_db`)** — the hub never sees source. An operator or CI builds `index.db` where the code lives (`derrick survey build`) and places it at `pushed_db` (rsync / shared volume / scp). The hub opens it read-only and **atomically hot-swaps** to a new version when the file changes. Cross-version safety is automatic: a DB built by a newer schema is rejected cleanly rather than served incorrectly.
 
 Modes may be mixed in one `hub.yaml`. The authenticated HTTP **upload** endpoint for Pushed workspaces is reserved (the `upload` capability) but not yet implemented — place pushed DBs out-of-band for now.
 
