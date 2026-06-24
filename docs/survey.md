@@ -1,6 +1,6 @@
 # derrick survey — code-graph index
 
-> Design decisions: D54, D55, D56, D57 (DESIGN.md §12). Architecture: §9.B.8.
+> Design decisions: D54, D55, D56, D57 (single-repo); D80–D84 (multi-repo hub). DESIGN.md §12. Architecture: §9.B.8 / §9.B.8a.
 
 derrick survey is a native Rust code-graph index that lets AI agents query your repository's symbol structure — functions, types, call relationships, cross-file references — with a single MCP tool call instead of fanning out across dozens of `grep`/`glob`/`Read` operations.
 
@@ -136,6 +136,130 @@ Subsequent builds are incremental. The watcher keeps the index fresh while the M
 
 ---
 
+## Multi-repo hub
+
+> Design decisions: D80–D84 (DESIGN.md §12). Architecture: §9.B.8a.
+
+Everything above describes the **per-repo stdio server** — one `derrick survey serve --mcp` process per repository, launched by your agent host over stdio. The **hub** is the other deployment model: one long-lived process that indexes **N** repositories and serves them all over a single network endpoint, so agents on different machines or sessions share the same indexes.
+
+The query engine is identical — the hub wraps the same `derrick-survey` index and exposes the same tools. What it adds is a workspace registry, an HTTP transport, per-call workspace routing, optional authentication, and a choice of how each index is sourced.
+
+Use the hub when you want a shared, always-on survey service (a team box, a CI sidecar, a self-hosted endpoint). Use the per-repo stdio server for a single developer on a single machine — it needs no config and no network.
+
+### `hub.yaml`
+
+The hub is driven entirely by a config file (there is no `derrick.yaml` involvement). A complete example:
+
+```yaml
+# Address to bind the HTTP MCP endpoint to.
+# Loopback-only unless `auth` is configured (see Authentication below).
+bind: "127.0.0.1:7000"
+
+# Poll-on-query freshness TTL, in seconds (default: 60).
+# A read re-probes a workspace for staleness at most once per window;
+# 0 means probe on every query.
+freshness_ttl_secs: 60
+
+# Optional bearer-token auth (omit entirely for a loopback-only, no-auth hub).
+auth:
+  tokens:
+    - token: "s3cret-ci-token"      # raw secret; hub.yaml is operator-controlled
+      workspaces: ["*"]             # ["*"] = all, or an explicit id list
+      capabilities: ["read", "refresh"]
+    - token: "readonly-team-token"
+      workspaces: ["api", "web"]    # scoped to two workspaces
+      capabilities: ["read"]
+
+workspaces:
+  # Local — the hub holds a working tree and builds/refreshes the index itself.
+  - id: api
+    root: /srv/repos/api           # `db_path:` optional, defaults to <root>/.derrick/index.db
+
+  # Pushed — CI/an operator places a prebuilt index DB on disk; the hub serves it.
+  - id: web
+    pushed_db: /srv/indexes/web.db
+```
+
+Each workspace sets **exactly one** of `root` (Local) or `pushed_db` (Pushed). Workspace `id`s must be a single URL-safe path segment (`A–Z a–z 0–9 - _ . ~`) so they can be addressed at `/w/<id>` (see Routing).
+
+| Field | Required | Notes |
+|---|---|---|
+| `bind` | yes | `host:port`. Non-loopback is rejected unless `auth` is set. |
+| `freshness_ttl_secs` | no | Default 60. `0` = probe every query. |
+| `auth.tokens[]` | no | Omit for a loopback-only no-auth hub. |
+| `workspaces[].id` | yes | Unique, URL-safe path segment. |
+| `workspaces[].root` | one of | Local mode: working tree the hub indexes itself. |
+| `workspaces[].db_path` | no | Local only; overrides the default `<root>/.derrick/index.db`. |
+| `workspaces[].pushed_db` | one of | Pushed mode: prebuilt `.db` the hub opens and serves. |
+
+### Running it
+
+```bash
+derrick survey hub --config hub.yaml
+```
+
+The hub opens (and, for Local workspaces, builds) every index before it starts listening, then serves until the process is stopped. There is no watcher — freshness is poll-on-query plus the explicit refresh tool (see below).
+
+### Connecting a client
+
+The hub speaks rmcp's **streamable HTTP** transport (not stdio). Point an MCP-capable host at the hub's URL. There are two ways to select which repo a tool call targets:
+
+1. **Root endpoint + `workspace` argument (default).** Connect to the hub root; every tool call passes a `workspace` argument naming the repo. A client already pointed at a single per-repo `survey serve --mcp` server can move to the hub without changing its tool calls — just change the URL and add the `workspace` argument.
+
+   ```jsonc
+   // .mcp.json — HTTP transport
+   {
+     "mcpServers": {
+       "derrick-survey-hub": {
+         "type": "http",
+         "url": "http://hub.internal:7000/",
+         "headers": { "Authorization": "Bearer s3cret-ci-token" }
+       }
+     }
+   }
+   ```
+
+   (Claude Code's canonical transport value is `"http"`; it also accepts `"streamable-http"` as an alias. Other MCP hosts may spell the field differently — check your host's docs.)
+
+2. **Path-prefix endpoint `/w/<id>` (pinned).** Connect to `http://hub.internal:7000/w/api` and the workspace is fixed by the path — the `workspace` argument becomes optional (and, if passed, must match the pinned id). This gives clean per-repo URLs a reverse proxy can route and authorize on, without wildcard DNS.
+
+Call **`derrick_survey_list_workspaces`** first to discover which workspace ids your token can reach, rather than hard-coding them.
+
+### Workspace sourcing — Local vs Pushed (D82)
+
+- **Local (`root`)** — the hub holds the working tree and builds the index itself. Freshness follows the poll-TTL + refresh model below. This is the same behaviour as the per-repo server, just hosted.
+- **Pushed (`pushed_db`)** — the hub never sees source. An operator or CI builds `index.db` where the code lives (`derrick survey build`) and places it at `pushed_db` (rsync / shared volume / scp). The hub serves it read-only and detects a replacement by polling the file's size and mtime **on query** — gated by `freshness_ttl_secs`, or forced immediately by `derrick_survey_refresh`. There is no filesystem watcher, so replace the file with an **atomic rename** (`mv tmp.db pushed.db`) — that way a probe never reads a half-written DB. On a detected change the hub opens the new DB and **atomically hot-swaps** it in. Cross-version safety is automatic: a DB built by a newer schema is rejected — at startup the hub refuses to start, and on a live reload the swap is skipped so the previously-loaded index keeps serving.
+
+Modes may be mixed in one `hub.yaml`. The authenticated HTTP **upload** endpoint for Pushed workspaces is reserved (the `upload` capability) but not yet implemented — place pushed DBs out-of-band for now.
+
+### Freshness (D81)
+
+Each workspace carries a `last_checked` timestamp. On a query past `freshness_ttl_secs`, the hub runs a cheap staleness probe and, if files changed, an incremental rebuild before answering — a self-healing floor — with a single-flight guard so concurrent queries never trigger duplicate rebuilds. CI or a git hook can call **`derrick_survey_refresh`** (workspace-scoped) to force an immediate rebuild after a known change instead of waiting for the window.
+
+### Authentication (D83)
+
+Add an `auth` section to require an `Authorization: Bearer <token>` header. Each token grants:
+
+- a **workspace scope** — `["*"]` for all, or an explicit id list; and
+- a set of **capabilities** — `read` (the four query tools), `refresh` (the refresh tool); `upload` is reserved.
+
+The hub matches tokens in constant time and authorizes every call against the **resolved** workspace — so a token scoped to `api` is refused at `/w/web` or with `workspace: web`, regardless of addressing mode. `derrick_survey_list_workspaces` is auth-scoped too: a token only ever sees the ids it can reach.
+
+**Bind policy:** with no `auth`, the hub refuses any non-loopback `bind` (it would expose every hosted repo unauthenticated). With `auth` configured, a non-loopback bind is allowed. **TLS** is terminated by a reverse proxy (nginx / Caddy / a cloud load balancer) in front of the hub — the hub itself speaks plain HTTP.
+
+### Hub tools
+
+The hub exposes the four read tools (`search`, `context`, `impact`, `status`) plus two more:
+
+| Tool | Input | What it returns |
+|---|---|---|
+| `derrick_survey_list_workspaces` | — | The workspace ids the caller's token may reach. Call this first for discovery. |
+| `derrick_survey_refresh` | `workspace` | Forces an immediate rebuild (Local) or reload (Pushed) of that workspace, returning its post-build status. Requires the `refresh` capability. |
+
+On the root endpoint the four read tools and `refresh` take a required `workspace` argument; on a `/w/<id>` endpoint that argument is optional (defaulted to the pin).
+
+---
+
 ## CLI reference
 
 All survey subcommands are under `derrick survey`.
@@ -195,6 +319,14 @@ derrick survey setup
 ```
 
 Standalone setup — wires the survey MCP server into any git repo without running `derrick init`. Creates `.derrick/` and `.derrick/.gitignore`, then merges the `derrick-survey` server into `.mcp.json`. Safe to run on repos that use Cursor, Windsurf, or other MCP-capable hosts that are not managing a full derrick pipeline. Idempotent: running it twice leaves the same state.
+
+### `derrick survey hub --config <hub.yaml>`
+
+```
+derrick survey hub --config hub.yaml
+```
+
+Runs the centralised multi-repo hub: loads the `hub.yaml` registry, opens and (for Local workspaces) builds each index, and serves all four query tools plus `derrick_survey_refresh` and `derrick_survey_list_workspaces` over a single streamable-HTTP MCP endpoint. See [Multi-repo hub](#multi-repo-hub) for the config schema, routing, sourcing modes, freshness, and authentication.
 
 ---
 
