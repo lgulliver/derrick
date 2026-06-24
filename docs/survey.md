@@ -204,7 +204,7 @@ The hub opens (and, for Local workspaces, builds) every index before it starts l
 
 The hub speaks rmcp's **streamable HTTP** transport (not stdio). Point an MCP-capable host at the hub's URL. There are two ways to select which repo a tool call targets:
 
-1. **Root endpoint + `workspace` argument (default).** Connect to the hub root; every tool call passes a `workspace` argument naming the repo. This is backward-compatible with a client already configured for a single workspace.
+1. **Root endpoint + `workspace` argument (default).** Connect to the hub root; every tool call passes a `workspace` argument naming the repo. A client already pointed at a single per-repo `survey serve --mcp` server can move to the hub without changing its tool calls — just change the URL and add the `workspace` argument.
 
    ```jsonc
    // .mcp.json — HTTP transport
@@ -219,6 +219,8 @@ The hub speaks rmcp's **streamable HTTP** transport (not stdio). Point an MCP-ca
    }
    ```
 
+   (Claude Code's canonical transport value is `"http"`; it also accepts `"streamable-http"` as an alias. Other MCP hosts may spell the field differently — check your host's docs.)
+
 2. **Path-prefix endpoint `/w/<id>` (pinned).** Connect to `http://hub.internal:7000/w/api` and the workspace is fixed by the path — the `workspace` argument becomes optional (and, if passed, must match the pinned id). This gives clean per-repo URLs a reverse proxy can route and authorize on, without wildcard DNS.
 
 Call **`derrick_survey_list_workspaces`** first to discover which workspace ids your token can reach, rather than hard-coding them.
@@ -226,7 +228,7 @@ Call **`derrick_survey_list_workspaces`** first to discover which workspace ids 
 ### Workspace sourcing — Local vs Pushed (D82)
 
 - **Local (`root`)** — the hub holds the working tree and builds the index itself. Freshness follows the poll-TTL + refresh model below. This is the same behaviour as the per-repo server, just hosted.
-- **Pushed (`pushed_db`)** — the hub never sees source. An operator or CI builds `index.db` where the code lives (`derrick survey build`) and places it at `pushed_db` (rsync / shared volume / scp). The hub opens it read-only and **atomically hot-swaps** to a new version when the file changes. Cross-version safety is automatic: a DB built by a newer schema is rejected cleanly rather than served incorrectly.
+- **Pushed (`pushed_db`)** — the hub never sees source. An operator or CI builds `index.db` where the code lives (`derrick survey build`) and places it at `pushed_db` (rsync / shared volume / scp). The hub serves it read-only and detects a replacement by polling the file's size and mtime **on query** — gated by `freshness_ttl_secs`, or forced immediately by `derrick_survey_refresh`. There is no filesystem watcher, so replace the file with an **atomic rename** (`mv tmp.db pushed.db`) — that way a probe never reads a half-written DB. On a detected change the hub opens the new DB and **atomically hot-swaps** it in. Cross-version safety is automatic: a DB built by a newer schema is rejected — at startup the hub refuses to start, and on a live reload the swap is skipped so the previously-loaded index keeps serving.
 
 Modes may be mixed in one `hub.yaml`. The authenticated HTTP **upload** endpoint for Pushed workspaces is reserved (the `upload` capability) but not yet implemented — place pushed DBs out-of-band for now.
 
