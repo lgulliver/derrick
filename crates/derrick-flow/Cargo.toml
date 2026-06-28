@@ -13,6 +13,7 @@ derrick-assay = { path = "../derrick-assay" }
 derrick-config = { path = "../derrick-config" }
 derrick-roughneck = { path = "../derrick-roughneck" }
 derrick-scrub = { path = "../derrick-scrub" }
+derrick-specify = { path = "../derrick-specify" }
 derrick-memory = { path = "../derrick-memory" }
 derrick-models = { path = "../derrick-models" }
 derrick-substrate = { path = "../derrick-substrate" }
