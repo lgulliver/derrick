@@ -762,6 +762,7 @@ dependencies = [
  "derrick-models",
  "derrick-roughneck",
  "derrick-scrub",
+ "derrick-specify",
  "derrick-substrate",
  "derrick-substrate-native",
  "derrick-tools",
@@ -858,6 +859,25 @@ name = "derrick-scrub"
 version = "0.1.0-alpha.4"
 dependencies = [
  "regex",
+]
+
+[[package]]
+name = "derrick-specify"
+version = "0.1.0-alpha.4"
+dependencies = [
+ "async-trait",
+ "derrick-assay",
+ "derrick-caveman",
+ "derrick-config",
+ "derrick-roughneck",
+ "derrick-survey",
+ "derrick-tools",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

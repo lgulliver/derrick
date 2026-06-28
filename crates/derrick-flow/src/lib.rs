@@ -2300,9 +2300,12 @@ models:
     provider: shell
     cli: "/nonexistent-reviewer"
     model: shell-reviewer
+  native-claude:
+    provider: claude
+    model: claude-sonnet-4-6
 roles:
-  drafter: shell-reviewer
-  proposer: shell-reviewer
+  drafter: native-claude
+  proposer: native-claude
   reviewer: shell-reviewer
 tools:
   speckit:
@@ -2490,39 +2493,114 @@ state:
         Ok(())
     }
 
+    /// A claude host that emits canned native-schema artifacts per phase, and
+    /// records every prompt so the test can assert clarify-first ordering. This
+    /// is the real `HostRegistry` boundary — the native provider calls
+    /// `hosts.get("claude")` exactly as in production.
+    struct NativeStubHost {
+        prompts: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HostAdapter for NativeStubHost {
+        fn name(&self) -> &str {
+            "claude"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
+            let prompt = request.prompt.clone();
+            self.prompts.lock().expect("lock").push(prompt.clone());
+            let stdout = if prompt.contains("clarify a feature request BEFORE") {
+                "Q: Which format?\nOptions: JSON, YAML\nRecommendation: JSON\n".to_owned()
+            } else if prompt.contains("Write a specification") {
+                "---\nschema: derrick.spec/v1\nslug: thing\nintent: do the thing\nrequirements:\n  - id: R1\n    must: it works\nacceptance:\n  - id: A1\n    check: verified\nnon_goals: []\nopen_questions: []\n---\n# Thing\n\n## Context\nx\n\n## Requirements\nR1\n\n## Acceptance Criteria\nA1\n\n## Out of Scope\nnone\n".to_owned()
+            } else if prompt.contains("implementation plan") {
+                "---\nschema: derrick.plan/v1\ncovers: [R1]\ntouches: []\n---\n# Plan\nsteps\n"
+                    .to_owned()
+            } else if prompt.contains("Break this plan into tickets") {
+                "## Ticket one\nImplements R1.\n".to_owned()
+            } else {
+                String::new()
+            };
+            Ok(HostResponse {
+                stdout,
+                stderr: String::new(),
+                exit_code: 0,
+                elapsed: Duration::from_millis(1),
+                tokens_in: 5,
+                tokens_out: 9,
+                pid: None,
+            })
+        }
+    }
+
     #[tokio::test]
-    async fn bare_step_with_native_provider_returns_not_yet_available() -> TestResult {
-        let (dir, config, substrate, hosts, _prompts) =
+    async fn bare_step_with_native_provider_runs_end_to_end() -> TestResult {
+        // Build the config + substrate via the shared harness, then swap in a
+        // native-aware host registry (the harness's RecordingHost only knows the
+        // speckit commands).
+        let (dir, config, substrate, _hosts, _prompts) =
             harness(bare_drill_pipeline(), "  specify:\n    provider: native\n").await?;
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let mut native_hosts = HostRegistry::empty();
+        native_hosts.register(
+            "claude",
+            Box::new(NativeStubHost {
+                prompts: prompts.clone(),
+            }),
+        );
+        let hosts = Arc::new(native_hosts);
+
         let run_dir = dir.path().join(".derrick/runs/native-run");
         std::fs::create_dir_all(&run_dir)?;
         let mut state =
             ExecutionState::new("do the thing".to_owned(), "native-run".to_owned(), run_dir);
 
-        let step = config
-            .pipeline()
+        for id in ["specify", "plan", "tasks"] {
+            let status = run_step(
+                &config,
+                substrate.as_ref(),
+                hosts.clone(),
+                dir.path(),
+                &mut state,
+                id,
+            )
+            .await?;
+            assert_eq!(status, StepStatus::Success, "native {id} should succeed");
+        }
+
+        // Clarify-first: the clarify prompt was issued before the spec draft.
+        let issued = prompts.lock().expect("lock").clone();
+        let clarify_at = issued
             .iter()
-            .find(|s| s.id() == "specify")
-            .expect("specify step")
-            .clone();
-        let manifest_path = state.run_dir.join("manifest.json");
-        let error = execute_step(
-            &config,
-            substrate.as_ref(),
-            hosts.clone(),
-            dir.path(),
-            &step,
-            &mut state,
-            "native-run",
-            &manifest_path,
-            None,
-        )
-        .await
-        .expect_err("native provider should error in Phase 1");
+            .position(|p| p.contains("clarify a feature request BEFORE"));
+        let spec_at = issued
+            .iter()
+            .position(|p| p.contains("Write a specification"));
         assert!(
-            error.to_string().contains("not yet available") && error.to_string().contains("native"),
-            "expected a clear not-yet-available error, got: {error}"
+            matches!((clarify_at, spec_at), (Some(c), Some(s)) if c < s),
+            "clarify must precede the spec draft"
         );
+
+        // The three canonical artifacts exist and validate.
+        let feature_dir = state
+            .feature_dir
+            .clone()
+            .expect("feature_dir set by specify");
+        let spec_md = std::fs::read_to_string(dir.path().join(&feature_dir).join("spec.md"))?;
+        let plan_md = std::fs::read_to_string(dir.path().join(&feature_dir).join("plan.md"))?;
+        let tasks_md = std::fs::read_to_string(dir.path().join(&feature_dir).join("tasks.md"))?;
+        assert!(!derrick_specify::schema::has_reject(
+            &derrick_specify::schema::validate_spec(&spec_md)
+        ));
+        assert!(!derrick_specify::schema::has_reject(
+            &derrick_specify::schema::validate_plan(&plan_md, &["R1".to_owned()], &[],)
+        ));
+        assert!(!derrick_specify::schema::has_reject(
+            &derrick_specify::schema::validate_tasks(&tasks_md)
+        ));
         Ok(())
     }
 

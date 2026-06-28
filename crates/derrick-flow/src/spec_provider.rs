@@ -21,6 +21,7 @@
 use std::path::Path;
 
 use derrick_config::{PipelineStep, SpecProviderKind};
+use derrick_specify::{NativeOutcome, NativeRequest, NativeSpecProvider};
 use derrick_tools::{HostRegistry, OutputSink};
 
 use derrick_assay::ExecutionState;
@@ -116,17 +117,135 @@ pub async fn run_spec_phase(
             )
             .await
         }
-        SpecProviderKind::Native => Err(RunError::Config(format!(
-            "spec provider 'native' is not yet available (Phase 2) — \
-             phase '{}' cannot be produced natively yet; \
-             use an explicit speckit step or set tools.specify.provider: speckit",
-            phase.label()
-        ))),
+        SpecProviderKind::Native => run_native_phase(phase, ctx).await,
         SpecProviderKind::Import => Err(RunError::Config(format!(
             "spec provider 'import' is not yet available (Phase 3) — \
              phase '{}' cannot be imported yet; \
              use an explicit speckit step or set tools.specify.provider: speckit",
             phase.label()
         ))),
+    }
+}
+
+/// Resolves the working directory the same way `crate::steps` does: the
+/// worktree path when present, otherwise the repo root.
+fn working_dir<'a>(state: &'a ExecutionState, repo_root: &'a Path) -> &'a Path {
+    state.worktree_path.as_deref().unwrap_or(repo_root)
+}
+
+/// Runs one native spec phase via [`NativeSpecProvider`] and maps its
+/// [`NativeOutcome`] onto a [`StepExecution`], matching the role-path's
+/// accounting (artifacts via `detect_artifacts`, tokens/bytes/roughneck).
+async fn run_native_phase(
+    phase: SpecPhase,
+    ctx: SpecPhaseCtx<'_>,
+) -> Result<StepExecution, RunError> {
+    let provider = NativeSpecProvider::new();
+    // Pipeline steps run headless (no TTY to answer clarify questions), so the
+    // native clarify loop auto-accepts each recommendation and still writes
+    // `clarify.md`. The interactive clarify path is the dedicated `clarify`
+    // step (`crate::clarify::execute_clarify`).
+    let interactive = false;
+
+    // The specify phase pre-scaffolds the feature dir (reusing the same
+    // assay io used by the speckit path) and records it on the state, so
+    // detect_artifacts and the later plan/tasks phases see it.
+    if phase == SpecPhase::Specify {
+        let wd = working_dir(ctx.state, ctx.repo_root);
+        let feature_dir = derrick_assay::io::prescaffold_feature_dir(wd, &ctx.state.prompt)?;
+        ctx.state.feature_dir = Some(feature_dir);
+    }
+    let feature_dir = ctx.state.feature_dir.clone().ok_or_else(|| {
+        RunError::Config(format!(
+            "native '{}' requires feature_dir from a prior specify phase",
+            phase.label()
+        ))
+    })?;
+
+    // Borrow split: capture the working dir as an owned path so `ctx.state`
+    // is free for the (non-specify) clarify read below.
+    let wd = working_dir(ctx.state, ctx.repo_root).to_path_buf();
+    let raw_prompt = ctx.state.prompt.clone();
+
+    let request = NativeRequest {
+        raw_prompt: &raw_prompt,
+        repo_root: ctx.repo_root,
+        working_dir: &wd,
+        hosts: ctx.hosts,
+        config: ctx.config,
+        interactive,
+        feature_dir: &feature_dir,
+    };
+
+    let outcome: NativeOutcome = match phase {
+        SpecPhase::Specify => provider
+            .specify(&request)
+            .await
+            .map_err(map_specify_err("specify"))?,
+        SpecPhase::Plan => {
+            // Thread accepted clarifications into the native planner, mirroring
+            // `inject_clarify_answers_for_plan` on the role path. A missing
+            // clarify.md is fine (None); any other IO error is surfaced rather
+            // than silently swallowed.
+            let clarify_path = wd.join(&feature_dir).join("clarify.md");
+            let clarifications = match std::fs::read_to_string(&clarify_path) {
+                Ok(text) => Some(text),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(source) => {
+                    return Err(RunError::Io {
+                        path: clarify_path,
+                        source,
+                    });
+                }
+            };
+            provider
+                .plan(&request, clarifications.as_deref())
+                .await
+                .map_err(map_specify_err("plan"))?
+        }
+        SpecPhase::Tasks => provider
+            .tasks(&request)
+            .await
+            .map_err(map_specify_err("tasks"))?,
+    };
+
+    // Write the step log for parity with the role path.
+    derrick_assay::io::write_log(
+        ctx.log_path,
+        &format!(
+            "native {} produced {} artifact(s); tokens_in={} tokens_out={} repaired={}\n",
+            phase.label(),
+            outcome.artifacts.len(),
+            outcome.tokens_in,
+            outcome.tokens_out,
+            outcome.repaired
+        ),
+        "",
+    )?;
+
+    // Artifacts: re-detect from canonical paths so downstream keys off the same
+    // files the speckit path produces.
+    let artifacts = crate::steps::detect_artifacts(
+        match phase {
+            SpecPhase::Specify => "specify",
+            SpecPhase::Plan => "plan",
+            SpecPhase::Tasks => "tasks",
+        },
+        ctx.state,
+        ctx.repo_root,
+    );
+
+    Ok(StepExecution::success(artifacts)
+        .with_tokens(outcome.tokens_in, outcome.tokens_out)
+        .with_compression(outcome.bytes_raw, outcome.bytes_saved)
+        .with_roughneck(outcome.roughneck_tokens_saved))
+}
+
+/// Maps a [`derrick_specify::SpecifyError`] into a [`RunError::StepFailed`],
+/// matching `verify_spec_written` failure semantics.
+fn map_specify_err(phase: &'static str) -> impl Fn(derrick_specify::SpecifyError) -> RunError {
+    move |error| RunError::StepFailed {
+        id: phase.to_owned(),
+        message: error.to_string(),
     }
 }

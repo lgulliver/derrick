@@ -1,113 +1,32 @@
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
+//! Post-spec clarify step (DESIGN.md §5.3).
+//!
+//! The reusable clarify core — question parsing, answer selection, markdown
+//! rendering, and the interactive/non-interactive loop — lives in
+//! `derrick-specify` so the native spec provider can clarify the raw request
+//! *before* a spec exists. This module re-exports those pure helpers and
+//! delegates [`execute_clarify`] (the post-spec step) to
+//! [`derrick_specify::clarify::run_clarify_loop`], so the step's on-disk
+//! behaviour (`clarify.md` shape, recommendation acceptance, host call) is
+//! unchanged.
+
+use std::path::Path;
 use std::sync::Arc;
 
 use derrick_tools::{HostRegistry, HostRequest};
-use owo_colors::OwoColorize;
 
 use derrick_assay::io::{relative_to_root, write_log};
 use derrick_assay::types::{RunError, StepExecution};
 
-pub struct ClarifyQuestion {
-    pub question: String,
-    pub options: Vec<String>,
-    pub recommendation: Option<String>,
-}
-
-pub fn parse_clarify_questions(text: &str) -> Vec<ClarifyQuestion> {
-    let mut questions: Vec<ClarifyQuestion> = Vec::new();
-    let mut question: Option<String> = None;
-    let mut options: Vec<String> = Vec::new();
-    let mut recommendation: Option<String> = None;
-    for line in text.lines() {
-        let t = line.trim();
-        if let Some(stripped) = t.strip_prefix("Q:") {
-            if let Some(q) = question.take() {
-                questions.push(ClarifyQuestion {
-                    question: q,
-                    options: std::mem::take(&mut options),
-                    recommendation: recommendation.take(),
-                });
-            }
-            question = Some(stripped.trim().to_owned());
-        } else if let Some(stripped) = t.strip_prefix("Options:") {
-            options = split_options_smart(stripped)
-                .into_iter()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty())
-                .collect();
-        } else if let Some(stripped) = t.strip_prefix("Recommendation:") {
-            recommendation = Some(stripped.trim().to_owned());
-        }
-    }
-    if let Some(q) = question {
-        questions.push(ClarifyQuestion {
-            question: q,
-            options,
-            recommendation,
-        });
-    }
-    questions
-}
-
-/// Split options text on commas, but only commas at the top level
-/// (not inside matching parentheses, brackets, or backtick pairs).
-fn split_options_smart(text: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0usize;
-    let mut depth = 0i32;
-    for (i, ch) in text.char_indices() {
-        match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            '`' => {
-                // Toggle backtick depth
-                if depth == 0 {
-                    depth = -1
-                } else if depth == -1 {
-                    depth = 0
-                }
-            }
-            ',' if depth == 0 => {
-                parts.push(text[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if start < text.len() {
-        parts.push(text[start..].trim());
-    }
-    parts
-}
-
-pub(crate) fn select_clarify_answer(question: &ClarifyQuestion, user_input: &str) -> String {
-    if user_input.is_empty() {
-        return question.recommendation.clone().unwrap_or_default();
-    }
-    if let Ok(index) = user_input.parse::<usize>() {
-        if let Some(selected) = question.options.get(index.saturating_sub(1)) {
-            return selected.clone();
-        }
-    }
-    user_input.to_owned()
-}
-
-pub(crate) fn render_clarify_markdown(questions: &[ClarifyQuestion], answers: &[String]) -> String {
-    let mut content = String::from("# Clarification Q&A\n\n");
-    for (q, a) in questions.iter().zip(answers.iter()) {
-        content.push_str("## Question\n");
-        content.push_str(&q.question);
-        content.push_str("\n\nOptions: ");
-        content.push_str(&q.options.join(", "));
-        content.push_str("\n\nRecommendation: ");
-        content.push_str(q.recommendation.as_deref().unwrap_or("none"));
-        content.push_str("\n\nAnswer: ");
-        content.push_str(a);
-        content.push_str("\n\n");
-    }
-    content
-}
+// Re-export the shared clarify core so existing call sites
+// (`clarify::parse_clarify_questions`, etc.) keep compiling unchanged. The
+// `mod clarify` declaration is private, so a plain `pub use` of symbols only the
+// test module references would warn; `#[allow(unused_imports)]` keeps the full
+// re-export surface available to tests without churn.
+#[allow(unused_imports)]
+pub use derrick_specify::clarify::{
+    ClarifyQuestion, parse_clarify_questions, render_clarify_markdown, run_clarify_loop,
+    select_clarify_answer,
+};
 
 fn build_clarify_prompt(spec_rel: &Path) -> String {
     format!(
@@ -143,10 +62,10 @@ pub async fn execute_clarify(
     })?;
 
     let spec_lines = spec.lines().count();
-    eprintln!(
-        "  {} Specification loaded for review ({} lines)",
-        "\u{2713}".green(),
-        spec_lines
+    tracing::info!(
+        target: "derrick_flow::clarify",
+        lines = spec_lines,
+        "specification loaded for review"
     );
 
     let spec_rel = feature_dir.join("spec.md");
@@ -171,39 +90,26 @@ pub async fn execute_clarify(
 
     let questions = parse_clarify_questions(&response.stdout);
     if questions.is_empty() {
-        eprintln!("No clarifying questions needed. Proceeding.");
+        tracing::info!(
+            target: "derrick_flow::clarify",
+            "no clarifying questions needed; proceeding"
+        );
         return Ok(StepExecution::success(Vec::new()).with_tokens(tokens_in, tokens_out));
     }
 
-    let mut answers: Vec<String> = Vec::new();
-    for (i, q) in questions.iter().enumerate() {
-        eprintln!("\n--- Question {} of {} ---", i + 1, questions.len());
-        eprintln!("{}", q.question);
-        if !q.options.is_empty() {
-            for (j, opt) in q.options.iter().enumerate() {
-                let is_rec = q.recommendation.as_deref() == Some(opt.as_str());
-                if is_rec {
-                    eprintln!("  {}. {} [recommended]", j + 1, opt);
-                } else {
-                    eprintln!("  {}. {}", j + 1, opt);
-                }
-            }
-        }
-        eprint!("Your answer (or press Enter to accept recommendation): ");
-        std::io::stdout().flush().map_err(|source| RunError::Io {
-            path: PathBuf::from("<stdout>"),
-            source,
-        })?;
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|source| RunError::Io {
-                path: PathBuf::from("<stdin>"),
-                source,
-            })?;
-        let trimmed = answer.trim().to_owned();
-        answers.push(select_clarify_answer(q, &trimmed));
-    }
+    // Interactive: read each answer from stdin (Enter accepts the
+    // recommendation). The loop core is shared with the native provider; this
+    // CLI-facing caller injects the real stdin/stderr so the library crate
+    // stays free of direct stream access.
+    let answers = run_clarify_loop(
+        &questions,
+        std::io::stdin().lock(),
+        std::io::stderr().lock(),
+    )
+    .map_err(|source| RunError::Io {
+        path: std::path::PathBuf::from("<stdin>"),
+        source,
+    })?;
 
     let clarify_path = working_dir.join(feature_dir).join("clarify.md");
     let content = render_clarify_markdown(&questions, &answers);
@@ -212,7 +118,10 @@ pub async fn execute_clarify(
         source,
     })?;
 
-    eprintln!("\nClarification complete. Answers saved.");
+    tracing::info!(
+        target: "derrick_flow::clarify",
+        "clarification complete; answers saved"
+    );
     Ok(
         StepExecution::success(vec![relative_to_root(repo_root, clarify_path)?])
             .with_tokens(tokens_in, tokens_out),
@@ -221,24 +130,7 @@ pub async fn execute_clarify(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::Path;
-
-    #[test]
-    fn split_options_respects_parens() {
-        let input = "`0.0.0-nightly.20260520` (pre-release, sorts below stable), `0.0.0+nightly.20260520` (build metadata, unordered)";
-        let result = split_options_smart(input);
-        assert_eq!(result.len(), 2);
-        assert!(result[0].contains("nightly"));
-        assert!(result[1].contains("build metadata"));
-    }
-
-    #[test]
-    fn split_options_simple() {
-        let input = "REST, GraphQL, gRPC";
-        let result = split_options_smart(input);
-        assert_eq!(result, vec!["REST", "GraphQL", "gRPC"]);
-    }
 
     #[test]
     fn clarify_prompt_references_spec_path() {

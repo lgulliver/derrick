@@ -20,6 +20,7 @@ members = [
     "crates/derrick-observe",
     "crates/derrick-config",
     "crates/derrick-roughneck",
+    "crates/derrick-specify",
     "crates/derrick-survey",
     "crates/derrick-survey-hub",
 ]

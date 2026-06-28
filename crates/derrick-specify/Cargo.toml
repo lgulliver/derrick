@@ -1,0 +1,25 @@
+[package]
+name = "derrick-specify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+derrick-survey = { path = "../derrick-survey" }
+derrick-caveman = { path = "../derrick-caveman" }
+derrick-roughneck = { path = "../derrick-roughneck" }
+derrick-tools = { path = "../derrick-tools" }
+derrick-assay = { path = "../derrick-assay" }
+derrick-config = { path = "../derrick-config" }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
