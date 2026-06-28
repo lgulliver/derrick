@@ -36,12 +36,17 @@ pub async fn execute_step(
     let started_at = Utc::now();
     let log_path = state.run_dir.join(format!("step-{}.log", step.id()));
     // Spec-provider seam (DESIGN.md §5.3): a *bare* spec step — one of
-    // `specify`/`plan`/`tasks` with no `host`/`command`/`runner` — dispatches
-    // through the provider selected by `tools.specify.provider`. Steps that
-    // name a `host`+`command` (the explicit speckit form) or a `runner` fall
-    // through to the existing arms below unchanged.
+    // `specify`/`plan`/`tasks` with no `role`/`host`/`command`/`runner` —
+    // dispatches through the provider selected by `tools.specify.provider`.
+    // Steps that name a `role`, a `host`+`command` (the explicit speckit form),
+    // or a `runner` fall through to the existing arms below unchanged. The
+    // `role` check keeps this classifier in lock-step with
+    // `is_bare_spec_step` in derrick-config's pipeline validation.
     let spec_phase = crate::spec_provider::SpecPhase::from_step_id(step.id());
-    let is_bare = step.host().is_none() && step.command().is_none() && step.runner().is_none();
+    let is_bare = step.role().is_none()
+        && step.host().is_none()
+        && step.command().is_none()
+        && step.runner().is_none();
     let result = if let (Some(phase), true) = (spec_phase, is_bare) {
         let provider = config.tools().specify().provider();
         crate::spec_provider::run_spec_phase(
