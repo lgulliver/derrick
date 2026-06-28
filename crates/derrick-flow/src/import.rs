@@ -185,13 +185,22 @@ fn map_specify_err(error: derrick_specify::SpecifyError) -> RunError {
 
 /// Resolves an import `source` to a local file path, rejecting non-file schemes.
 ///
+/// This is the single source of truth for which import sources `derrick drill`
+/// accepts, and is re-exported from the crate root so `derrick doctor` can
+/// validate exactly what drill will accept.
+///
 /// v1 supports only a local filesystem path. A source that begins with a URI
 /// scheme other than `file:` (e.g. `github:`, `notion:`, `https:`) is a clear,
 /// documented "not supported yet" error — remote sources are deferred because
 /// derrick's Rust cannot call agent-side MCP tools. A `file:` prefix is accepted
 /// and stripped. A relative path is resolved against `working_dir`; an absolute
-/// path is used as-is.
-fn resolve_file_source(source: &str, working_dir: &Path) -> Result<PathBuf, RunError> {
+/// path is used as-is. A `file://<authority>/...` with a non-empty authority is
+/// rejected; only the `file:///abs` (empty authority) form is accepted.
+///
+/// Note: resolution is purely lexical — it does not check that the resolved path
+/// exists or is a regular file. Callers that need that (e.g. `derrick doctor`)
+/// perform the filesystem check themselves.
+pub fn resolve_file_source(source: &str, working_dir: &Path) -> Result<PathBuf, RunError> {
     let trimmed = source.trim();
     if trimmed.is_empty() {
         return Err(RunError::Config(

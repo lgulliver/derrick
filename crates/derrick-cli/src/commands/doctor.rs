@@ -133,10 +133,6 @@ async fn add_config_driven_checks(repo_root: &Path, config: &Config, checks: &mu
     }
 }
 
-/// The bare spec step ids the seam routes through `tools.specify.provider`
-/// (mirrors `derrick_flow::spec_provider::SpecPhase::from_step_id`).
-const SPEC_STEP_IDS: [&str; 3] = ["specify", "plan", "tasks"];
-
 /// Reports the active spec provider and runs provider-scoped health checks
 /// (DESIGN.md §5.3 / Phase 4).
 ///
@@ -144,7 +140,8 @@ const SPEC_STEP_IDS: [&str; 3] = ["specify", "plan", "tasks"];
 /// * The speckit-on-PATH check only runs when `provider == Speckit` *or* a
 ///   pipeline step explicitly pins a `/speckit.*` command. Under `native`/
 ///   `import`, speckit absence is never a failure.
-/// * `native` verifies the bare spec steps' roles resolve to a model.
+/// * `native` verifies the native generator's own drafter/proposer role tiers
+///   resolve to a model (bare spec steps carry no role).
 /// * `import` validates `tools.specify.import.source`.
 fn add_spec_provider_checks(repo_root: &Path, config: &Config, checks: &mut Vec<Check>) {
     let provider = config.tools().specify().provider();
@@ -203,27 +200,22 @@ fn speckit_path_check(config: &Config) -> Check {
     )
 }
 
-/// `native` provider: verify the bare spec steps' roles resolve to a model so
-/// the native generator has a model to invoke.
+/// `native` provider: verify the native generator's own role tiers resolve to a
+/// model so it has a model to invoke. The native generator resolves its fixed
+/// `drafter`/`proposer` roles against `config.roles()`; it never reads the
+/// pipeline step's `role:` (bare spec steps carry no role), so checking the
+/// steps' roles would be a vacuous pass. We check the generator's actual roles
+/// instead, via the shared `derrick_specify::NATIVE_SPEC_ROLES`.
 fn add_native_spec_checks(config: &Config, checks: &mut Vec<Check>) {
-    let mut roles: BTreeSet<String> = BTreeSet::new();
-    for step in config.pipeline() {
-        if SPEC_STEP_IDS.contains(&step.id()) {
-            if let Some(role) = step.role() {
-                roles.insert(role.to_owned());
-            }
-        }
-    }
-
     let mut unresolved: Vec<String> = Vec::new();
-    for role in &roles {
+    for role in derrick_specify::NATIVE_SPEC_ROLES {
         let resolves = config
             .roles()
             .get(role)
             .and_then(|model_name| config.models().get(model_name))
             .is_some();
         if !resolves {
-            unresolved.push(role.clone());
+            unresolved.push(role.to_owned());
         }
     }
 
@@ -256,43 +248,31 @@ fn add_import_spec_checks(repo_root: &Path, config: &Config, checks: &mut Vec<Ch
             "set tools.specify.import.source, or pass `--spec <path>` on each run",
         )),
         Some(source) => {
-            // Only validate plain filesystem paths; anything that looks like a
-            // URL/locator is left to the import provider to interpret at run time.
-            if looks_like_url(source) {
-                checks.push(Check::pass(
+            // Validate exactly what `derrick drill` accepts, using the shared
+            // resolver from `derrick-flow` (a local file path, or a `file:` /
+            // `file:///abs` URL; remote schemes and `file://authority` are
+            // rejected). Resolution is lexical, so we additionally require the
+            // resolved path to be an existing regular file.
+            match derrick_flow::resolve_file_source(source, repo_root) {
+                Ok(path) if path.is_file() => checks.push(Check::pass(
                     "import source",
-                    format!(
-                        "import source {source:?} is a non-file locator (validated at run time)"
-                    ),
-                ));
-                return;
-            }
-            let candidate = repo_root.join(source);
-            if candidate.exists() {
-                checks.push(Check::pass(
+                    format!("import source {source:?} resolves to {}", path.display()),
+                )),
+                Ok(_) => checks.push(Check::warn(
                     "import source",
-                    format!("import source {source:?} exists"),
-                ));
-            } else {
-                checks.push(Check::warn(
-                    "import source",
-                    format!("import source {source:?} does not exist"),
+                    format!("import source {source:?} does not exist or is not a file"),
                     "create the spec file, fix tools.specify.import.source, \
                      or pass `--spec <path>` on each run",
-                ));
+                )),
+                Err(error) => checks.push(Check::warn(
+                    "import source",
+                    format!("import source {source:?} is not usable: {error}"),
+                    "use a local file path or file:///absolute/path; \
+                     remote sources are not supported in v1",
+                )),
             }
         }
     }
-}
-
-/// Heuristic: treat values with a `scheme://` prefix as locators, not files.
-fn looks_like_url(source: &str) -> bool {
-    source.split_once("://").is_some_and(|(scheme, _)| {
-        !scheme.is_empty()
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-    })
 }
 
 async fn check_native_substrate(repo_root: &Path, config: &Config, checks: &mut Vec<Check>) {
@@ -993,6 +973,14 @@ mod tests {
         for step in steps.iter_mut() {
             if step.get("id").and_then(serde_yaml::Value::as_str) == Some("tasks") {
                 let map = step.as_mapping_mut().expect("step mapping");
+                // An explicit speckit-pinned step is a normal (non-bare) step:
+                // it carries a role plus host/command, exactly like the
+                // template's speckit steps. Restore the role so the rewritten
+                // step is valid (a bare step has no role/host/command).
+                map.insert(
+                    serde_yaml::Value::String("role".to_owned()),
+                    serde_yaml::Value::String("drafter".to_owned()),
+                );
                 map.insert(
                     serde_yaml::Value::String("host".to_owned()),
                     serde_yaml::Value::String("claude".to_owned()),
@@ -1044,13 +1032,5 @@ mod tests {
         let check = find(&checks, "import source");
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("unset"));
-    }
-
-    #[test]
-    fn looks_like_url_distinguishes_locators_from_paths() {
-        assert!(looks_like_url("https://example.com/spec.md"));
-        assert!(looks_like_url("git+ssh://host/repo"));
-        assert!(!looks_like_url("docs/spec.md"));
-        assert!(!looks_like_url("./spec.md"));
     }
 }

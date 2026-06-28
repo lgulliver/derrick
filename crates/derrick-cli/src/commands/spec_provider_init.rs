@@ -129,9 +129,12 @@ fn write_specify_block(root: &mut serde_yaml::Mapping, choice: SpecProviderChoic
     tools.insert(key("specify"), serde_yaml::Value::Mapping(specify));
 }
 
-/// Strips `host`/`command` (and any `runner`) from the `specify`/`plan`/`tasks`
-/// pipeline steps so they become *bare* and route through the seam. Their
-/// `role:` is preserved so role→model resolution still applies (native path).
+/// Strips `role`/`host`/`command`/`runner` from the `specify`/`plan`/`tasks`
+/// pipeline steps so they become *bare* and route through the seam. A bare spec
+/// step carries no role/host/command/runner; the native generator resolves its
+/// own drafter/proposer tiers against `config.roles()` (it never reads the
+/// step's `role:`). Leaving a `role:` on the step would fail the runtime
+/// `is_bare` test and silently bypass the seam.
 fn bare_spec_steps(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliError> {
     let key = serde_yaml::Value::String("pipeline".to_owned());
     let Some(pipeline) = root.get_mut(&key) else {
@@ -148,7 +151,7 @@ fn bare_spec_steps(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliError
             .get(serde_yaml::Value::String("id".to_owned()))
             .and_then(serde_yaml::Value::as_str);
         if id.is_some_and(|id| BARE_SPEC_STEPS.contains(&id)) {
-            for field in ["host", "command", "runner"] {
+            for field in ["role", "host", "command", "runner"] {
                 mapping.remove(serde_yaml::Value::String(field.to_owned()));
             }
         }
@@ -241,8 +244,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("{id} step"));
             assert!(step.host().is_none(), "{id} should be bare (no host)");
             assert!(step.command().is_none(), "{id} should be bare (no command)");
-            // role is preserved so role→model resolution still applies.
-            assert!(step.role().is_some(), "{id} keeps its role");
+            // A bare spec step carries no role; the native generator resolves
+            // its own drafter/proposer tiers.
+            assert!(step.role().is_none(), "{id} should be bare (no role)");
         }
         // analyze is not part of the seam — its explicit command stays.
         let analyze = config
