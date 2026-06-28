@@ -234,6 +234,14 @@ fn resolve_file_source(source: &str, working_dir: &Path) -> Result<PathBuf, RunE
     } else {
         trimmed
     };
+    // `file:` / `file://` with no path strips `rel` to empty, which would
+    // otherwise resolve to `working_dir` and surface later as a confusing
+    // directory read error. Reject it as a clear config error instead.
+    if rel.is_empty() {
+        return Err(RunError::Config(format!(
+            "import source {trimmed:?} does not include a local file path"
+        )));
+    }
     let path = Path::new(rel);
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -329,6 +337,20 @@ mod tests {
     fn resolve_accepts_file_scheme_without_slashes() {
         let path = resolve_file_source("file:docs/spec.md", Path::new("/repo")).expect("file: ok");
         assert_eq!(path, PathBuf::from("/repo/docs/spec.md"));
+    }
+
+    #[test]
+    fn resolve_rejects_empty_file_scheme_paths() {
+        // `file:` and `file://` strip to an empty path, which must be a clear
+        // config error rather than resolving to working_dir.
+        for source in ["file:", "file://"] {
+            let err = resolve_file_source(source, Path::new("/repo"))
+                .expect_err("empty file path should be rejected");
+            assert!(
+                err.to_string().contains("local file path"),
+                "{source:?} → unexpected error: {err}"
+            );
+        }
     }
 
     #[test]
