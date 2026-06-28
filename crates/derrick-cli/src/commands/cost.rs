@@ -5,6 +5,7 @@ use crate::exit_code::CliExitCode;
 use crate::output::OutputFormat;
 use crate::{CliError, current_repo_root, read_config};
 
+/// Executes the `derrick cost` subcommand.
 pub(crate) async fn execute(args: CostArgs) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let config = match read_config(&repo_root) {
@@ -25,6 +26,7 @@ pub(crate) async fn execute(args: CostArgs) -> Result<CliExitCode, CliError> {
     Ok(CliExitCode::Success)
 }
 
+/// Prints cost and model information in human-readable form.
 fn print_human(config: &Option<derrick_config::Config>) {
     println!("derrick cost \u{2014} estimated spend\n");
 
@@ -73,6 +75,7 @@ fn print_human(config: &Option<derrick_config::Config>) {
     println!("Run `derrick gain` for actual token savings from recent sessions.");
 }
 
+/// Prints cost and model information as a JSON object.
 fn print_json(config: &Option<derrick_config::Config>) {
     use serde_json::json;
 

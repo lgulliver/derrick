@@ -11,6 +11,7 @@ use derrick_tools::HostRegistry;
 
 use crate::progress::CliReporter;
 
+/// Executes the `derrick run` subcommand (drill or resume).
 pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliError> {
     // A `--spec <path>` override (drill only) forces the `import` provider for
     // this run at the highest precedence, without editing derrick.yaml. It is
@@ -107,6 +108,7 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
     }
 }
 
+/// Builds the substrate, runner, and resolved config for a run or resume.
 async fn build_runner(
     spec_override: Option<String>,
     profile_override: Option<String>,
@@ -165,6 +167,7 @@ async fn build_runner(
     Ok((repo_root, config, substrate, runner))
 }
 
+/// Constructs a [`PipelineInput`] from the resolved drill arguments.
 fn pipeline_input(args: crate::commands::DrillRunArgs) -> Result<PipelineInput, crate::CliError> {
     let mut skip = args
         .skip
@@ -194,6 +197,7 @@ fn pipeline_input(args: crate::commands::DrillRunArgs) -> Result<PipelineInput, 
     })
 }
 
+/// Maps a pipeline run status to the CLI exit code.
 fn status_code(status: derrick_flow::RunStatus) -> CliExitCode {
     match status {
         derrick_flow::RunStatus::Success => CliExitCode::Success,

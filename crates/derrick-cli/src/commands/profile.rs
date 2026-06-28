@@ -6,6 +6,7 @@ use crate::commands::{ProfileArgs, ProfileCommand};
 use crate::exit_code::CliExitCode;
 use crate::{CliError, current_repo_root, read_config};
 
+/// Executes the `derrick profile` subcommand.
 pub(crate) async fn execute(args: ProfileArgs) -> Result<CliExitCode, CliError> {
     match args.command {
         ProfileCommand::List => list().await,
@@ -13,6 +14,7 @@ pub(crate) async fn execute(args: ProfileArgs) -> Result<CliExitCode, CliError> 
     }
 }
 
+/// Lists all available profiles (built-in and user-defined).
 async fn list() -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let config = match read_config(&repo_root) {
@@ -54,6 +56,7 @@ async fn list() -> Result<CliExitCode, CliError> {
     Ok(CliExitCode::Success)
 }
 
+/// Shows the stage bindings changed by a named profile.
 async fn show(name: &str) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // Fall back to the default config when derrick.yaml is missing so that
@@ -123,6 +126,7 @@ async fn show(name: &str) -> Result<CliExitCode, CliError> {
     Ok(CliExitCode::Success)
 }
 
+/// Returns a short description for a built-in profile name.
 fn builtin_description(name: &str) -> &'static str {
     match name {
         "speed" => "optimise for latency: fastest runtime, smallest model",
