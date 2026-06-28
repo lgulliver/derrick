@@ -872,9 +872,7 @@ fn builtin_profiles() -> std::collections::HashMap<String, Profile> {
         Profile {
             stages,
             ci: true,
-            description: Some(
-                "Non-interactive, deterministic, suitable for automation".to_owned(),
-            ),
+            description: Some("Non-interactive, deterministic, suitable for automation".to_owned()),
         },
     );
 
@@ -2330,9 +2328,15 @@ impl ConfigLayer {
                     .collect(),
             ),
             budgets: self.budgets.map(|b| BudgetConfig {
-                per_ticket: b.per_ticket.map(|b| Budget { max_cost: b.max_cost }),
-                daily: b.daily.map(|b| Budget { max_cost: b.max_cost }),
-                monthly: b.monthly.map(|b| Budget { max_cost: b.max_cost }),
+                per_ticket: b.per_ticket.map(|b| Budget {
+                    max_cost: b.max_cost,
+                }),
+                daily: b.daily.map(|b| Budget {
+                    max_cost: b.max_cost,
+                }),
+                monthly: b.monthly.map(|b| Budget {
+                    max_cost: b.max_cost,
+                }),
             }),
             default_profile: self.default_profile,
             active_profile: None,
@@ -2444,9 +2448,15 @@ impl From<Config> for ConfigLayer {
                 )
             },
             budgets: config.budgets.map(|b| BudgetConfigLayer {
-                per_ticket: b.per_ticket.map(|b| BudgetLayer { max_cost: b.max_cost }),
-                daily: b.daily.map(|b| BudgetLayer { max_cost: b.max_cost }),
-                monthly: b.monthly.map(|b| BudgetLayer { max_cost: b.max_cost }),
+                per_ticket: b.per_ticket.map(|b| BudgetLayer {
+                    max_cost: b.max_cost,
+                }),
+                daily: b.daily.map(|b| BudgetLayer {
+                    max_cost: b.max_cost,
+                }),
+                monthly: b.monthly.map(|b| BudgetLayer {
+                    max_cost: b.max_cost,
+                }),
             }),
             default_profile: config.default_profile,
         }

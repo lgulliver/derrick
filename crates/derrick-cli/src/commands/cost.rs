@@ -50,7 +50,10 @@ fn print_human(config: &Option<derrick_config::Config>) {
 
     for (alias, model) in entries {
         let runtime = model.resolved_runtime();
-        let cost = model.estimated().and_then(|e| e.cost()).unwrap_or("unknown");
+        let cost = model
+            .estimated()
+            .and_then(|e| e.cost())
+            .unwrap_or("unknown");
         let latency = model
             .estimated()
             .and_then(|e| e.latency())

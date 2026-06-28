@@ -121,7 +121,10 @@ pub(crate) struct DrillArgs {
     pub(crate) no_assay: bool,
     #[arg(long, help = "Skip the GitHub Issues creation offer")]
     pub(crate) no_github_issues: bool,
-    #[arg(long, help = "Apply a named AI profile for this run (e.g. speed, quality, cheap)")]
+    #[arg(
+        long,
+        help = "Apply a named AI profile for this run (e.g. speed, quality, cheap)"
+    )]
     pub(crate) profile: Option<String>,
     /// Wipe prior run state and start fresh instead of auto-resuming.
     #[arg(long, help = "Discard any prior incomplete run and start from scratch")]
@@ -336,7 +339,10 @@ pub(crate) struct DrillRunArgs {
     pub(crate) no_assay: bool,
     #[arg(long, help = "Skip the GitHub Issues creation offer")]
     pub(crate) no_github_issues: bool,
-    #[arg(long, help = "Apply a named AI profile for this run (e.g. speed, quality, cheap)")]
+    #[arg(
+        long,
+        help = "Apply a named AI profile for this run (e.g. speed, quality, cheap)"
+    )]
     pub(crate) profile: Option<String>,
     /// Import an existing spec/PRD for this run: forces the `import` provider
     /// with this source path (highest precedence; does not edit config).
