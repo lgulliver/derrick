@@ -222,7 +222,7 @@ fn add_native_spec_checks(config: &Config, checks: &mut Vec<Check>) {
     if unresolved.is_empty() {
         checks.push(Check::pass(
             "native spec roles",
-            "spec step roles resolve to a configured model",
+            "native generator roles (drafter, proposer) resolve to a configured model",
         ));
     } else {
         checks.push(Check::warn(
