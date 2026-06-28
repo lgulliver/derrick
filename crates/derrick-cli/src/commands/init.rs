@@ -729,12 +729,7 @@ fn apply_text_overrides(
         }
     }
 
-    // Persist the chosen default profile (D86) on the line-based catalogue
-    // path too. `balanced` is the implicit baseline, so only emit the key when
-    // the user picked something else.
-    if resolved.default_profile != "balanced" {
-        lines.push(format!("default_profile: {}", resolved.default_profile));
-    }
+    lines.push(format!("default_profile: {}", resolved.default_profile));
 
     let out = format!("{}\n", lines.join("\n"));
     // Speckit is a no-op here (returns `out` unchanged), so the template's
@@ -762,15 +757,10 @@ fn apply_config_overrides(
 
     apply_ai_plan(root, &resolved.ai_plan);
 
-    // Persist the chosen default profile (D86). `balanced` is the implicit
-    // baseline, so only write the key when the user picked something else —
-    // keeping the common config clean.
-    if resolved.default_profile != "balanced" {
-        root.insert(
-            serde_yaml::Value::String("default_profile".to_owned()),
-            serde_yaml::Value::String(resolved.default_profile.clone()),
-        );
-    }
+    root.insert(
+        serde_yaml::Value::String("default_profile".to_owned()),
+        serde_yaml::Value::String(resolved.default_profile.clone()),
+    );
 
     if matches!(resolved.mode, crate::commands::InitMode::Crew) {
         ensure_crew_pipeline(root)?;
