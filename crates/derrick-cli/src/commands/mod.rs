@@ -16,6 +16,7 @@ pub(crate) mod prompt_input;
 pub(crate) mod reset;
 pub(crate) mod run;
 pub(crate) mod scrub;
+pub(crate) mod spec;
 pub(crate) mod stack;
 pub(crate) mod status;
 pub(crate) mod survey;
@@ -58,6 +59,8 @@ pub(crate) enum Command {
     Switch(SwitchArgs),
     /// Query the native code-graph index (symbols, references, impact).
     Survey(SurveyArgs),
+    /// Spec-provider commands (import an external spec/PRD).
+    Spec(SpecArgs),
     /// Re-scaffold .claude/ skills and hooks from the current derrick.yaml (preserves config and DB).
     Reset(ResetArgs),
     /// Revert the last hand's git commits.
@@ -114,6 +117,10 @@ pub(crate) struct DrillArgs {
     /// Wipe prior run state and start fresh instead of auto-resuming.
     #[arg(long, help = "Discard any prior incomplete run and start from scratch")]
     pub(crate) force: bool,
+    /// Import an existing spec/PRD for this run: forces the `import` provider
+    /// with this source path (highest precedence; does not edit config).
+    #[arg(long = "spec", value_name = "PATH")]
+    pub(crate) spec: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -320,6 +327,10 @@ pub(crate) struct DrillRunArgs {
     pub(crate) no_assay: bool,
     #[arg(long, help = "Skip the GitHub Issues creation offer")]
     pub(crate) no_github_issues: bool,
+    /// Import an existing spec/PRD for this run: forces the `import` provider
+    /// with this source path (highest precedence; does not edit config).
+    #[arg(long = "spec", value_name = "PATH")]
+    pub(crate) spec: Option<String>,
     /// Internal routing flag set by `drill.rs` when it detects an incomplete run
     /// with a matching prompt key. Not exposed as a CLI flag.
     #[arg(skip)]
@@ -630,6 +641,37 @@ pub(crate) struct SurveyHubArgs {
 
 #[derive(Debug, Args)]
 pub(crate) struct SurveySetupArgs {}
+
+// ---------- Spec subcommand group (spec-provider seam, D85) ---------------
+
+#[derive(Debug, Args)]
+pub(crate) struct SpecArgs {
+    #[command(subcommand)]
+    pub(crate) command: SpecCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SpecCommand {
+    /// Normalize an external spec/PRD into `specs/<NNN>-<slug>/spec.md` and stop.
+    ///
+    /// Resolves the source (a local file path for v1), scaffolds the feature
+    /// directory, and writes a schema-valid `spec.md` — passing the source
+    /// through verbatim if it already matches the schema, otherwise normalizing
+    /// it with one model call. Use this to inspect the imported spec before
+    /// running `derrick drill --spec <source>` for the full pipeline.
+    Import(SpecImportArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct SpecImportArgs {
+    /// The spec/PRD source. A local file path for v1; remote schemes
+    /// (`github:`/`notion:`) are not supported yet.
+    pub(crate) source: String,
+    /// Optional feature prompt used to derive the `specs/<NNN>-<slug>` directory
+    /// name and ground the normalization. Defaults to the source file stem.
+    #[arg(long)]
+    pub(crate) prompt: Option<String>,
+}
 
 impl From<CompletionShell> for clap_complete::Shell {
     fn from(shell: CompletionShell) -> Self {

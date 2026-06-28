@@ -9,20 +9,29 @@
 //!     route here, and the provider selected by `tools.specify.provider`
 //!     decides how the artifact is produced.
 //!
-//! Phase 1 wires only the [`SpecProviderKind::Speckit`] arm, which delegates to
-//! the existing host path so the speckit behaviour (pre-scaffold, spec
-//! verification, artifact detection) is identical to the explicit-step path.
-//! The `Native` and `Import` arms are config-accepted but return a clear "not
-//! yet available" error until Phases 2/3.
+//! All three arms are wired:
+//!
+//!   * [`SpecProviderKind::Speckit`] delegates to the existing host path so the
+//!     speckit behaviour (pre-scaffold, spec verification, artifact detection) is
+//!     identical to the explicit-step path.
+//!   * [`SpecProviderKind::Native`] calls [`derrick_specify::NativeSpecProvider`]
+//!     for each phase ([`run_native_phase`]).
+//!   * [`SpecProviderKind::Import`] normalizes an external spec via
+//!     [`crate::import::import_specify`] for the Specify phase, then routes
+//!     `plan`/`tasks` per `tools.specify.import.{plan,tasks}`
+//!     ([`run_import_phase`]) to the native, speckit, or import path. Import
+//!     never silently skips plan/tasks.
 //!
 //! Implementor: [`run_spec_phase`]. Tested in `crates/derrick-flow/src/lib.rs`
 //! (`spec_provider_seam` tests) against a stub [`HostRegistry`].
 
 use std::path::Path;
 
-use derrick_config::{PipelineStep, SpecProviderKind};
+use derrick_config::{DownstreamMode, PipelineStep, SpecProviderKind};
 use derrick_specify::{NativeOutcome, NativeRequest, NativeSpecProvider};
 use derrick_tools::{HostRegistry, OutputSink};
+
+use crate::import::{ImportSpecifyRequest, import_specify};
 
 use derrick_assay::ExecutionState;
 use derrick_assay::types::{RunError, StepExecution};
@@ -95,36 +104,175 @@ pub struct SpecPhaseCtx<'a> {
 ///   [`crate::steps::execute_role_step`] with the canonical speckit host
 ///   (`claude`) and command, so the produced artifacts and `feature.json` are
 ///   identical to the explicit-step path.
-/// * [`SpecProviderKind::Native`] / [`SpecProviderKind::Import`] are stubs that
-///   return a "not yet available" [`RunError::Config`] until Phases 2/3.
+/// * [`SpecProviderKind::Native`] calls [`NativeSpecProvider`] for the phase.
+/// * [`SpecProviderKind::Import`] imports/normalizes the spec, then routes
+///   `plan`/`tasks` per `tools.specify.import.{plan,tasks}`.
 pub async fn run_spec_phase(
     provider: SpecProviderKind,
     phase: SpecPhase,
     ctx: SpecPhaseCtx<'_>,
 ) -> Result<StepExecution, RunError> {
     match provider {
-        SpecProviderKind::Speckit => {
-            crate::steps::execute_role_step(
-                ctx.config,
-                ctx.hosts,
-                ctx.repo_root,
-                ctx.step,
-                ctx.state,
-                ctx.log_path,
-                ctx.output_sink,
-                Some("claude"),
-                Some(phase.speckit_command()),
-            )
-            .await
-        }
+        SpecProviderKind::Speckit => speckit_phase(phase, ctx).await,
         SpecProviderKind::Native => run_native_phase(phase, ctx).await,
-        SpecProviderKind::Import => Err(RunError::Config(format!(
-            "spec provider 'import' is not yet available (Phase 3) — \
-             phase '{}' cannot be imported yet; \
-             use an explicit speckit step or set tools.specify.provider: speckit",
-            phase.label()
-        ))),
+        SpecProviderKind::Import => run_import_phase(phase, ctx).await,
     }
+}
+
+/// The speckit host path for one phase (shared by the speckit provider and the
+/// import provider's `plan`/`tasks` `speckit` downstream mode).
+async fn speckit_phase(phase: SpecPhase, ctx: SpecPhaseCtx<'_>) -> Result<StepExecution, RunError> {
+    crate::steps::execute_role_step(
+        ctx.config,
+        ctx.hosts,
+        ctx.repo_root,
+        ctx.step,
+        ctx.state,
+        ctx.log_path,
+        ctx.output_sink,
+        Some("claude"),
+        Some(phase.speckit_command()),
+    )
+    .await
+}
+
+/// Dispatches one import-provider phase.
+///
+/// * `Specify` → [`import_specify`]: resolve source, scaffold, passthrough or
+///   normalize, verify.
+/// * `Plan` / `Tasks` → routed per `tools.specify.import.{plan,tasks}`:
+///   - [`DownstreamMode::Native`] → the native planner/tasker against the
+///     imported spec (identical to the native path).
+///   - [`DownstreamMode::Speckit`] → the host-delegated `/speckit.{plan,tasks}`.
+///   - [`DownstreamMode::Import`] → read the artifact from the source too (the
+///     source must then be a directory/multi-doc; a single-file source is a
+///     clear error for v1). Import never silently skips plan/tasks.
+async fn run_import_phase(
+    phase: SpecPhase,
+    ctx: SpecPhaseCtx<'_>,
+) -> Result<StepExecution, RunError> {
+    match phase {
+        SpecPhase::Specify => run_import_specify_phase(ctx).await,
+        SpecPhase::Plan => {
+            let mode = ctx.config.tools().specify().import().plan();
+            run_import_downstream(phase, mode, ctx).await
+        }
+        SpecPhase::Tasks => {
+            let mode = ctx.config.tools().specify().import().tasks();
+            run_import_downstream(phase, mode, ctx).await
+        }
+    }
+}
+
+/// The import Specify phase: import/normalize the source into `spec.md`, set
+/// `feature_dir`, and account for it as a [`StepExecution`] matching the role
+/// path (artifacts re-detected from canonical paths).
+async fn run_import_specify_phase(ctx: SpecPhaseCtx<'_>) -> Result<StepExecution, RunError> {
+    let source = ctx
+        .config
+        .tools()
+        .specify()
+        .import()
+        .source()
+        .ok_or_else(|| {
+            RunError::Config(
+                "spec provider 'import' requires a source: set tools.specify.import.source \
+                 or pass --spec <path>"
+                    .to_owned(),
+            )
+        })?
+        .to_owned();
+
+    let wd = working_dir(ctx.state, ctx.repo_root).to_path_buf();
+    let raw_prompt = ctx.state.prompt.clone();
+    let request = ImportSpecifyRequest {
+        config: ctx.config,
+        hosts: ctx.hosts,
+        repo_root: ctx.repo_root,
+        working_dir: &wd,
+        raw_prompt: &raw_prompt,
+        source: &source,
+    };
+    let imported = import_specify(&request).await?;
+    ctx.state.feature_dir = Some(imported.feature_dir.clone());
+
+    derrick_assay::io::write_log(
+        ctx.log_path,
+        &format!(
+            "import specify produced {} artifact(s) from {source} (passthrough={}); \
+             tokens_in={} tokens_out={}\n",
+            imported.outcome.artifacts.len(),
+            imported.passthrough,
+            imported.outcome.tokens_in,
+            imported.outcome.tokens_out
+        ),
+        "",
+    )?;
+
+    let artifacts = crate::steps::detect_artifacts("specify", ctx.state, ctx.repo_root);
+    Ok(StepExecution::success(artifacts)
+        .with_tokens(imported.outcome.tokens_in, imported.outcome.tokens_out)
+        .with_compression(imported.outcome.bytes_raw, imported.outcome.bytes_saved)
+        .with_roughneck(imported.outcome.roughneck_tokens_saved))
+}
+
+/// Routes the import provider's `plan`/`tasks` phase per its [`DownstreamMode`].
+async fn run_import_downstream(
+    phase: SpecPhase,
+    mode: DownstreamMode,
+    ctx: SpecPhaseCtx<'_>,
+) -> Result<StepExecution, RunError> {
+    match mode {
+        DownstreamMode::Native => run_native_phase(phase, ctx).await,
+        DownstreamMode::Speckit => speckit_phase(phase, ctx).await,
+        DownstreamMode::Import => run_import_downstream_from_source(phase, ctx).await,
+    }
+}
+
+/// `import`-mode downstream `plan`/`tasks`: read the artifact from the source.
+///
+/// For v1 the import source is a single file (the spec), so there is no separate
+/// plan/tasks document to import. Selecting `import` mode for `plan`/`tasks` with
+/// a single-file source is a clear configuration error rather than a silent skip
+/// — multi-doc/directory sources are a documented, deferred capability.
+async fn run_import_downstream_from_source(
+    phase: SpecPhase,
+    ctx: SpecPhaseCtx<'_>,
+) -> Result<StepExecution, RunError> {
+    let source = ctx
+        .config
+        .tools()
+        .specify()
+        .import()
+        .source()
+        .unwrap_or("<unset>");
+    let wd = working_dir(ctx.state, ctx.repo_root);
+    let is_dir = ctx
+        .config
+        .tools()
+        .specify()
+        .import()
+        .source()
+        .map(|s| wd.join(s).is_dir())
+        .unwrap_or(false);
+    if !is_dir {
+        return Err(RunError::Config(format!(
+            "tools.specify.import.{phase} is set to 'import', but the import source {source:?} \
+             is a single file, not a directory/multi-doc source — there is no separate \
+             {phase} document to import. Use 'native' or 'speckit' for the {phase} phase, \
+             or point the source at a directory containing {phase}.md. (Multi-doc import \
+             sources are a documented, deferred capability for v1.)",
+            phase = phase.label(),
+        )));
+    }
+    // A directory source: import the named artifact verbatim (parallel to the
+    // Specify passthrough). Deferred for v1 — surfaced as a clear error rather
+    // than a silent skip.
+    Err(RunError::Config(format!(
+        "importing {phase}.md from a directory source is not implemented in v1; \
+         use 'native' or 'speckit' for the {phase} phase",
+        phase = phase.label(),
+    )))
 }
 
 /// Resolves the working directory the same way `crate::steps` does: the

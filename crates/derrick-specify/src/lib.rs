@@ -185,6 +185,57 @@ impl NativeSpecProvider {
         Ok(outcome)
     }
 
+    /// Normalizes an externally-authored document into a schema-valid `spec.md`.
+    ///
+    /// This is the model path of the `import` provider: the seam first checks
+    /// whether the source already conforms ([`schema::looks_like_spec`]) and only
+    /// calls this when it does not. One drafter-tier model call rewrites
+    /// `source_text` into the `derrick-specify` spec schema/template; the draft is
+    /// schema-validated with one bounded repair pass, and derrick injects its own
+    /// authoritative `grounding:` front-matter (the model never authors it). The
+    /// scaffolded `spec.md` is overwritten with the normalized document.
+    ///
+    /// Unlike [`Self::specify`], there is no clarify pre-pass and no
+    /// `clarify.md` — the source is taken as the operator's answer. Grounding is
+    /// still gathered so the front-matter records real index symbols.
+    pub async fn normalize_to_spec(
+        &self,
+        req: &NativeRequest<'_>,
+        source_text: &str,
+    ) -> Result<NativeOutcome, SpecifyError> {
+        let mut outcome = NativeOutcome::default();
+
+        // Survey pre-pass (no model) — authors the grounding front-matter. The
+        // query combines the raw prompt with the source document so grounding
+        // reflects the actual imported content, not just the (often
+        // filename-derived) prompt string. Grounding is still survey-derived and
+        // derrick-authored; this only makes the query authoritative.
+        let grounding_query = format!("{}\n\n{}", req.raw_prompt, source_text);
+        let grounding = grounding::gather(req.working_dir, &grounding_query).await;
+        outcome.bytes_raw = outcome.bytes_raw.saturating_add(grounding.bytes_raw);
+        outcome.bytes_saved = outcome.bytes_saved.saturating_add(grounding.bytes_saved);
+
+        let prompt = build_normalize_prompt(req.raw_prompt, source_text);
+        let spec_body = self
+            .draft_with_repair(
+                req,
+                DRAFTER_ROLE,
+                "import",
+                &prompt,
+                &mut outcome,
+                schema::validate_spec,
+            )
+            .await?;
+
+        let spec_md = inject_grounding(&spec_body, &grounding.front_matter);
+        self.write(req, "spec.md", &spec_md)?;
+        outcome.artifacts.push(req.feature_dir.join("spec.md"));
+        outcome
+            .artifacts
+            .push(PathBuf::from(".specify/feature.json"));
+        Ok(outcome)
+    }
+
     /// Produces `plan.md` (proposer tier; `covers` must ⊇ spec requirements).
     ///
     /// `clarifications` is the accepted clarify text the seam threads in (so the
@@ -515,6 +566,37 @@ fn build_spec_prompt(raw_prompt: &str, grounding_block: &str, clarify_md: &str) 
          Rules: at least one requirement and one acceptance criterion; open_questions MUST be \
          empty (resolve every ambiguity using the clarifications above); do NOT write a \
          `grounding:` key (derrick supplies it). Emit ONLY the document, no prose around it.",
+        schema = schema::SPEC_SCHEMA,
+    )
+}
+
+fn build_normalize_prompt(raw_prompt: &str, source_text: &str) -> String {
+    format!(
+        "Normalize an existing product document into derrick's specification \
+         schema. Preserve the author's intent, requirements, and acceptance \
+         criteria — do not invent new scope.\n\n\
+         Originating request: {raw_prompt}\n\n\
+         Source document to convert:\n{source_text}\n\n\
+         Output a single markdown document with YAML front-matter, in this exact shape:\n\
+         ---\n\
+         schema: {schema}\n\
+         slug: <kebab-case-slug>\n\
+         intent: <one line>\n\
+         requirements:\n\
+         \x20\x20- id: R1\n\
+         \x20\x20\x20\x20must: <normative statement>\n\
+         acceptance:\n\
+         \x20\x20- id: A1\n\
+         \x20\x20\x20\x20check: <verifiable criterion>\n\
+         non_goals: []\n\
+         open_questions: []\n\
+         ---\n\
+         # <Title>\n\n## Context\n...\n\n## Requirements\n...\n\n## Acceptance Criteria\n...\n\n## Out of Scope\n...\n\n\
+         Rules: derive at least one requirement and one acceptance criterion from \
+         the source; open_questions MUST be empty (if the source leaves something \
+         ambiguous, make the most faithful reasonable choice rather than leaving a \
+         question); do NOT write a `grounding:` key (derrick supplies it). Emit \
+         ONLY the document, no prose around it.",
         schema = schema::SPEC_SCHEMA,
     )
 }
