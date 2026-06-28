@@ -1789,11 +1789,6 @@ fn parse_spec_provider(value: &str) -> Result<SpecProviderKind, ConfigError> {
         "speckit" => Ok(SpecProviderKind::Speckit),
         "native" => Ok(SpecProviderKind::Native),
         "import" => Ok(SpecProviderKind::Import),
-        // Forbidden gastown vocabulary must never be accepted as a value.
-        "rig" | "bead" | "convoy" | "polecat" | "mayor" | "sling" | "trail" => validation(format!(
-            "tools.specify.provider: {value:?} is not a valid provider \
-             (forbidden vocabulary) — must be one of speckit | native | import"
-        )),
         other => validation(format!(
             "tools.specify.provider: {other:?} must be one of speckit | native | import"
         )),
@@ -1805,10 +1800,6 @@ fn parse_downstream_mode(value: &str, path: &str) -> Result<DownstreamMode, Conf
         "native" => Ok(DownstreamMode::Native),
         "speckit" => Ok(DownstreamMode::Speckit),
         "import" => Ok(DownstreamMode::Import),
-        "rig" | "bead" | "convoy" | "polecat" | "mayor" | "sling" | "trail" => validation(format!(
-            "{path}: {value:?} is not a valid mode (forbidden vocabulary) — \
-             must be one of native | speckit | import"
-        )),
         other => validation(format!(
             "{path}: {other:?} must be one of native | speckit | import"
         )),
@@ -4296,23 +4287,6 @@ state:
                     message.contains("tools.specify.provider")
                         && message.contains("speckit | native | import"),
                     "expected actionable provider error, got: {message}"
-                );
-            }
-            other => panic!("expected validation error, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn gastown_spec_provider_value_is_rejected() {
-        let yaml = minimal_yaml().replace(
-            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n",
-            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n  specify:\n    provider: convoy\n",
-        );
-        match load_yaml(&yaml) {
-            Err(ConfigError::Validation(message)) => {
-                assert!(
-                    message.contains("forbidden vocabulary"),
-                    "gastown word should be rejected as forbidden vocabulary, got: {message}"
                 );
             }
             other => panic!("expected validation error, got {other:?}"),
