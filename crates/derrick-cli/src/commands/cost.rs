@@ -7,7 +7,15 @@ use crate::{CliError, current_repo_root, read_config};
 
 pub(crate) async fn execute(args: CostArgs) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let config = read_config(&repo_root).ok();
+    let config = match read_config(&repo_root) {
+        Ok(c) => Some(c),
+        Err(CliError::Config(derrick_config::ConfigError::Io { ref source, .. }))
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            None
+        }
+        Err(e) => return Err(e),
+    };
 
     match args.format {
         OutputFormat::Human => print_human(&config),

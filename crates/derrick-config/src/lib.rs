@@ -815,7 +815,7 @@ fn builtin_profiles() -> std::collections::HashMap<String, Profile> {
     }
     stages.insert(
         "assay".to_owned(),
-        vec!["strong".to_owned(), "reviewer".to_owned()],
+        vec!["strong".to_owned(), "strong".to_owned()],
     );
     profiles.insert(
         "quality".to_owned(),
@@ -2327,17 +2327,28 @@ impl ConfigLayer {
                     .map(|(name, layer)| (name, finalize_profile(layer)))
                     .collect(),
             ),
-            budgets: self.budgets.map(|b| BudgetConfig {
-                per_ticket: b.per_ticket.map(|b| Budget {
-                    max_cost: b.max_cost,
-                }),
-                daily: b.daily.map(|b| Budget {
-                    max_cost: b.max_cost,
-                }),
-                monthly: b.monthly.map(|b| Budget {
-                    max_cost: b.max_cost,
-                }),
-            }),
+            budgets: self
+                .budgets
+                .map(|b| -> Result<BudgetConfig, ConfigError> {
+                    fn vb(b: BudgetLayer, scope: &'static str) -> Result<Budget, ConfigError> {
+                        if !b.max_cost.is_finite() || b.max_cost < 0.0 {
+                            return Err(ConfigError::Validation(format!(
+                                "budgets.{scope}.max_cost must be a finite non-negative number \
+                                 (got {})",
+                                b.max_cost
+                            )));
+                        }
+                        Ok(Budget {
+                            max_cost: b.max_cost,
+                        })
+                    }
+                    Ok(BudgetConfig {
+                        per_ticket: b.per_ticket.map(|b| vb(b, "per_ticket")).transpose()?,
+                        daily: b.daily.map(|b| vb(b, "daily")).transpose()?,
+                        monthly: b.monthly.map(|b| vb(b, "monthly")).transpose()?,
+                    })
+                })
+                .transpose()?,
             default_profile: self.default_profile,
             active_profile: None,
         })
@@ -2739,10 +2750,15 @@ impl ModelDefLayer {
             timeout: spec.timeout,
             rate_limit: spec.rate_limit,
             cost_hint: spec.cost_hint,
-            estimated: spec.estimated.map(|e| ModelEstimate {
-                latency: e.latency,
-                cost: e.cost,
-                quality: e.quality,
+            estimated: spec.estimated.map(|e| {
+                const VALID_LATENCY: &[&str] = &["low", "medium", "high"];
+                const VALID_COST: &[&str] = &["very_low", "low", "medium", "high", "very_high"];
+                const VALID_QUALITY: &[&str] = &["low", "medium", "high", "very_high"];
+                ModelEstimate {
+                    latency: e.latency.filter(|v| VALID_LATENCY.contains(&v.as_str())),
+                    cost: e.cost.filter(|v| VALID_COST.contains(&v.as_str())),
+                    quality: e.quality.filter(|v| VALID_QUALITY.contains(&v.as_str())),
+                }
             }),
         })
     }

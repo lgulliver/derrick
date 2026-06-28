@@ -34,15 +34,20 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
         RunCommand::Resume(_) => None,
     };
     // A `--profile <name>` override (drill only) applies the named profile's
-    // stage bindings to the in-memory config for this run. When absent, the
-    // config's `default_profile` (if any) is applied. Resumes reuse the prior
-    // run's pinned config and so never take a profile here.
+    // stage bindings to the in-memory config for this run. When absent on a
+    // fresh drill, the config's `default_profile` (if any) is applied.
+    // Resume paths must never apply `default_profile` — they reuse the prior
+    // run's pinned config and altering bindings mid-run would be wrong.
     let profile_override = match &args.command {
         RunCommand::Drill(drill) => drill.profile.clone(),
         RunCommand::Resume(_) => None,
     };
+    let is_resume = match &args.command {
+        RunCommand::Drill(drill) => drill.auto_resume || drill.resume_from.is_some(),
+        RunCommand::Resume(_) => true,
+    };
     let (_repo_root, _config, _substrate, runner) =
-        build_runner(spec_override, profile_override).await?;
+        build_runner(spec_override, profile_override, !is_resume).await?;
 
     match args.command {
         RunCommand::Drill(drill) => {
@@ -95,6 +100,7 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
 async fn build_runner(
     spec_override: Option<String>,
     profile_override: Option<String>,
+    allow_default_profile: bool,
 ) -> Result<
     (
         std::path::PathBuf,
@@ -108,14 +114,20 @@ async fn build_runner(
     let mut config = read_config(&repo_root)?;
     // Apply the requested profile (or the configured default profile) before any
     // other override: `--profile <name>` takes precedence over `default_profile`.
+    // On resume paths `allow_default_profile` is false to preserve the original
+    // run's role bindings.
     config = if let Some(profile_name) = &profile_override {
         config
             .with_profile(profile_name)
             .map_err(|e| crate::message(e.to_string()))?
-    } else if let Some(default) = config.default_profile().map(str::to_owned) {
-        config
-            .with_profile(&default)
-            .map_err(|e| crate::message(e.to_string()))?
+    } else if allow_default_profile {
+        if let Some(default) = config.default_profile().map(str::to_owned) {
+            config
+                .with_profile(&default)
+                .map_err(|e| crate::message(e.to_string()))?
+        } else {
+            config
+        }
     } else {
         config
     };

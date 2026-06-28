@@ -15,7 +15,15 @@ pub(crate) async fn execute(args: ProfileArgs) -> Result<CliExitCode, CliError> 
 
 async fn list() -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let config = read_config(&repo_root).ok();
+    let config = match read_config(&repo_root) {
+        Ok(c) => Some(c),
+        Err(CliError::Config(derrick_config::ConfigError::Io { ref source, .. }))
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            None
+        }
+        Err(e) => return Err(e),
+    };
 
     println!("Built-in profiles:");
     for name in BUILTIN_PROFILE_NAMES {
@@ -50,29 +58,42 @@ async fn show(name: &str) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let config = read_config(&repo_root).map_err(|e| crate::message(e.to_string()))?;
 
-    let profiled = config
-        .with_profile(name)
-        .map_err(|e| crate::message(e.to_string()))?;
-
-    let desc = profiled
+    let desc = config
         .profiles()
         .get(name)
         .and_then(|p| p.description())
         .unwrap_or_else(|| builtin_description(name));
 
-    println!("Profile: {name}");
-    println!("  {desc}");
-    println!();
-    println!("Stage bindings (after applying profile to current config):");
-    let mut roles: Vec<(&str, &str)> = profiled
+    let original_roles: std::collections::HashMap<String, String> = config
         .roles()
         .as_map()
         .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let profiled = config
+        .with_profile(name)
+        .map_err(|e| crate::message(e.to_string()))?;
+
+    let mut changes: Vec<(&str, &str)> = profiled
+        .roles()
+        .as_map()
+        .iter()
+        .filter(|(k, v)| original_roles.get(*k).map(String::as_str) != Some(v.as_str()))
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    roles.sort_by_key(|(k, _)| *k);
-    for (role, alias) in roles {
-        println!("  {role:<18}  {alias}");
+    changes.sort_by_key(|(k, _)| *k);
+
+    println!("Profile: {name}");
+    println!("  {desc}");
+    println!();
+    println!("Stage bindings changed by this profile:");
+    if changes.is_empty() {
+        println!("  (no bindings changed — aliases not found or profile has no overrides)");
+    } else {
+        for (stage, alias) in changes {
+            println!("  {stage:<18}  {alias}");
+        }
     }
 
     Ok(CliExitCode::Success)
