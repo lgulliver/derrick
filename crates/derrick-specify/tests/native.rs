@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use derrick_config::Config;
 use derrick_specify::schema::{has_reject, validate_plan, validate_spec, validate_tasks};
-use derrick_specify::{NativeRequest, NativeSpecProvider};
+use derrick_specify::{NativeRequest, NativeSpecProvider, SpecifyError};
 use derrick_survey::{BuildOptions, Survey, SurveyConfig};
 use derrick_tools::{HostAdapter, HostError, HostRegistry, HostRequest, HostResponse};
 
@@ -371,4 +371,51 @@ async fn plan_handoff_caveman_saves_and_protects_tokens() {
         plan_prompt.contains("src/lib.rs:42 export_widget"),
         "protected path:line token must survive caveman compression in the handoff prompt"
     );
+}
+
+// --- plan rejects a semantically-invalid spec -------------------------------
+
+#[tokio::test]
+async fn plan_rejects_parseable_but_semantically_invalid_spec() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wd = dir.path();
+    let config = full_config(wd);
+    let prompt = "Add a widget export command";
+    let feature_dir = prescaffold(wd, prompt);
+
+    // This spec parses as YAML (front-matter is well-formed) but is semantically
+    // invalid: zero requirements. A naive parse would feed an empty id set into
+    // the covers-check and silently disable it; the plan phase must Reject.
+    let spec_md = "---\n\
+        schema: derrick.spec/v1\n\
+        slug: widget-export\n\
+        intent: Export widgets.\n\
+        requirements: []\n\
+        acceptance:\n  - id: A1\n    check: ok\n\
+        non_goals: []\n\
+        open_questions: []\n\
+        ---\n\
+        # Widget Export\n\n## Context\nx\n\n## Requirements\nnone\n\n## Acceptance Criteria\nA1\n\n## Out of Scope\nnone\n";
+    std::fs::write(wd.join(&feature_dir).join("spec.md"), spec_md).expect("spec");
+
+    let (host, _calls) = StubHost::new(false);
+    let hosts = registry(host);
+    let provider = NativeSpecProvider::new();
+    let req = NativeRequest {
+        raw_prompt: prompt,
+        repo_root: wd,
+        working_dir: wd,
+        hosts: &hosts,
+        config: &config,
+        interactive: false,
+        feature_dir: &feature_dir,
+    };
+    let err = provider
+        .plan(&req, None)
+        .await
+        .expect_err("a semantically-invalid spec must abort the plan phase");
+    match err {
+        SpecifyError::Validation { phase, .. } => assert_eq!(phase, "plan"),
+        other => panic!("expected SpecifyError::Validation, got {other:?}"),
+    }
 }

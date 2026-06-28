@@ -206,6 +206,21 @@ impl NativeSpecProvider {
                       for the plan covers-check"
                 .to_owned(),
         })?;
+        // `parse_spec_meta` only proves the YAML deserializes; some list fields
+        // are validator-owned, so a semantically-invalid spec (e.g. zero
+        // requirements, leftover open_questions) can still parse. Run the full
+        // schema validation before trusting the requirement ids — otherwise an
+        // empty requirements list would silently disable the plan covers-check.
+        let spec_findings = schema::validate_spec(&spec_md);
+        if has_reject(&spec_findings) {
+            return Err(SpecifyError::Validation {
+                phase: "plan",
+                summary: format!(
+                    "spec.md is semantically invalid; cannot plan against it: {}",
+                    summarize_rejects(&spec_findings)
+                ),
+            });
+        }
         let requirement_ids: Vec<String> = spec_meta
             .requirements
             .iter()

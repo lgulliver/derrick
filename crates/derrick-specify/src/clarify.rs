@@ -208,7 +208,16 @@ pub fn run_clarify_loop<R: BufRead, W: Write>(
         )?;
         writer.flush()?;
         let mut answer = String::new();
-        reader.read_line(&mut answer)?;
+        // `read_line` returns Ok(0) at end-of-stream. A closed/exhausted reader
+        // must NOT be treated as an empty line (which would silently auto-accept
+        // the recommendation) — abort instead. A real empty line ("\n") reads as
+        // Ok(1) and is still accepted as "press Enter to take the recommendation".
+        if reader.read_line(&mut answer)? == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "input closed while reading clarify answer",
+            ));
+        }
         let trimmed = answer.trim().to_owned();
         answers.push(select_clarify_answer(q, &trimmed));
     }
@@ -265,6 +274,47 @@ mod tests {
         assert_eq!(answers, vec!["YAML".to_owned()]);
         // The prompt was written to the injected writer, not a real stream.
         assert!(String::from_utf8_lossy(&writer).contains("Which format?"));
+    }
+
+    #[test]
+    fn interactive_loop_empty_line_accepts_recommendation() {
+        let questions = parse_clarify_questions(
+            "Q: Which format?\nOptions: JSON, YAML\nRecommendation: JSON\n",
+        );
+        // A real empty line (user pressed Enter) is Ok(1), not EOF, and accepts
+        // the recommendation.
+        let reader = std::io::Cursor::new(b"\n".to_vec());
+        let mut writer: Vec<u8> = Vec::new();
+        let answers = run_clarify_loop(&questions, reader, &mut writer).expect("loop");
+        assert_eq!(answers, vec!["JSON".to_owned()]);
+    }
+
+    #[test]
+    fn interactive_loop_eof_errors_instead_of_auto_accepting() {
+        let questions = parse_clarify_questions(
+            "Q: Which format?\nOptions: JSON, YAML\nRecommendation: JSON\n",
+        );
+        // An exhausted/closed reader (no input at all) must error, not silently
+        // choose the recommendation.
+        let reader = std::io::Cursor::new(Vec::new());
+        let mut writer: Vec<u8> = Vec::new();
+        let err =
+            run_clarify_loop(&questions, reader, &mut writer).expect_err("EOF must abort the loop");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn interactive_loop_one_line_per_question() {
+        let questions = parse_clarify_questions(
+            "Q: First?\nOptions: A, B\nRecommendation: A\n\
+             Q: Second?\nOptions: C, D\nRecommendation: C\n",
+        );
+        // One input line per question; the second question's blank line accepts
+        // its recommendation.
+        let reader = std::io::Cursor::new(b"2\n\n".to_vec());
+        let mut writer: Vec<u8> = Vec::new();
+        let answers = run_clarify_loop(&questions, reader, &mut writer).expect("loop");
+        assert_eq!(answers, vec!["B".to_owned(), "C".to_owned()]);
     }
 
     #[test]
