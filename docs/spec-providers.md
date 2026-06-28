@@ -39,7 +39,7 @@ tools:
 `derrick init` asks which provider to use and writes the right shape:
 
 - **speckit** → explicit `host:`+`command: "/speckit.specify …"` steps (self-documenting).
-- **native** → `provider: native` and *bare* `specify`/`plan`/`tasks` steps (no `host`/`command`), which the seam routes to the native generator.
+- **native** → `provider: native` and *bare* `specify`/`plan`/`tasks` steps (no `role`/`host`/`command`/`runner`), which the seam routes to the native generator. The `role` is stripped too: a step that keeps a `role:` is *not* bare and would bypass the seam. The native generator resolves its own `drafter`/`proposer` tiers from `roles:` instead.
 - **import** → `provider: import` with a commented `source:` stub to fill in.
 
 **Back-compat:** the provider is consulted only for a *bare* spec step. A step
@@ -113,5 +113,7 @@ AI policy.
 `derrick doctor` reports the active provider (`spec provider: …`) and scopes the
 speckit-on-PATH check accordingly: it only checks for speckit when the provider
 is `speckit` (or a step explicitly pins `/speckit.*`). Under `native`/`import`, a
-missing speckit binary is not a problem. For `native` it checks the spec roles
-resolve to a model; for `import` it validates the `source`.
+missing speckit binary is not a problem. For `native` it checks the generator's
+own roles (`drafter`/`proposer`) resolve to a model; for `import` it validates the
+`source` the same way `derrick drill` does (a local file path or `file:///abs`;
+non-file locators are reported, not blessed).
