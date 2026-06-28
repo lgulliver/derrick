@@ -5,6 +5,7 @@ mod code_review;
 mod manifest;
 mod progress;
 mod runner;
+pub mod spec_provider;
 mod steps;
 
 pub use code_review::{CodeReviewOutcome, run_code_review};
@@ -14,6 +15,7 @@ pub use derrick_assay::types::{
 pub use manifest::compute_prompt_key;
 pub use progress::{NoopReporter, ProgressReporter, RunProgress, StepProgress};
 pub use runner::Runner;
+pub use spec_provider::{SpecPhase, SpecPhaseCtx, run_spec_phase};
 pub use steps::hand_kind_for_executor;
 
 /// Re-export of the shared run/step types crate. Existing call sites that
@@ -2165,5 +2167,435 @@ state:
         assert!(verdict.contains("verdict: accept"), "got: {verdict}");
         assert!(verdict.contains("on_split: majority"), "got: {verdict}");
         Ok(())
+    }
+}
+
+/// Spec-provider seam (DESIGN.md §5.3) dispatch tests. A *bare*
+/// `specify`/`plan`/`tasks` step routes through `run_spec_phase`; explicit
+/// `host:`+`command:` steps bypass the seam entirely.
+#[cfg(test)]
+mod spec_provider_seam {
+    use crate::spec_provider::SpecPhase;
+    use crate::steps::execute_step;
+    use derrick_assay::ExecutionState;
+    use derrick_assay::io::FEATURE_JSON;
+    use derrick_assay::types::StepStatus;
+    use derrick_config::Config;
+    use derrick_substrate_native::{NativeConfig, NativeSubstrate};
+    use derrick_tools::{HostAdapter, HostError, HostRegistry, HostRequest, HostResponse};
+    use std::error::Error;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+    /// A bare drill pipeline: spec steps carry only `id`, no host/command/runner.
+    fn bare_drill_pipeline() -> &'static str {
+        r#"  - id: specify
+  - id: plan
+  - id: tasks
+"#
+    }
+
+    /// Records every prompt the host receives, so a test can prove the seam
+    /// produced the canonical speckit command (or that an explicit step ran).
+    struct RecordingHost {
+        prompts: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HostAdapter for RecordingHost {
+        fn name(&self) -> &str {
+            "claude"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
+            self.prompts
+                .lock()
+                .expect("lock")
+                .push(request.prompt.clone());
+            let feature = request.cwd.join("specs/001-test");
+            std::fs::create_dir_all(&feature).map_err(|source| HostError::Io {
+                host: "claude".to_owned(),
+                source,
+            })?;
+            std::fs::create_dir_all(request.cwd.join(".specify")).map_err(|source| {
+                HostError::Io {
+                    host: "claude".to_owned(),
+                    source,
+                }
+            })?;
+            if request.prompt.contains("speckit.specify") {
+                std::fs::write(
+                    request.cwd.join(FEATURE_JSON),
+                    r#"{"feature_directory":"specs/001-test"}"#,
+                )
+                .map_err(|source| HostError::Io {
+                    host: "claude".to_owned(),
+                    source,
+                })?;
+                std::fs::write(feature.join("spec.md"), "# Real spec\nfull content\n").map_err(
+                    |source| HostError::Io {
+                        host: "claude".to_owned(),
+                        source,
+                    },
+                )?;
+            } else if request.prompt.contains("speckit.plan") {
+                std::fs::write(feature.join("plan.md"), "plan").map_err(|source| {
+                    HostError::Io {
+                        host: "claude".to_owned(),
+                        source,
+                    }
+                })?;
+            } else if request.prompt.contains("speckit.tasks") {
+                std::fs::write(feature.join("tasks.md"), "## Task one\nbody\n").map_err(
+                    |source| HostError::Io {
+                        host: "claude".to_owned(),
+                        source,
+                    },
+                )?;
+            }
+            Ok(HostResponse {
+                stdout: "ok\n".to_owned(),
+                stderr: String::new(),
+                exit_code: 0,
+                elapsed: Duration::from_millis(1),
+                tokens_in: 0,
+                tokens_out: 0,
+                pid: None,
+            })
+        }
+    }
+
+    /// Builds a config + substrate + recording host for a given pipeline YAML
+    /// body, optionally injecting a `tools.specify` block. Returns the loaded
+    /// pieces plus the shared prompt log.
+    async fn harness(
+        pipeline: &str,
+        specify_block: &str,
+    ) -> TestResult<(
+        tempfile::TempDir,
+        Config,
+        Arc<NativeSubstrate>,
+        Arc<HostRegistry>,
+        Arc<StdMutex<Vec<String>>>,
+    )> {
+        let dir = tempdir()?;
+        // Self-contained YAML: a shell-reviewer model + drafter/proposer/reviewer
+        // roles, the speckit block, the optional tools.specify block, then the
+        // supplied pipeline body. No host CLI is actually shelled — the spec
+        // steps run through the registered claude RecordingHost.
+        let yaml = format!(
+            r#"version: 1
+site:
+  name: test
+  prefix: tst
+models:
+  shell-reviewer:
+    provider: shell
+    cli: "/nonexistent-reviewer"
+    model: shell-reviewer
+roles:
+  drafter: shell-reviewer
+  proposer: shell-reviewer
+  reviewer: shell-reviewer
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+{specify_block}  assay:
+    enabled: false
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: 1
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+pipeline:
+{pipeline}guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#
+        );
+        std::fs::write(dir.path().join("derrick.yaml"), &yaml)?;
+        std::fs::create_dir_all(dir.path().join(".specify/memory"))?;
+        std::fs::create_dir_all(dir.path().join(".derrick"))?;
+        std::fs::write(
+            dir.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )?;
+        let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
+        let substrate = Arc::new(
+            NativeSubstrate::open(
+                NativeConfig {
+                    db_path: dir.path().join(".derrick/derrick.db"),
+                    worktree_root: dir.path().join(".derrick/worktrees"),
+                },
+                config.site().clone(),
+            )
+            .await?,
+        );
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let mut hosts = HostRegistry::empty();
+        hosts.register(
+            "claude",
+            Box::new(RecordingHost {
+                prompts: prompts.clone(),
+            }),
+        );
+        Ok((dir, config, substrate, Arc::new(hosts), prompts))
+    }
+
+    /// Runs a single named step through `execute_step` and returns its status.
+    async fn run_step(
+        config: &Config,
+        substrate: &NativeSubstrate,
+        hosts: Arc<HostRegistry>,
+        repo_root: &Path,
+        state: &mut ExecutionState,
+        step_id: &str,
+    ) -> TestResult<StepStatus> {
+        let step = config
+            .pipeline()
+            .iter()
+            .find(|s| s.id() == step_id)
+            .unwrap_or_else(|| panic!("step {step_id} missing"))
+            .clone();
+        let manifest_path = state.run_dir.join("manifest.json");
+        let record = execute_step(
+            config,
+            substrate,
+            hosts,
+            repo_root,
+            &step,
+            state,
+            &state.run_id.clone(),
+            &manifest_path,
+            None,
+        )
+        .await?;
+        Ok(record.status)
+    }
+
+    #[test]
+    fn step_id_maps_to_phase() {
+        assert_eq!(SpecPhase::from_step_id("specify"), Some(SpecPhase::Specify));
+        assert_eq!(SpecPhase::from_step_id("plan"), Some(SpecPhase::Plan));
+        assert_eq!(SpecPhase::from_step_id("tasks"), Some(SpecPhase::Tasks));
+        assert_eq!(SpecPhase::from_step_id("assay"), None);
+        assert_eq!(SpecPhase::from_step_id("bridge"), None);
+    }
+
+    #[tokio::test]
+    async fn bare_spec_steps_route_through_speckit_arm() -> TestResult {
+        // Default provider (no tools.specify block) → speckit. The bare
+        // specify/plan/tasks steps must produce the same artifacts and
+        // feature.json as the explicit speckit steps, via the canonical
+        // speckit commands.
+        let (dir, config, substrate, hosts, prompts) = harness(bare_drill_pipeline(), "").await?;
+        let run_dir = dir.path().join(".derrick/runs/bare-run");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state = ExecutionState::new("test".to_owned(), "bare-run".to_owned(), run_dir);
+
+        for (id, status) in [
+            ("specify", StepStatus::Success),
+            ("plan", StepStatus::Success),
+            ("tasks", StepStatus::Success),
+        ] {
+            let got = run_step(
+                &config,
+                &substrate,
+                hosts.clone(),
+                dir.path(),
+                &mut state,
+                id,
+            )
+            .await?;
+            assert_eq!(got, status, "step {id} should succeed via the seam");
+        }
+
+        // Same artifacts as the explicit speckit path.
+        assert!(
+            dir.path().join(FEATURE_JSON).exists(),
+            "feature.json written"
+        );
+        assert!(dir.path().join("specs/001-test/spec.md").exists());
+        assert!(dir.path().join("specs/001-test/plan.md").exists());
+        assert!(dir.path().join("specs/001-test/tasks.md").exists());
+
+        // The seam handed the canonical speckit commands to the host.
+        let prompts = prompts.lock().expect("lock");
+        assert!(
+            prompts.iter().any(|p| p.contains("/speckit.specify")),
+            "specify phase must use the speckit command, got: {prompts:?}"
+        );
+        assert!(prompts.iter().any(|p| p.contains("/speckit.plan")));
+        assert!(prompts.iter().any(|p| p.contains("/speckit.tasks")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_speckit_step_bypasses_the_seam() -> TestResult {
+        // An explicit host+command specify step must NOT consult the provider:
+        // even with `tools.specify.provider: native` (whose seam arm errors),
+        // the explicit step runs through execute_role_step and succeeds.
+        let explicit = r#"  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+"#;
+        let (dir, config, substrate, hosts, prompts) =
+            harness(explicit, "  specify:\n    provider: native\n").await?;
+        let run_dir = dir.path().join(".derrick/runs/explicit-run");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state = ExecutionState::new("test".to_owned(), "explicit-run".to_owned(), run_dir);
+
+        let status = run_step(
+            &config,
+            &substrate,
+            hosts.clone(),
+            dir.path(),
+            &mut state,
+            "specify",
+        )
+        .await?;
+        assert_eq!(
+            status,
+            StepStatus::Success,
+            "explicit speckit step must bypass the native seam and succeed"
+        );
+        assert!(dir.path().join("specs/001-test/spec.md").exists());
+        let prompts = prompts.lock().expect("lock");
+        assert!(
+            prompts.iter().any(|p| p.contains("/speckit.specify")),
+            "explicit step still drives the host, got: {prompts:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bare_step_with_native_provider_returns_not_yet_available() -> TestResult {
+        let (dir, config, substrate, hosts, _prompts) =
+            harness(bare_drill_pipeline(), "  specify:\n    provider: native\n").await?;
+        let run_dir = dir.path().join(".derrick/runs/native-run");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state =
+            ExecutionState::new("do the thing".to_owned(), "native-run".to_owned(), run_dir);
+
+        let step = config
+            .pipeline()
+            .iter()
+            .find(|s| s.id() == "specify")
+            .expect("specify step")
+            .clone();
+        let manifest_path = state.run_dir.join("manifest.json");
+        let error = execute_step(
+            &config,
+            substrate.as_ref(),
+            hosts.clone(),
+            dir.path(),
+            &step,
+            &mut state,
+            "native-run",
+            &manifest_path,
+            None,
+        )
+        .await
+        .expect_err("native provider should error in Phase 1");
+        assert!(
+            error.to_string().contains("not yet available") && error.to_string().contains("native"),
+            "expected a clear not-yet-available error, got: {error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bare_step_with_import_provider_returns_not_yet_available() -> TestResult {
+        let (dir, config, substrate, hosts, _prompts) =
+            harness(bare_drill_pipeline(), "  specify:\n    provider: import\n").await?;
+        let run_dir = dir.path().join(".derrick/runs/import-run");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state =
+            ExecutionState::new("do the thing".to_owned(), "import-run".to_owned(), run_dir);
+
+        let step = config
+            .pipeline()
+            .iter()
+            .find(|s| s.id() == "specify")
+            .expect("specify step")
+            .clone();
+        let manifest_path = state.run_dir.join("manifest.json");
+        let error = execute_step(
+            &config,
+            substrate.as_ref(),
+            hosts.clone(),
+            dir.path(),
+            &step,
+            &mut state,
+            "import-run",
+            &manifest_path,
+            None,
+        )
+        .await
+        .expect_err("import provider should error in Phase 1");
+        assert!(
+            error.to_string().contains("not yet available") && error.to_string().contains("import"),
+            "expected a clear not-yet-available error, got: {error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn detect_artifacts_returns_expected_spec_paths() {
+        // Unchanged behaviour: the artifact resolver maps spec phases to their
+        // canonical files under the feature dir + .specify/feature.json.
+        let tmp = tempdir().expect("tempdir");
+        let feature = tmp.path().join("specs/001-test");
+        std::fs::create_dir_all(&feature).expect("feature dir");
+        std::fs::create_dir_all(tmp.path().join(".specify")).expect(".specify");
+        std::fs::write(tmp.path().join(FEATURE_JSON), "{}").expect("feature.json");
+        std::fs::write(feature.join("spec.md"), "spec").expect("spec");
+        std::fs::write(feature.join("plan.md"), "plan").expect("plan");
+        std::fs::write(feature.join("tasks.md"), "tasks").expect("tasks");
+
+        let mut state = ExecutionState::new(
+            "p".to_owned(),
+            "r".to_owned(),
+            tmp.path().join(".derrick/runs/r"),
+        );
+        state.feature_dir = Some(std::path::PathBuf::from("specs/001-test"));
+
+        let specify = crate::steps::detect_artifacts("specify", &state, tmp.path());
+        assert!(specify.contains(&std::path::PathBuf::from(FEATURE_JSON)));
+        assert!(specify.contains(&std::path::PathBuf::from("specs/001-test/spec.md")));
+
+        let plan = crate::steps::detect_artifacts("plan", &state, tmp.path());
+        assert_eq!(
+            plan,
+            vec![std::path::PathBuf::from("specs/001-test/plan.md")]
+        );
+
+        let tasks = crate::steps::detect_artifacts("tasks", &state, tmp.path());
+        assert_eq!(
+            tasks,
+            vec![std::path::PathBuf::from("specs/001-test/tasks.md")]
+        );
     }
 }
