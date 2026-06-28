@@ -97,6 +97,12 @@ the spec schema exactly) or **normalises** it with a single model call into the
 schema, then validates it. Downstream `plan`/`tasks` are produced per
 `import.plan` / `import.tasks` (default `native`).
 
+**v1 downstream note:** `import.plan`/`import.tasks` accept `native` (default) or
+`speckit`. Setting either to `import` requires a directory/multi-doc source
+(which would carry its own `plan.md`/`tasks.md`); against the v1 single-file
+source it errors clearly rather than silently skipping — use `native` or
+`speckit` for the downstream phases until multi-doc import lands.
+
 **v1 supports a local file path only.** Remote sources (a GitHub issue, a Notion
 or Confluence page) return a clear "not supported yet" error — derrick's own
 process can't call agent-side MCP tools, so export the document to a local file
