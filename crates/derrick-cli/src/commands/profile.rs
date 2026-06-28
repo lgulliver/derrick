@@ -127,7 +127,7 @@ async fn show(name: &str) -> Result<CliExitCode, CliError> {
 }
 
 /// Returns a short description for a built-in profile name.
-fn builtin_description(name: &str) -> &'static str {
+pub(crate) fn builtin_description(name: &str) -> &'static str {
     match name {
         "speed" => "optimise for latency: fastest runtime, smallest model",
         "balanced" => "good quality at reasonable speed (default baseline)",

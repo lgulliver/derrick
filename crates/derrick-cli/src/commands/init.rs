@@ -309,6 +309,13 @@ fn resolve_options(
     let constitution = constitution_mode(&args);
 
     if should_run_wizard(&args) {
+        let existing_default_profile = if repo_root.join("derrick.yaml").exists() {
+            crate::read_config(repo_root)
+                .ok()
+                .and_then(|c| c.default_profile().map(str::to_owned))
+        } else {
+            None
+        };
         let wizard_input = WizardInput {
             repo_root,
             has_existing_config: repo_root.join("derrick.yaml").exists(),
@@ -325,6 +332,7 @@ fn resolve_options(
             default_jetbrains: args.jetbrains,
             default_force: args.force,
             available_models: available_model_choices(),
+            default_profile: existing_default_profile,
         };
         let selection = crate::commands::init_wizard::run(wizard_input)?;
         return match selection {

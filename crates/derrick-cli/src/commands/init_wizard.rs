@@ -6,10 +6,13 @@ use derrick_adopt::ConstitutionMode;
 use inquire::validator::Validation;
 use inquire::{Confirm, MultiSelect, Select, Text};
 
+use derrick_config::BUILTIN_PROFILE_NAMES;
+
 use crate::commands::init::{
     AiPlan, DEFAULT_PROFILE, ModelSpec, RoleBindings, available_model_ids,
     recommended_role_bindings, validate_prefix,
 };
+use crate::commands::profile::builtin_description;
 use crate::commands::spec_provider_init::SpecProviderChoice;
 
 // ─── terminal style ──────────────────────────────────────────────────────────
@@ -70,6 +73,8 @@ pub(crate) struct WizardInput<'a> {
     pub(crate) default_jetbrains: bool,
     pub(crate) default_force: bool,
     pub(crate) available_models: Vec<(&'static str, &'static str)>,
+    /// The existing repo's configured default profile, used to pre-select the wizard prompt.
+    pub(crate) default_profile: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -179,21 +184,15 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         _ => crate::commands::InitMode::Crew,
     };
 
-    let profile_options: &[(&str, &str)] = &[
-        (
-            "balanced",
-            "balanced   good quality at reasonable speed (recommended)",
-        ),
-        ("speed", "speed      optimise for latency"),
-        ("quality", "quality    maximum reasoning quality"),
-        ("cheap", "cheap      optimise for lowest cost"),
-        ("local", "local      local runtimes only"),
-        ("ci", "ci         non-interactive, deterministic"),
-    ];
-    let profile_labels: Vec<&str> = profile_options.iter().map(|(_, label)| *label).collect();
+    let profile_options: Vec<(&str, String)> = BUILTIN_PROFILE_NAMES
+        .iter()
+        .map(|name| (*name, format!("{name:<10}  {}", builtin_description(name))))
+        .collect();
+    let profile_labels: Vec<&str> = profile_options.iter().map(|(_, l)| l.as_str()).collect();
+    let preferred = input.default_profile.as_deref().unwrap_or(DEFAULT_PROFILE);
     let default_profile_idx = profile_options
         .iter()
-        .position(|(alias, _)| *alias == DEFAULT_PROFILE)
+        .position(|(alias, _)| *alias == preferred)
         .unwrap_or(0);
     let default_profile = profile_options[ask!(ask_select(
         "Default AI profile?",
