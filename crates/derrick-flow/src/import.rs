@@ -201,10 +201,28 @@ fn resolve_file_source(source: &str, working_dir: &Path) -> Result<PathBuf, RunE
     }
     let rel = if let Some(scheme) = uri_scheme(trimmed) {
         if scheme == "file" {
-            // Accept `file:path` / `file:///abs/path`; strip the scheme + any
-            // leading slashes that follow `file:`.
+            // Accept only `file:path` and `file:///abs/path` (empty authority).
+            // A `file://<authority>/...` with a non-empty authority (e.g.
+            // `file://localhost/tmp/spec.md`) would otherwise strip to a relative
+            // `localhost/tmp/spec.md` and resolve under working_dir — surprising
+            // and almost certainly not what the operator meant. Reject it.
             let rest = &trimmed[scheme.len() + 1..];
-            rest.strip_prefix("//").unwrap_or(rest)
+            if let Some(after_slashes) = rest.strip_prefix("//") {
+                // `rest` is `//<authority><path>`; the authority is up to the
+                // next `/`. It must be empty (the `file:///abs` form).
+                let authority_end = after_slashes.find('/').unwrap_or(after_slashes.len());
+                let authority = &after_slashes[..authority_end];
+                if !authority.is_empty() {
+                    return Err(RunError::Config(format!(
+                        "import source {trimmed:?} is a file:// URL with an authority \
+                         ({authority:?}), which is not supported; use file:///absolute/path \
+                         or a plain local path"
+                    )));
+                }
+                &after_slashes[authority_end..]
+            } else {
+                rest
+            }
         } else {
             return Err(RunError::Config(format!(
                 "import source {trimmed:?} uses the {scheme:?} scheme, which is not supported yet \
@@ -305,6 +323,24 @@ mod tests {
         let path =
             resolve_file_source("file:///tmp/spec.md", Path::new("/repo")).expect("file scheme ok");
         assert_eq!(path, PathBuf::from("/tmp/spec.md"));
+    }
+
+    #[test]
+    fn resolve_accepts_file_scheme_without_slashes() {
+        let path = resolve_file_source("file:docs/spec.md", Path::new("/repo")).expect("file: ok");
+        assert_eq!(path, PathBuf::from("/repo/docs/spec.md"));
+    }
+
+    #[test]
+    fn resolve_rejects_file_url_with_authority() {
+        let err = resolve_file_source("file://localhost/tmp/spec.md", Path::new("/repo"))
+            .expect_err("authority should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("authority"), "got: {msg}");
+        assert!(
+            msg.contains("localhost"),
+            "should name the authority, got: {msg}"
+        );
     }
 
     #[test]

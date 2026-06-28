@@ -205,9 +205,13 @@ impl NativeSpecProvider {
     ) -> Result<NativeOutcome, SpecifyError> {
         let mut outcome = NativeOutcome::default();
 
-        // Survey pre-pass (no model) — used only to author the grounding
-        // front-matter; the normalization prompt is the source document itself.
-        let grounding = grounding::gather(req.working_dir, req.raw_prompt).await;
+        // Survey pre-pass (no model) — authors the grounding front-matter. The
+        // query combines the raw prompt with the source document so grounding
+        // reflects the actual imported content, not just the (often
+        // filename-derived) prompt string. Grounding is still survey-derived and
+        // derrick-authored; this only makes the query authoritative.
+        let grounding_query = format!("{}\n\n{}", req.raw_prompt, source_text);
+        let grounding = grounding::gather(req.working_dir, &grounding_query).await;
         outcome.bytes_raw = outcome.bytes_raw.saturating_add(grounding.bytes_raw);
         outcome.bytes_saved = outcome.bytes_saved.saturating_add(grounding.bytes_saved);
 

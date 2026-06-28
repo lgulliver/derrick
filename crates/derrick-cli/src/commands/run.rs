@@ -15,8 +15,22 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
     // A `--spec <path>` override (drill only) forces the `import` provider for
     // this run at the highest precedence, without editing derrick.yaml. It is
     // applied to the in-memory config before the runner is built.
+    //
+    // It cannot be combined with resuming: a resume reuses the prior run's
+    // artifacts (and its config hash must match), so a new `--spec` source would
+    // never be imported and later phases would run from stale artifacts. Reject
+    // it up front with a clear error rather than silently ignoring the source.
     let spec_override = match &args.command {
-        RunCommand::Drill(drill) => drill.spec.clone(),
+        RunCommand::Drill(drill) => {
+            if drill.spec.is_some() && (drill.resume_from.is_some() || drill.auto_resume) {
+                return Err(crate::message(
+                    "`--spec` cannot be combined with resuming an existing run \
+                     (--resume-from or an auto-resumed prompt); start a fresh drill \
+                     run instead (e.g. with --force)",
+                ));
+            }
+            drill.spec.clone()
+        }
         RunCommand::Resume(_) => None,
     };
     let (_repo_root, _config, _substrate, runner) = build_runner(spec_override).await?;

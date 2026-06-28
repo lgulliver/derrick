@@ -471,12 +471,15 @@ fn body_has_heading(body: &str, heading: &str) -> bool {
 /// by a model.
 ///
 /// Used by the `import` provider: a source document that already validates with
-/// no [`Severity::Reject`] findings is a real `derrick.spec/v1` document and is
-/// imported as-is (the import provider then injects its own grounding). A
-/// document with any hard reject (no front-matter, missing requirements, leftover
-/// open questions, …) is sent through one model normalization pass instead.
+/// no [`Severity::Reject`] findings **and** carries the exact `derrick.spec/v1`
+/// schema discriminator is a real spec and is imported as-is. A document with any
+/// hard reject (no front-matter, missing requirements, leftover open questions,
+/// …) — or a spec-shaped document declaring a *different* `schema:` value (a
+/// `spec.schema_mismatch` Warn) — is sent through one model normalization pass
+/// instead, so a foreign schema is never silently passed through.
 pub fn looks_like_spec(md: &str) -> bool {
-    !has_reject(&validate_spec(md))
+    let findings = validate_spec(md);
+    !has_reject(&findings) && !findings.iter().any(|f| f.code == "spec.schema_mismatch")
 }
 
 #[cfg(test)]
@@ -694,5 +697,28 @@ mod tests {
         assert!(references_requirement("touches R1 and R12"));
         assert!(!references_requirement("Rust code, Refactor"));
         assert!(!references_requirement("plain prose"));
+    }
+
+    #[test]
+    fn looks_like_spec_accepts_exact_schema() {
+        assert!(looks_like_spec(&valid_spec()));
+    }
+
+    #[test]
+    fn looks_like_spec_rejects_foreign_schema() {
+        // A spec-shaped doc with the wrong schema value validates with only a
+        // Warn (`spec.schema_mismatch`), but must NOT be treated as passthrough —
+        // it should be normalized into derrick's schema instead.
+        let spec = valid_spec().replace("schema: derrick.spec/v1", "schema: something-else/1");
+        assert!(!has_reject(&validate_spec(&spec)), "only a Warn expected");
+        assert!(
+            !looks_like_spec(&spec),
+            "foreign schema must not be passthrough"
+        );
+    }
+
+    #[test]
+    fn looks_like_spec_rejects_non_spec_document() {
+        assert!(!looks_like_spec("# Just a heading\n\nsome prose\n"));
     }
 }

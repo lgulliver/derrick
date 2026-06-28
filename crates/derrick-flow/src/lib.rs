@@ -2517,12 +2517,27 @@ state:
             // The speckit downstream path writes artifacts to disk host-side
             // (the slash command resolves the feature dir via feature.json),
             // exactly like the RecordingHost. Mirror that so import's
-            // `plan/tasks: speckit` mode is exercised end-to-end.
-            let speckit_feature = |request: &HostRequest| -> Option<std::path::PathBuf> {
-                let json = std::fs::read_to_string(request.cwd.join(FEATURE_JSON)).ok()?;
-                let value: serde_json::Value = serde_json::from_str(&json).ok()?;
-                let dir = value.get("feature_directory")?.as_str()?;
-                Some(request.cwd.join(dir))
+            // `plan/tasks: speckit` mode is exercised end-to-end. Failures here
+            // are real setup bugs — surface them as HostError, never "ok".
+            let io_err = |source: std::io::Error| HostError::Io {
+                host: "claude".to_owned(),
+                source,
+            };
+            let speckit_feature = |request: &HostRequest| -> Result<std::path::PathBuf, HostError> {
+                let json =
+                    std::fs::read_to_string(request.cwd.join(FEATURE_JSON)).map_err(io_err)?;
+                let value: serde_json::Value = serde_json::from_str(&json)
+                    .map_err(std::io::Error::other)
+                    .map_err(io_err)?;
+                let dir = value
+                    .get("feature_directory")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        io_err(std::io::Error::other(
+                            "feature.json missing feature_directory",
+                        ))
+                    })?;
+                Ok(request.cwd.join(dir))
             };
             let stdout = if prompt.contains("clarify a feature request BEFORE") {
                 "Q: Which format?\nOptions: JSON, YAML\nRecommendation: JSON\n".to_owned()
@@ -2536,17 +2551,16 @@ state:
             } else if prompt.contains("Break this plan into tickets") {
                 "## Ticket one\nImplements R1.\n".to_owned()
             } else if prompt.contains("/speckit.plan") {
-                if let Some(feature) = speckit_feature(&request) {
-                    let _ = std::fs::write(feature.join("plan.md"), "speckit plan\n");
-                }
+                let feature = speckit_feature(&request)?;
+                std::fs::write(feature.join("plan.md"), "speckit plan\n").map_err(io_err)?;
                 "ok\n".to_owned()
             } else if prompt.contains("/speckit.tasks") {
-                if let Some(feature) = speckit_feature(&request) {
-                    let _ = std::fs::write(
-                        feature.join("tasks.md"),
-                        "## Speckit ticket\nImplements R1.\n",
-                    );
-                }
+                let feature = speckit_feature(&request)?;
+                std::fs::write(
+                    feature.join("tasks.md"),
+                    "## Speckit ticket\nImplements R1.\n",
+                )
+                .map_err(io_err)?;
                 "ok\n".to_owned()
             } else {
                 String::new()
