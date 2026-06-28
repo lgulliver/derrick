@@ -88,6 +88,8 @@ async fn dispatch(cli: Cli) -> Result<exit_code::CliExitCode, CliError> {
         Command::Spec(args) => commands::spec::execute(args).await,
         Command::Reset(args) => commands::reset::execute(args).await,
         Command::Undo(args) => commands::undo::execute(args).await,
+        Command::Profile(args) => commands::profile::execute(args).await,
+        Command::Cost(args) => commands::cost::execute(args).await,
     }
 }
 

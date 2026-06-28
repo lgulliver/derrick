@@ -194,6 +194,7 @@ struct ResolvedInitOptions {
     spec_provider: crate::commands::spec_provider_init::SpecProviderChoice,
     conventional_commits: bool,
     branch_prefix: String,
+    default_profile: String,
 }
 
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
@@ -346,6 +347,7 @@ fn resolve_options(
                     spec_provider: selection.spec_provider,
                     conventional_commits: selection.conventional_commits,
                     branch_prefix: selection.branch_prefix,
+                    default_profile: selection.default_profile,
                 }))
             }
         };
@@ -374,6 +376,7 @@ fn resolve_options(
         spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
         conventional_commits: true,
         branch_prefix: "feat/".to_owned(),
+        default_profile: "balanced".to_owned(),
     }))
 }
 
@@ -726,6 +729,13 @@ fn apply_text_overrides(
         }
     }
 
+    // Persist the chosen default profile (D86) on the line-based catalogue
+    // path too. `balanced` is the implicit baseline, so only emit the key when
+    // the user picked something else.
+    if resolved.default_profile != "balanced" {
+        lines.push(format!("default_profile: {}", resolved.default_profile));
+    }
+
     let out = format!("{}\n", lines.join("\n"));
     // Speckit is a no-op here (returns `out` unchanged), so the template's
     // comments survive on the common catalogue path; native/import round-trip
@@ -751,6 +761,16 @@ fn apply_config_overrides(
     );
 
     apply_ai_plan(root, &resolved.ai_plan);
+
+    // Persist the chosen default profile (D86). `balanced` is the implicit
+    // baseline, so only write the key when the user picked something else —
+    // keeping the common config clean.
+    if resolved.default_profile != "balanced" {
+        root.insert(
+            serde_yaml::Value::String("default_profile".to_owned()),
+            serde_yaml::Value::String(resolved.default_profile.clone()),
+        );
+    }
 
     if matches!(resolved.mode, crate::commands::InitMode::Crew) {
         ensure_crew_pipeline(root)?;
@@ -1613,6 +1633,7 @@ mod tests {
             spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
             conventional_commits: true,
             branch_prefix: "feat/".to_owned(),
+            default_profile: "balanced".to_owned(),
         }
     }
 

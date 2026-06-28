@@ -78,6 +78,7 @@ pub(crate) struct WizardOutput {
     pub(crate) site_name: String,
     pub(crate) prefix: String,
     pub(crate) mode: crate::commands::InitMode,
+    pub(crate) default_profile: String,
     pub(crate) ai_plan: AiPlan,
     pub(crate) spec_provider: SpecProviderChoice,
     pub(crate) constitution: ConstitutionMode,
@@ -175,6 +176,26 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         0 => crate::commands::InitMode::Solo,
         1 => crate::commands::InitMode::Copilot,
         _ => crate::commands::InitMode::Crew,
+    };
+
+    let default_profile = match ask!(ask_select(
+        "Default AI profile?",
+        &[
+            "balanced   good quality at reasonable speed (recommended)",
+            "speed      optimise for latency",
+            "quality    maximum reasoning quality",
+            "cheap      optimise for lowest cost",
+            "local      local runtimes only",
+            "ci         non-interactive, deterministic",
+        ],
+        0,
+    )) {
+        0 => "balanced",
+        1 => "speed",
+        2 => "quality",
+        3 => "cheap",
+        4 => "local",
+        _ => "ci",
     };
 
     let available_model_ids = available_model_ids();
@@ -368,6 +389,7 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         site_name,
         prefix,
         mode,
+        default_profile: default_profile.to_owned(),
         ai_plan,
         spec_provider,
         constitution,
@@ -461,6 +483,7 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
         site_name,
         prefix,
         mode,
+        default_profile,
         ai_plan,
         spec_provider,
         constitution,
@@ -503,6 +526,7 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
     println!("{}", kv("Project", site_name));
     println!("{}", kv("Prefix", prefix));
     println!("{}", kv("Mode", mode.as_str()));
+    println!("{}", kv("Profile", default_profile));
     println!("{}", kv("AI config", &ai_plan.label()));
     println!("{}", kv("Spec provider", spec_provider.label()));
     if !greenfield {

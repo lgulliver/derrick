@@ -33,7 +33,16 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
         }
         RunCommand::Resume(_) => None,
     };
-    let (_repo_root, _config, _substrate, runner) = build_runner(spec_override).await?;
+    // A `--profile <name>` override (drill only) applies the named profile's
+    // stage bindings to the in-memory config for this run. When absent, the
+    // config's `default_profile` (if any) is applied. Resumes reuse the prior
+    // run's pinned config and so never take a profile here.
+    let profile_override = match &args.command {
+        RunCommand::Drill(drill) => drill.profile.clone(),
+        RunCommand::Resume(_) => None,
+    };
+    let (_repo_root, _config, _substrate, runner) =
+        build_runner(spec_override, profile_override).await?;
 
     match args.command {
         RunCommand::Drill(drill) => {
@@ -85,6 +94,7 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
 
 async fn build_runner(
     spec_override: Option<String>,
+    profile_override: Option<String>,
 ) -> Result<
     (
         std::path::PathBuf,
@@ -96,6 +106,19 @@ async fn build_runner(
 > {
     let repo_root = current_repo_root()?;
     let mut config = read_config(&repo_root)?;
+    // Apply the requested profile (or the configured default profile) before any
+    // other override: `--profile <name>` takes precedence over `default_profile`.
+    config = if let Some(profile_name) = &profile_override {
+        config
+            .with_profile(profile_name)
+            .map_err(|e| crate::message(e.to_string()))?
+    } else if let Some(default) = config.default_profile().map(str::to_owned) {
+        config
+            .with_profile(&default)
+            .map_err(|e| crate::message(e.to_string()))?
+    } else {
+        config
+    };
     // Highest-precedence run override: `--spec <path>` forces the import provider.
     if let Some(source) = spec_override {
         config.force_import_spec(source);
