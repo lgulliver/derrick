@@ -17,6 +17,7 @@ pub(crate) mod reset;
 pub(crate) mod run;
 pub(crate) mod scrub;
 pub(crate) mod spec;
+pub(crate) mod spec_provider_init;
 pub(crate) mod stack;
 pub(crate) mod status;
 pub(crate) mod survey;

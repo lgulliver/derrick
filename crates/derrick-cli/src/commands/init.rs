@@ -191,6 +191,7 @@ struct ResolvedInitOptions {
     vscode: bool,
     jetbrains: bool,
     ai_plan: AiPlan,
+    spec_provider: crate::commands::spec_provider_init::SpecProviderChoice,
     conventional_commits: bool,
     branch_prefix: String,
 }
@@ -342,6 +343,7 @@ fn resolve_options(
                     vscode: selection.vscode,
                     jetbrains: selection.jetbrains,
                     ai_plan: selection.ai_plan,
+                    spec_provider: selection.spec_provider,
                     conventional_commits: selection.conventional_commits,
                     branch_prefix: selection.branch_prefix,
                 }))
@@ -367,6 +369,9 @@ fn resolve_options(
         vscode: args.vscode,
         jetbrains: args.jetbrains,
         ai_plan: AiPlan::Catalogue(roles),
+        // Non-interactive / `--yes` / non-TTY always defaults to speckit, which
+        // leaves the config untouched (no behaviour change).
+        spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
         conventional_commits: true,
         branch_prefix: "feat/".to_owned(),
     }))
@@ -721,7 +726,11 @@ fn apply_text_overrides(
         }
     }
 
-    Ok(format!("{}\n", lines.join("\n")))
+    let out = format!("{}\n", lines.join("\n"));
+    // Speckit is a no-op here (returns `out` unchanged), so the template's
+    // comments survive on the common catalogue path; native/import round-trip
+    // through serde to bare the spec steps and set `tools.specify.provider`.
+    crate::commands::spec_provider_init::apply_spec_provider(&out, resolved.spec_provider)
 }
 
 fn apply_config_overrides(
@@ -747,7 +756,8 @@ fn apply_config_overrides(
         ensure_crew_pipeline(root)?;
     }
 
-    serde_yaml::to_string(&yaml).map_err(|error| message(error.to_string()))
+    let out = serde_yaml::to_string(&yaml).map_err(|error| message(error.to_string()))?;
+    crate::commands::spec_provider_init::apply_spec_provider(&out, resolved.spec_provider)
 }
 
 pub(crate) fn nested_mapping<'a>(
@@ -1600,6 +1610,7 @@ mod tests {
             vscode: false,
             jetbrains: false,
             ai_plan: plan,
+            spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
             conventional_commits: true,
             branch_prefix: "feat/".to_owned(),
         }
