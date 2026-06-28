@@ -7,8 +7,8 @@ use inquire::validator::Validation;
 use inquire::{Confirm, MultiSelect, Select, Text};
 
 use crate::commands::init::{
-    AiPlan, ModelSpec, RoleBindings, available_model_ids, recommended_role_bindings,
-    validate_prefix,
+    AiPlan, DEFAULT_PROFILE, ModelSpec, RoleBindings, available_model_ids,
+    recommended_role_bindings, validate_prefix,
 };
 use crate::commands::spec_provider_init::SpecProviderChoice;
 
@@ -179,25 +179,28 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         _ => crate::commands::InitMode::Crew,
     };
 
-    let default_profile = match ask!(ask_select(
-        "Default AI profile?",
-        &[
+    let profile_options: &[(&str, &str)] = &[
+        (
+            "balanced",
             "balanced   good quality at reasonable speed (recommended)",
-            "speed      optimise for latency",
-            "quality    maximum reasoning quality",
-            "cheap      optimise for lowest cost",
-            "local      local runtimes only",
-            "ci         non-interactive, deterministic",
-        ],
-        0,
-    )) {
-        0 => "balanced",
-        1 => "speed",
-        2 => "quality",
-        3 => "cheap",
-        4 => "local",
-        _ => "ci",
-    };
+        ),
+        ("speed", "speed      optimise for latency"),
+        ("quality", "quality    maximum reasoning quality"),
+        ("cheap", "cheap      optimise for lowest cost"),
+        ("local", "local      local runtimes only"),
+        ("ci", "ci         non-interactive, deterministic"),
+    ];
+    let profile_labels: Vec<&str> = profile_options.iter().map(|(_, label)| *label).collect();
+    let default_profile_idx = profile_options
+        .iter()
+        .position(|(alias, _)| *alias == DEFAULT_PROFILE)
+        .unwrap_or(0);
+    let default_profile = profile_options[ask!(ask_select(
+        "Default AI profile?",
+        &profile_labels,
+        default_profile_idx
+    ))]
+    .0;
 
     let available_model_ids = available_model_ids();
     let role_defaults = recommended_role_bindings(mode, &available_model_ids);

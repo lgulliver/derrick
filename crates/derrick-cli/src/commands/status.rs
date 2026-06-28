@@ -52,7 +52,7 @@ struct StatusSnapshot {
     in_flight: usize,
     done: usize,
     foreman: String,
-    active_profile: Option<String>,
+    default_profile: Option<String>,
 }
 
 async fn load_status() -> Result<StatusSnapshot, crate::CliError> {
@@ -71,7 +71,7 @@ async fn load_status() -> Result<StatusSnapshot, crate::CliError> {
             in_flight: 0,
             done: 0,
             foreman: "disabled".to_owned(),
-            active_profile: config.default_profile().map(str::to_owned),
+            default_profile: config.default_profile().map(str::to_owned),
         }),
     }
 }
@@ -121,7 +121,7 @@ async fn native_status(
             Some(pid) => format!("detached (pid {pid})"),
             None => "stopped".to_owned(),
         },
-        active_profile: config.default_profile().map(str::to_owned),
+        default_profile: config.default_profile().map(str::to_owned),
     })
 }
 
@@ -145,8 +145,8 @@ fn print_status(status: &StatusSnapshot, format: OutputFormat) -> Result<(), cra
                 status.done, status.in_flight, status.ready
             );
             println!("foreman      {}", status.foreman);
-            if let Some(profile) = &status.active_profile {
-                println!("profile      {profile}");
+            if let Some(profile) = &status.default_profile {
+                println!("default profile  {profile}");
             }
         }
         OutputFormat::Json => {
@@ -163,7 +163,7 @@ fn print_status(status: &StatusSnapshot, format: OutputFormat) -> Result<(), cra
                     "done": status.done
                 },
                 "foreman": status.foreman,
-                "profile": status.active_profile
+                "default_profile": status.default_profile
             });
             println!("{}", serde_json::to_string(&body)?);
         }

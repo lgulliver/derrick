@@ -13,6 +13,9 @@ use crate::exit_code::CliExitCode;
 use crate::ui;
 use crate::{create_dir_all, current_repo_root, message, native_paths, read_config, write_file};
 
+/// The default AI profile used when no explicit profile is configured.
+pub(crate) const DEFAULT_PROFILE: &str = "balanced";
+
 const INIT_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../templates/derrick.yaml.in"
@@ -379,7 +382,7 @@ fn resolve_options(
         spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
         conventional_commits: true,
         branch_prefix: "feat/".to_owned(),
-        default_profile: "balanced".to_owned(),
+        default_profile: DEFAULT_PROFILE.to_owned(),
     }))
 }
 
@@ -1636,7 +1639,7 @@ mod tests {
             spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
             conventional_commits: true,
             branch_prefix: "feat/".to_owned(),
-            default_profile: "balanced".to_owned(),
+            default_profile: DEFAULT_PROFILE.to_owned(),
         }
     }
 
