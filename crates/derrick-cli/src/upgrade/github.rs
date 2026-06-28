@@ -53,6 +53,7 @@ pub(crate) struct ReqwestReleaseClient {
 }
 
 impl ReqwestReleaseClient {
+    /// Creates a new HTTP client configured with the derrick user-agent and a request timeout.
     pub(crate) fn new() -> Result<Self, ReleaseClientError> {
         let client = reqwest::Client::builder()
             .user_agent(user_agent())

@@ -44,6 +44,7 @@ pub(crate) struct RoleBindings {
 }
 
 impl RoleBindings {
+    /// Creates bindings where every role uses the same model.
     pub(crate) fn one_model(model: String) -> Self {
         Self {
             proposer: model.clone(),
@@ -54,6 +55,7 @@ impl RoleBindings {
         }
     }
 
+    /// Returns all role-to-model pairs as a fixed-size array.
     pub(crate) fn entries(&self) -> [(&'static str, &str); 5] {
         [
             ("proposer", &self.proposer),
@@ -771,6 +773,7 @@ fn apply_config_overrides(
     crate::commands::spec_provider_init::apply_spec_provider(&out, resolved.spec_provider)
 }
 
+/// Returns a mutable reference to a nested YAML mapping, creating it if absent.
 pub(crate) fn nested_mapping<'a>(
     mapping: &'a mut serde_yaml::Mapping,
     key: &str,
@@ -799,6 +802,7 @@ fn role_mapping_value(roles: &RoleBindings) -> serde_yaml::Mapping {
     mapping
 }
 
+/// Ensures the `pipeline` section contains the required `bridge` and `foreman` steps.
 pub(crate) fn ensure_crew_pipeline(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliError> {
     let key = serde_yaml::Value::String("pipeline".to_owned());
     let pipeline_value = root
@@ -828,6 +832,7 @@ pub(crate) fn ensure_crew_pipeline(root: &mut serde_yaml::Mapping) -> Result<(),
     Ok(())
 }
 
+/// Builds a YAML step mapping from a slice of key-value string pairs.
 pub(crate) fn yaml_step(entries: &[(&str, &str)]) -> serde_yaml::Value {
     let mut step = serde_yaml::Mapping::new();
     for (key, value) in entries {
@@ -839,6 +844,7 @@ pub(crate) fn yaml_step(entries: &[(&str, &str)]) -> serde_yaml::Value {
     serde_yaml::Value::Mapping(step)
 }
 
+/// Extracts the `id` string from a YAML step value, or `None` if absent.
 pub(crate) fn step_id(step: &serde_yaml::Value) -> Option<&str> {
     let id_key = serde_yaml::Value::String("id".to_owned());
     step.as_mapping()?.get(&id_key)?.as_str()
@@ -858,6 +864,7 @@ fn validate_role_bindings(
     Ok(())
 }
 
+/// Returns the recommended role-to-model bindings for the given init mode and available models.
 pub(crate) fn recommended_role_bindings(
     mode: crate::commands::InitMode,
     available_models: &BTreeMap<String, &'static str>,
@@ -958,6 +965,7 @@ fn pick_model(available_models: &BTreeMap<String, &'static str>, candidates: &[&
         .unwrap_or_else(|| "claude-sonnet".to_owned())
 }
 
+/// Returns all available model IDs mapped to their descriptions.
 pub(crate) fn available_model_ids() -> BTreeMap<String, &'static str> {
     available_model_choices()
         .into_iter()
@@ -965,6 +973,7 @@ pub(crate) fn available_model_ids() -> BTreeMap<String, &'static str> {
         .collect()
 }
 
+/// Returns the list of (model-id, description) pairs the wizard can offer.
 pub(crate) fn available_model_choices() -> Vec<(&'static str, &'static str)> {
     vec![
         ("claude-opus", "good for architecture and planning"),
@@ -1022,6 +1031,7 @@ fn write_jetbrains_configs(repo_root: &Path) -> Result<(), crate::CliError> {
     Ok(())
 }
 
+/// Derives a default site name from the repository's directory name.
 pub(crate) fn default_site_name(repo_root: &Path) -> String {
     repo_root
         .file_name()
@@ -1030,6 +1040,7 @@ pub(crate) fn default_site_name(repo_root: &Path) -> String {
         .to_owned()
 }
 
+/// Derives a default ticket prefix from the site name (first 3 ASCII letters, lowercase).
 pub(crate) fn default_prefix(site_name: &str) -> String {
     let prefix: String = site_name
         .chars()
@@ -1044,6 +1055,7 @@ pub(crate) fn default_prefix(site_name: &str) -> String {
     }
 }
 
+/// Validates that a site prefix is 1–6 lowercase ASCII letters.
 pub(crate) fn validate_prefix(prefix: &str) -> Result<(), crate::CliError> {
     if (1..=6).contains(&prefix.len()) && prefix.bytes().all(|byte| byte.is_ascii_lowercase()) {
         Ok(())

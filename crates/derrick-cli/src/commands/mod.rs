@@ -256,6 +256,7 @@ pub(crate) enum InitMode {
 }
 
 impl InitMode {
+    /// Returns the string representation used in `derrick.yaml` for this mode.
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Solo => "solo",
@@ -504,6 +505,7 @@ pub(crate) struct ForemanStartArgs {
 }
 
 impl ForemanStartArgs {
+    /// Returns the requested start mode, or `None` if neither `--attached` nor `--detached` was passed.
     pub(crate) fn mode(&self) -> Option<ForemanStartMode> {
         if self.attached {
             Some(ForemanStartMode::Attached)
