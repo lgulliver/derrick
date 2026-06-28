@@ -8,11 +8,13 @@
 //! behaviour and tests byte-for-byte unchanged.
 //!
 //! The pure helpers ([`parse_clarify_questions`], [`select_clarify_answer`],
-//! [`render_clarify_markdown`]) carry no I/O. [`run_clarify_loop`] drives the
-//! interactive (stdin) and non-interactive (auto-accept the recommendation)
-//! paths and renders `clarify.md`.
+//! [`render_clarify_markdown`]) carry no I/O, as does
+//! [`auto_accept_recommendations`] (the path the native provider uses). The
+//! interactive loop [`run_clarify_loop`] takes an **injected reader + writer** so
+//! this library crate never touches `stdin`/`stderr` directly — the CLI-facing
+//! caller in `derrick-flow` supplies the real streams.
 
-use std::io::Write as _;
+use std::io::{BufRead, Write};
 
 /// One clarifying question with its options and recommended answer.
 pub struct ClarifyQuestion {
@@ -66,23 +68,22 @@ pub fn parse_clarify_questions(text: &str) -> Vec<ClarifyQuestion> {
 
 /// Split options text on commas, but only commas at the top level
 /// (not inside matching parentheses, brackets, or backtick pairs).
+///
+/// Bracket nesting (`bracket_depth`) and backtick state (`in_backticks`) are
+/// tracked separately so a backticked option such as `` `foo(bar, baz)` `` does
+/// not split on the inner comma. Bracket depth is only adjusted outside
+/// backticks; a comma separates only when `!in_backticks && bracket_depth == 0`.
 fn split_options_smart(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0usize;
-    let mut depth = 0i32;
+    let mut bracket_depth = 0i32;
+    let mut in_backticks = false;
     for (i, ch) in text.char_indices() {
         match ch {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            '`' => {
-                // Toggle backtick depth
-                if depth == 0 {
-                    depth = -1
-                } else if depth == -1 {
-                    depth = 0
-                }
-            }
-            ',' if depth == 0 => {
+            '`' => in_backticks = !in_backticks,
+            '(' | '[' | '{' if !in_backticks => bracket_depth += 1,
+            ')' | ']' | '}' if !in_backticks => bracket_depth -= 1,
+            ',' if !in_backticks && bracket_depth == 0 => {
                 parts.push(text[start..i].trim());
                 start = i + 1;
             }
@@ -103,9 +104,13 @@ pub fn select_clarify_answer(question: &ClarifyQuestion, user_input: &str) -> St
     if user_input.is_empty() {
         return question.recommendation.clone().unwrap_or_default();
     }
+    // Options are presented 1-based; only a positive index selects an option.
+    // Input `0` (and any non-positive value) is treated as free-form text.
     if let Ok(index) = user_input.parse::<usize>() {
-        if let Some(selected) = question.options.get(index.saturating_sub(1)) {
-            return selected.clone();
+        if index > 0 {
+            if let Some(selected) = question.options.get(index - 1) {
+                return selected.clone();
+            }
         }
     }
     user_input.to_owned()
@@ -152,40 +157,58 @@ pub fn build_raw_prompt_questions(raw_prompt: &str, grounding_block: &str) -> St
     )
 }
 
-/// Drives the clarify loop over `questions`, returning the chosen answers.
+/// Auto-accepts every question's recommendation, returning the chosen answers.
 ///
-/// When `interactive` is true, each question is presented on stderr and the
-/// answer read from stdin (empty input accepts the recommendation). When false
-/// (CI / headless), every question auto-accepts its [`recommendation`], which is
-/// the same outcome a developer pressing Enter would get.
+/// This is the non-interactive (CI / headless) path the native provider uses:
+/// it is pure (no I/O) and yields the same answer a developer pressing Enter
+/// would get. Equivalent to `select_clarify_answer(q, "")` for each question.
+pub fn auto_accept_recommendations(questions: &[ClarifyQuestion]) -> Vec<String> {
+    questions
+        .iter()
+        .map(|q| select_clarify_answer(q, ""))
+        .collect()
+}
+
+/// Drives the interactive clarify loop over `questions` using **injected**
+/// streams, returning the chosen answers.
 ///
-/// [`recommendation`]: ClarifyQuestion::recommendation
-pub fn run_clarify_loop(
+/// Each question is presented on `writer` and the answer read from `reader`
+/// (empty input accepts the recommendation). Taking the reader/writer as
+/// parameters keeps this library crate free of any direct `stdin`/`stderr`
+/// access — the CLI-facing caller (`derrick-flow`'s clarify step) passes the
+/// real `std::io::stdin().lock()` and `std::io::stderr()`; tests pass in-memory
+/// buffers.
+pub fn run_clarify_loop<R: BufRead, W: Write>(
     questions: &[ClarifyQuestion],
-    interactive: bool,
+    mut reader: R,
+    mut writer: W,
 ) -> std::io::Result<Vec<String>> {
     let mut answers: Vec<String> = Vec::with_capacity(questions.len());
     for (i, q) in questions.iter().enumerate() {
-        if !interactive {
-            answers.push(select_clarify_answer(q, ""));
-            continue;
-        }
-        eprintln!("\n--- Question {} of {} ---", i + 1, questions.len());
-        eprintln!("{}", q.question);
+        writeln!(
+            writer,
+            "\n--- Question {} of {} ---",
+            i + 1,
+            questions.len()
+        )?;
+        writeln!(writer, "{}", q.question)?;
         if !q.options.is_empty() {
             for (j, opt) in q.options.iter().enumerate() {
                 let is_rec = q.recommendation.as_deref() == Some(opt.as_str());
                 if is_rec {
-                    eprintln!("  {}. {} [recommended]", j + 1, opt);
+                    writeln!(writer, "  {}. {} [recommended]", j + 1, opt)?;
                 } else {
-                    eprintln!("  {}. {}", j + 1, opt);
+                    writeln!(writer, "  {}. {}", j + 1, opt)?;
                 }
             }
         }
-        eprint!("Your answer (or press Enter to accept recommendation): ");
-        std::io::stderr().flush()?;
+        write!(
+            writer,
+            "Your answer (or press Enter to accept recommendation): "
+        )?;
+        writer.flush()?;
         let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
+        reader.read_line(&mut answer)?;
         let trimmed = answer.trim().to_owned();
         answers.push(select_clarify_answer(q, &trimmed));
     }
@@ -226,8 +249,39 @@ mod tests {
         let questions = parse_clarify_questions(
             "Q: Which format?\nOptions: JSON, YAML\nRecommendation: JSON\n",
         );
-        let answers = run_clarify_loop(&questions, false).expect("loop");
+        let answers = auto_accept_recommendations(&questions);
         assert_eq!(answers, vec!["JSON".to_owned()]);
+    }
+
+    #[test]
+    fn interactive_loop_reads_from_injected_reader() {
+        let questions = parse_clarify_questions(
+            "Q: Which format?\nOptions: JSON, YAML\nRecommendation: JSON\n",
+        );
+        // First answer selects option 2 (YAML); injected streams, no real I/O.
+        let reader = std::io::Cursor::new(b"2\n".to_vec());
+        let mut writer: Vec<u8> = Vec::new();
+        let answers = run_clarify_loop(&questions, reader, &mut writer).expect("loop");
+        assert_eq!(answers, vec!["YAML".to_owned()]);
+        // The prompt was written to the injected writer, not a real stream.
+        assert!(String::from_utf8_lossy(&writer).contains("Which format?"));
+    }
+
+    #[test]
+    fn select_answer_zero_index_is_freeform_not_option_one() {
+        let questions = parse_clarify_questions(
+            "Q: Which format?\nOptions: JSON, YAML\nRecommendation: JSON\n",
+        );
+        // `0` must NOT map to option 1; it is taken as free-form text.
+        assert_eq!(select_clarify_answer(&questions[0], "0"), "0");
+    }
+
+    #[test]
+    fn split_options_keeps_backticked_commas_together() {
+        let result = split_options_smart("`foo(bar, baz)`, plain");
+        assert_eq!(result.len(), 2);
+        assert!(result[0].contains("bar, baz"));
+        assert_eq!(result[1], "plain");
     }
 
     #[test]

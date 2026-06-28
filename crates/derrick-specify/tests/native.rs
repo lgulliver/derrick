@@ -337,7 +337,7 @@ async fn plan_handoff_caveman_saves_and_protects_tokens() {
     );
     std::fs::write(wd.join(&feature_dir).join("spec.md"), &spec_md).expect("spec");
 
-    let (host, _calls) = StubHost::new(false);
+    let (host, calls) = StubHost::new(false);
     let hosts = registry(host);
     let provider = NativeSpecProvider::new();
     let req = NativeRequest {
@@ -354,5 +354,21 @@ async fn plan_handoff_caveman_saves_and_protects_tokens() {
     assert!(
         outcome.bytes_saved > 0,
         "caveman saved bytes on the handoff context"
+    );
+
+    // Compression must NOT clobber protected tokens: the `path:line identifier`
+    // span must survive byte-for-byte in the ACTUAL plan prompt the host saw.
+    // Capturing from the call log (not just the byte counters) means a future
+    // regression that drops protected tokens fails this test.
+    let plan_prompt = calls
+        .lock()
+        .expect("lock")
+        .iter()
+        .find(|p| p.contains("implementation plan"))
+        .cloned()
+        .expect("a plan prompt was sent to the host");
+    assert!(
+        plan_prompt.contains("src/lib.rs:42 export_widget"),
+        "protected path:line token must survive caveman compression in the handoff prompt"
     );
 }

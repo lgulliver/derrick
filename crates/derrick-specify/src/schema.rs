@@ -105,15 +105,17 @@ pub struct SpecMeta {
     pub requirements: Vec<Requirement>,
     /// Acceptance criteria; at least one is required.
     pub acceptance: Vec<Acceptance>,
-    /// Explicit out-of-scope items. The key must be present; the list may be
-    /// empty.
+    /// Explicit out-of-scope items. The key MUST be present (a missing key is a
+    /// Reject, distinct from an empty list); the list itself may be empty.
+    /// Modelled as `Option` so a missing key is distinguishable from `[]`.
     #[serde(default)]
-    pub non_goals: Vec<String>,
-    /// Outstanding questions. The key must be present and MUST be empty on a
-    /// clean run — a non-empty list is a hard reject (clarify-first means open
-    /// questions should already be resolved before drafting).
+    pub non_goals: Option<Vec<String>>,
+    /// Outstanding questions. The key MUST be present and MUST be empty on a
+    /// clean run — a missing key OR a non-empty list is a hard Reject
+    /// (clarify-first means open questions are resolved before drafting).
+    /// Modelled as `Option` so a missing key is distinguishable from `[]`.
     #[serde(default)]
-    pub open_questions: Vec<String>,
+    pub open_questions: Option<Vec<String>>,
     /// Survey grounding, written by derrick (never by the model).
     #[serde(default)]
     pub grounding: Grounding,
@@ -232,14 +234,28 @@ pub fn validate_spec(md: &str) -> Vec<Finding> {
             "spec front-matter must list at least one acceptance criterion",
         ));
     }
-    if !meta.open_questions.is_empty() {
+    // `non_goals` must be present (a missing key is malformed front-matter),
+    // but may be an empty list.
+    if meta.non_goals.is_none() {
         findings.push(Finding::reject(
+            "spec.missing_non_goals",
+            "spec front-matter must include a `non_goals` key (it may be an empty list)",
+        ));
+    }
+    // `open_questions` must be present AND empty on a clean run.
+    match &meta.open_questions {
+        None => findings.push(Finding::reject(
+            "spec.missing_open_questions",
+            "spec front-matter must include an `open_questions` key (empty on a clean run)",
+        )),
+        Some(open) if !open.is_empty() => findings.push(Finding::reject(
             "spec.open_questions",
             format!(
                 "spec has {} unresolved open question(s); clarify-first requires open_questions to be empty",
-                meta.open_questions.len()
+                open.len()
             ),
-        ));
+        )),
+        Some(_) => {}
     }
 
     for heading in REQUIRED_SPEC_HEADINGS {
@@ -275,7 +291,7 @@ pub fn validate_plan(
     indexed_paths: &[String],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
-    let (yaml, _body) = split_front_matter(md);
+    let (yaml, body) = split_front_matter(md);
     let Some(yaml) = yaml else {
         findings.push(Finding::reject(
             "plan.no_front_matter",
@@ -293,6 +309,25 @@ pub fn validate_plan(
             return findings;
         }
     };
+    // The body must carry a real plan, not just front-matter: require a `# Plan`
+    // heading and at least one non-empty content line beneath it. A
+    // front-matter-only plan is a Reject so it triggers the repair pass.
+    if !body_has_heading(body, "# Plan") {
+        findings.push(Finding::reject(
+            "plan.missing_heading",
+            "plan body must include a `# Plan` heading",
+        ));
+    }
+    let has_body_content = body
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("# Plan"))
+        .any(|l| !l.trim_start().starts_with('#') || l.trim_start().starts_with("##"));
+    if !has_body_content {
+        findings.push(Finding::reject(
+            "plan.empty_body",
+            "plan body has no steps beneath the `# Plan` heading",
+        ));
+    }
     if meta.schema != PLAN_SCHEMA {
         findings.push(Finding::warn(
             "plan.schema_mismatch",
@@ -505,6 +540,27 @@ mod tests {
         assert!(findings.iter().any(|f| f.code == "spec.no_front_matter"));
     }
 
+    #[test]
+    fn spec_missing_open_questions_key_rejects() {
+        // Drop the whole key — a missing key must be distinguished from `[]`.
+        let spec = valid_spec().replace("open_questions: []\n", "");
+        let findings = validate_spec(&spec);
+        assert!(has_reject(&findings));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "spec.missing_open_questions")
+        );
+    }
+
+    #[test]
+    fn spec_missing_non_goals_key_rejects() {
+        let spec = valid_spec().replace("non_goals: []\n", "");
+        let findings = validate_spec(&spec);
+        assert!(has_reject(&findings));
+        assert!(findings.iter().any(|f| f.code == "spec.missing_non_goals"));
+    }
+
     fn valid_plan() -> &'static str {
         "---\n\
          schema: derrick.plan/v1\n\
@@ -545,6 +601,28 @@ mod tests {
                 .iter()
                 .any(|f| f.code == "plan.touches_unindexed" && f.severity == Severity::Warn)
         );
+    }
+
+    #[test]
+    fn plan_front_matter_only_body_rejects() {
+        // Front-matter is valid, but there is no `# Plan` body — must Reject so
+        // the repair pass fires rather than silently accepting an empty plan.
+        let md = "---\nschema: derrick.plan/v1\ncovers: [R1]\ntouches: []\n---\n";
+        let findings = validate_plan(md, &["R1".to_owned()], &[]);
+        assert!(has_reject(&findings));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "plan.missing_heading" || f.code == "plan.empty_body")
+        );
+    }
+
+    #[test]
+    fn plan_heading_without_steps_rejects() {
+        let md = "---\nschema: derrick.plan/v1\ncovers: [R1]\ntouches: []\n---\n# Plan\n";
+        let findings = validate_plan(md, &["R1".to_owned()], &[]);
+        assert!(has_reject(&findings));
+        assert!(findings.iter().any(|f| f.code == "plan.empty_body"));
     }
 
     #[test]

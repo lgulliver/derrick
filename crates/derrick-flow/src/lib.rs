@@ -2300,9 +2300,12 @@ models:
     provider: shell
     cli: "/nonexistent-reviewer"
     model: shell-reviewer
+  native-claude:
+    provider: claude
+    model: claude-sonnet-4-6
 roles:
-  drafter: shell-reviewer
-  proposer: shell-reviewer
+  drafter: native-claude
+  proposer: native-claude
   reviewer: shell-reviewer
 tools:
   speckit:

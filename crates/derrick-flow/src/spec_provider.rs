@@ -184,9 +184,20 @@ async fn run_native_phase(
             .map_err(map_specify_err("specify"))?,
         SpecPhase::Plan => {
             // Thread accepted clarifications into the native planner, mirroring
-            // `inject_clarify_answers_for_plan` on the role path.
+            // `inject_clarify_answers_for_plan` on the role path. A missing
+            // clarify.md is fine (None); any other IO error is surfaced rather
+            // than silently swallowed.
             let clarify_path = wd.join(&feature_dir).join("clarify.md");
-            let clarifications = std::fs::read_to_string(&clarify_path).ok();
+            let clarifications = match std::fs::read_to_string(&clarify_path) {
+                Ok(text) => Some(text),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(source) => {
+                    return Err(RunError::Io {
+                        path: clarify_path,
+                        source,
+                    });
+                }
+            };
             provider
                 .plan(&request, clarifications.as_deref())
                 .await

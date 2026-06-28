@@ -105,7 +105,10 @@ pub struct NativeRequest<'a> {
     pub hosts: &'a HostRegistry,
     /// The effective configuration (role → model → host resolution).
     pub config: &'a Config,
-    /// Whether the run is interactive (drives the clarify loop).
+    /// Advisory: whether the surrounding run is interactive. The native
+    /// provider itself always auto-accepts clarify recommendations (it holds no
+    /// streams); interactive clarification is the dedicated `clarify` step.
+    /// Retained so callers can pass through their run mode for future use.
     pub interactive: bool,
     /// The pre-scaffolded feature directory (relative to `working_dir`).
     pub feature_dir: &'a Path,
@@ -148,13 +151,11 @@ impl NativeSpecProvider {
         let clarify_md = if questions.is_empty() {
             "# Clarification Q&A\n\n(No clarifying questions were raised.)\n".to_owned()
         } else {
-            let answers =
-                clarify::run_clarify_loop(&questions, req.interactive).map_err(|source| {
-                    SpecifyError::Io {
-                        path: PathBuf::from("<stdin>"),
-                        source,
-                    }
-                })?;
+            // The native provider runs headless (it holds no input/output
+            // streams), so it auto-accepts each recommendation. Interactive
+            // clarification is the dedicated `clarify` step in `derrick-flow`,
+            // which owns the real stdin/stderr.
+            let answers = clarify::auto_accept_recommendations(&questions);
             clarify::render_clarify_markdown(&questions, &answers)
         };
         self.write(req, "clarify.md", &clarify_md)?;
@@ -195,22 +196,29 @@ impl NativeSpecProvider {
     ) -> Result<NativeOutcome, SpecifyError> {
         let mut outcome = NativeOutcome::default();
         let spec_md = self.read(req, "spec.md")?;
-        let spec_meta = parse_spec_meta(&spec_md);
+        // Requirement ids drive the plan's `covers` check, so they MUST come
+        // from a canonical, successfully-parsed spec. A missing/malformed spec
+        // front-matter is a hard error here rather than a silent empty set (an
+        // empty set would disable the covers check entirely).
+        let spec_meta = parse_spec_meta(&spec_md).ok_or_else(|| SpecifyError::Validation {
+            phase: "plan",
+            summary: "spec.md front-matter is missing or malformed; cannot derive requirement ids \
+                      for the plan covers-check"
+                .to_owned(),
+        })?;
         let requirement_ids: Vec<String> = spec_meta
-            .as_ref()
-            .map(|m| m.requirements.iter().map(|r| r.id.clone()).collect())
-            .unwrap_or_default();
-        let indexed_paths: Vec<String> = spec_meta
-            .as_ref()
-            .map(|m| {
-                m.grounding
-                    .symbols
-                    .iter()
-                    .map(String::as_str)
-                    .filter_map(path_of_symbol)
-                    .collect()
-            })
-            .unwrap_or_default();
+            .requirements
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        // `touches` is cross-checked only against a FULL index path set. The
+        // spec's `grounding.symbols` is a capped, query-scoped subset of the
+        // index, so checking against it would spuriously warn on valid paths the
+        // grounding pass simply did not surface. The Survey API exposes no
+        // "list every indexed path" query, so rather than warn against a
+        // known-partial set we pass an empty slice, which `validate_plan` treats
+        // as "skip the touches cross-check". (Documented decision per review.)
+        let indexed_paths: Vec<String> = Vec::new();
 
         // Caveman the spec body into the plan's handoff context (never the
         // on-disk spec.md). The compressed prefix is the stable part across the
@@ -419,13 +427,6 @@ fn parse_spec_meta(spec_md: &str) -> Option<SpecMeta> {
     serde_yaml::from_str(yaml?).ok()
 }
 
-/// Extracts the leading `path` from a `path:line identifier …` grounding line.
-fn path_of_symbol(symbol: &str) -> Option<String> {
-    symbol
-        .split_once(':')
-        .map(|(path, _)| path.trim().to_owned())
-}
-
 /// Injects derrick's authoritative `grounding:` front-matter into a spec.
 ///
 /// If the model's draft already carries front-matter, the `grounding:` key is
@@ -589,13 +590,5 @@ mod tests {
         let merged = inject_grounding(model_draft, &truth);
         assert!(merged.contains("real_symbol"));
         assert!(!merged.contains("invented"));
-    }
-
-    #[test]
-    fn path_of_symbol_extracts_leading_path() {
-        assert_eq!(
-            path_of_symbol("src/lib.rs:10 export").as_deref(),
-            Some("src/lib.rs")
-        );
     }
 }

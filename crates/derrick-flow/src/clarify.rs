@@ -13,7 +13,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use derrick_tools::{HostRegistry, HostRequest};
-use owo_colors::OwoColorize;
 
 use derrick_assay::io::{relative_to_root, write_log};
 use derrick_assay::types::{RunError, StepExecution};
@@ -63,10 +62,10 @@ pub async fn execute_clarify(
     })?;
 
     let spec_lines = spec.lines().count();
-    eprintln!(
-        "  {} Specification loaded for review ({} lines)",
-        "\u{2713}".green(),
-        spec_lines
+    tracing::info!(
+        target: "derrick_flow::clarify",
+        lines = spec_lines,
+        "specification loaded for review"
     );
 
     let spec_rel = feature_dir.join("spec.md");
@@ -91,13 +90,23 @@ pub async fn execute_clarify(
 
     let questions = parse_clarify_questions(&response.stdout);
     if questions.is_empty() {
-        eprintln!("No clarifying questions needed. Proceeding.");
+        tracing::info!(
+            target: "derrick_flow::clarify",
+            "no clarifying questions needed; proceeding"
+        );
         return Ok(StepExecution::success(Vec::new()).with_tokens(tokens_in, tokens_out));
     }
 
     // Interactive: read each answer from stdin (Enter accepts the
-    // recommendation). The loop core is shared with the native provider.
-    let answers = run_clarify_loop(&questions, true).map_err(|source| RunError::Io {
+    // recommendation). The loop core is shared with the native provider; this
+    // CLI-facing caller injects the real stdin/stderr so the library crate
+    // stays free of direct stream access.
+    let answers = run_clarify_loop(
+        &questions,
+        std::io::stdin().lock(),
+        std::io::stderr().lock(),
+    )
+    .map_err(|source| RunError::Io {
         path: std::path::PathBuf::from("<stdin>"),
         source,
     })?;
@@ -109,7 +118,10 @@ pub async fn execute_clarify(
         source,
     })?;
 
-    eprintln!("\nClarification complete. Answers saved.");
+    tracing::info!(
+        target: "derrick_flow::clarify",
+        "clarification complete; answers saved"
+    );
     Ok(
         StepExecution::success(vec![relative_to_root(repo_root, clarify_path)?])
             .with_tokens(tokens_in, tokens_out),
