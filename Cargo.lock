@@ -691,6 +691,7 @@ dependencies = [
  "derrick-models",
  "derrick-observe",
  "derrick-scrub",
+ "derrick-specify",
  "derrick-stack",
  "derrick-substrate",
  "derrick-substrate-native",

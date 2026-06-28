@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use derrick_config::{Config, Host, ModelDef, Runner, StackBackendKind, SubstrateBackendKind};
+use derrick_config::{
+    Config, Host, ModelDef, Runner, SpecProviderKind, StackBackendKind, SubstrateBackendKind,
+};
 use derrick_substrate_native::NativeSubstrate;
 use serde_json::Value;
 use serde_json::json;
@@ -103,6 +105,8 @@ async fn add_config_driven_checks(repo_root: &Path, config: &Config, checks: &mu
         )),
     }
 
+    add_spec_provider_checks(repo_root, config, checks);
+
     checks.push(claude_hook_check(repo_root));
     checks.push(codex_instructions_check(repo_root));
 
@@ -126,6 +130,148 @@ async fn add_config_driven_checks(repo_root: &Path, config: &Config, checks: &mu
             "tools.copilot.enabled is true; derrick cannot confirm the repo has the Copilot coding agent enabled without an API call",
             "verify Copilot is reachable on this repo via the GitHub UI (Settings → Copilot → Coding agent) before running `derrick foreman start`",
         ));
+    }
+}
+
+/// Reports the active spec provider and runs provider-scoped health checks
+/// (DESIGN.md §5.3 / Phase 4).
+///
+/// * Always emits a `spec provider` line mirroring the substrate/stack lines.
+/// * The speckit-on-PATH check only runs when `provider == Speckit` *or* a
+///   pipeline step explicitly pins a `/speckit.*` command. Under `native`/
+///   `import`, speckit absence is never a failure.
+/// * `native` verifies the native generator's own drafter/proposer role tiers
+///   resolve to a model (bare spec steps carry no role).
+/// * `import` validates `tools.specify.import.source`.
+fn add_spec_provider_checks(repo_root: &Path, config: &Config, checks: &mut Vec<Check>) {
+    let provider = config.tools().specify().provider();
+    let provider_label = match provider {
+        SpecProviderKind::Speckit => "speckit",
+        SpecProviderKind::Native => "native",
+        SpecProviderKind::Import => "import",
+    };
+    checks.push(Check::pass(
+        "spec provider",
+        format!("tools.specify.provider = {provider_label}"),
+    ));
+
+    // A pipeline step that explicitly pins a `/speckit.*` command still needs
+    // speckit regardless of the provider (the explicit path bypasses the seam).
+    let pins_speckit_command = config.pipeline().iter().any(|step| {
+        step.command()
+            .is_some_and(|command| command.contains("/speckit."))
+    });
+
+    if provider == SpecProviderKind::Speckit || pins_speckit_command {
+        checks.push(speckit_path_check(config));
+    } else {
+        checks.push(Check::pass(
+            "speckit",
+            format!(
+                "speckit PATH check skipped — provider is {provider_label} and no step pins a /speckit.* command"
+            ),
+        ));
+    }
+
+    match provider {
+        SpecProviderKind::Native => add_native_spec_checks(config, checks),
+        SpecProviderKind::Import => add_import_spec_checks(repo_root, config, checks),
+        SpecProviderKind::Speckit => {}
+    }
+}
+
+/// Checks that the speckit CLI (`specify` or `speckit`) is on PATH. Mirrors
+/// `binary_check` but accepts either binary name (init installs `specify-cli`,
+/// which provides the `specify` binary).
+fn speckit_path_check(config: &Config) -> Check {
+    let bins = ["specify", "speckit"];
+    if let Some(path) = bins.iter().find_map(|bin| which::which(bin).ok()) {
+        return Check::pass("speckit", format!("found {}", path.display()));
+    }
+    let version = config.tools().speckit().version();
+    // A warning, not a failure: the rest of the install can be healthy, and the
+    // user may install speckit at any time (or switch to native/import). This
+    // matches how doctor treats other recoverable, environment-dependent checks.
+    Check::warn(
+        "speckit",
+        format!("speckit CLI not found on PATH (expected version {version})"),
+        "install speckit with `uv tool install specify-cli`, or set \
+         tools.specify.provider to `native`/`import` if you do not use speckit",
+    )
+}
+
+/// `native` provider: verify the native generator's own role tiers resolve to a
+/// model so it has a model to invoke. The native generator resolves its fixed
+/// `drafter`/`proposer` roles against `config.roles()`; it never reads the
+/// pipeline step's `role:` (bare spec steps carry no role), so checking the
+/// steps' roles would be a vacuous pass. We check the generator's actual roles
+/// instead, via the shared `derrick_specify::NATIVE_SPEC_ROLES`.
+fn add_native_spec_checks(config: &Config, checks: &mut Vec<Check>) {
+    let mut unresolved: Vec<String> = Vec::new();
+    for role in derrick_specify::NATIVE_SPEC_ROLES {
+        let resolves = config
+            .roles()
+            .get(role)
+            .and_then(|model_name| config.models().get(model_name))
+            .is_some();
+        if !resolves {
+            unresolved.push(role.to_owned());
+        }
+    }
+
+    if unresolved.is_empty() {
+        checks.push(Check::pass(
+            "native spec roles",
+            "native generator roles (drafter, proposer) resolve to a configured model",
+        ));
+    } else {
+        checks.push(Check::warn(
+            "native spec roles",
+            format!(
+                "native spec provider: role(s) {} do not resolve to a configured model",
+                unresolved.join(", ")
+            ),
+            "bind these roles under `roles:` to a model defined in `models:`, \
+             or run `derrick models check`",
+        ));
+    }
+}
+
+/// `import` provider: validate `tools.specify.import.source`. An unset source
+/// is a note (it can be supplied via `--spec`); a set plain file path that does
+/// not exist is a warning.
+fn add_import_spec_checks(repo_root: &Path, config: &Config, checks: &mut Vec<Check>) {
+    match config.tools().specify().import().source() {
+        None => checks.push(Check::warn(
+            "import source",
+            "tools.specify.import.source is unset",
+            "set tools.specify.import.source, or pass `--spec <path>` on each run",
+        )),
+        Some(source) => {
+            // Validate exactly what `derrick drill` accepts, using the shared
+            // resolver from `derrick-flow` (a local file path, or a `file:` /
+            // `file:///abs` URL; remote schemes and `file://authority` are
+            // rejected). Resolution is lexical, so we additionally require the
+            // resolved path to be an existing regular file.
+            match derrick_flow::resolve_file_source(source, repo_root) {
+                Ok(path) if path.is_file() => checks.push(Check::pass(
+                    "import source",
+                    format!("import source {source:?} resolves to {}", path.display()),
+                )),
+                Ok(_) => checks.push(Check::warn(
+                    "import source",
+                    format!("import source {source:?} does not exist or is not a file"),
+                    "create the spec file, fix tools.specify.import.source, \
+                     or pass `--spec <path>` on each run",
+                )),
+                Err(error) => checks.push(Check::warn(
+                    "import source",
+                    format!("import source {source:?} is not usable: {error}"),
+                    "use a local file path or file:///absolute/path; \
+                     remote sources are not supported in v1",
+                )),
+            }
+        }
     }
 }
 
@@ -611,5 +757,280 @@ impl Check {
             message: check.message,
             remediation,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEMPLATE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../templates/derrick.yaml.in"
+    ));
+
+    /// Builds a valid config from the bundled template, applies the spec-provider
+    /// rewrite for `provider` (so native/import bare the steps exactly as
+    /// `derrick init` would), then writes/loads it from a tempdir whose root is
+    /// returned for the import-source existence check.
+    fn config_for(
+        provider: crate::commands::spec_provider_init::SpecProviderChoice,
+    ) -> (tempfile::TempDir, Config) {
+        let rendered = derrick_config::render_init_template(
+            TEMPLATE,
+            derrick_config::InitTemplateVars {
+                site_name: "t",
+                prefix: "tst",
+                mode: "solo",
+            },
+        );
+        let yaml = crate::commands::spec_provider_init::apply_spec_provider(&rendered, provider)
+            .expect("spec provider rewrite");
+        write_and_load(yaml)
+    }
+
+    fn write_and_load(yaml: String) -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("derrick.yaml");
+        std::fs::write(&path, yaml).expect("write");
+        let config = Config::load_from_path(&path).expect("config loads");
+        (dir, config)
+    }
+
+    /// Loads the import-provider config and overrides `import.source` to `source`
+    /// (the wizard leaves it as a comment, so tests inject one explicitly).
+    fn import_config_with_source(source: Option<&str>) -> (tempfile::TempDir, Config) {
+        let rendered = derrick_config::render_init_template(
+            TEMPLATE,
+            derrick_config::InitTemplateVars {
+                site_name: "t",
+                prefix: "tst",
+                mode: "solo",
+            },
+        );
+        let yaml = crate::commands::spec_provider_init::apply_spec_provider(
+            &rendered,
+            crate::commands::spec_provider_init::SpecProviderChoice::Import,
+        )
+        .expect("spec provider rewrite");
+        // Inject a concrete source under the emitted `import:` block when asked.
+        let yaml = match source {
+            Some(source) => {
+                let mut value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse");
+                let import = value
+                    .get_mut("tools")
+                    .and_then(|t| t.get_mut("specify"))
+                    .and_then(|s| s.get_mut("import"))
+                    .and_then(serde_yaml::Value::as_mapping_mut)
+                    .expect("import mapping");
+                import.insert(
+                    serde_yaml::Value::String("source".to_owned()),
+                    serde_yaml::Value::String(source.to_owned()),
+                );
+                serde_yaml::to_string(&value).expect("serialize")
+            }
+            None => yaml,
+        };
+        write_and_load(yaml)
+    }
+
+    fn find<'a>(checks: &'a [Check], name: &str) -> &'a Check {
+        checks
+            .iter()
+            .find(|check| check.name == name)
+            .unwrap_or_else(|| panic!("no `{name}` check; have {:?}", names(checks)))
+    }
+
+    fn names(checks: &[Check]) -> Vec<&str> {
+        checks.iter().map(|check| check.name.as_str()).collect()
+    }
+
+    use crate::commands::spec_provider_init::SpecProviderChoice;
+
+    #[test]
+    fn provider_line_renders_for_speckit() {
+        let (dir, config) = config_for(SpecProviderChoice::Speckit);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert!(find(&checks, "spec provider").message.contains("speckit"));
+    }
+
+    #[test]
+    fn provider_line_renders_for_native() {
+        let (dir, config) = config_for(SpecProviderChoice::Native);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert!(find(&checks, "spec provider").message.contains("native"));
+    }
+
+    #[test]
+    fn provider_line_renders_for_import() {
+        let (dir, config) = config_for(SpecProviderChoice::Import);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert!(find(&checks, "spec provider").message.contains("import"));
+    }
+
+    #[test]
+    fn speckit_check_runs_for_speckit_provider() {
+        // The default template keeps explicit /speckit.* steps, so the PATH
+        // check must run (pass or fail by host) — never "skipped".
+        let (dir, config) = config_for(SpecProviderChoice::Speckit);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert!(!find(&checks, "speckit").message.contains("skipped"));
+    }
+
+    /// Drops any pipeline step that still pins a `/speckit.*` command (e.g. the
+    /// template's `analyze` skill, which is outside the seam). A genuinely
+    /// speckit-free native/import project would not keep these steps; removing
+    /// them here exercises the "no step pins speckit" branch.
+    fn strip_speckit_pinned_steps(yaml: &str) -> String {
+        let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("parse");
+        if let Some(steps) = value
+            .get_mut("pipeline")
+            .and_then(serde_yaml::Value::as_sequence_mut)
+        {
+            steps.retain(|step| {
+                step.get("command")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_none_or(|command| !command.contains("/speckit."))
+            });
+        }
+        serde_yaml::to_string(&value).expect("serialize")
+    }
+
+    /// Renders + rewrites for `provider`, then strips any remaining
+    /// `/speckit.*`-pinned step, producing a genuinely speckit-free config.
+    fn speckit_free_config(provider: SpecProviderChoice) -> (tempfile::TempDir, Config) {
+        let rendered = derrick_config::render_init_template(
+            TEMPLATE,
+            derrick_config::InitTemplateVars {
+                site_name: "t",
+                prefix: "tst",
+                mode: "solo",
+            },
+        );
+        let yaml = crate::commands::spec_provider_init::apply_spec_provider(&rendered, provider)
+            .expect("rewrite");
+        write_and_load(strip_speckit_pinned_steps(&yaml))
+    }
+
+    #[test]
+    fn speckit_check_skipped_for_native_without_pinned_command() {
+        let (dir, config) = speckit_free_config(SpecProviderChoice::Native);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        // Whatever the host environment, the speckit check must not be a failure.
+        assert_ne!(find(&checks, "speckit").status, CheckStatus::Fail);
+        assert!(find(&checks, "speckit").message.contains("skipped"));
+    }
+
+    #[test]
+    fn speckit_check_skipped_for_import_without_pinned_command() {
+        let (dir, config) = speckit_free_config(SpecProviderChoice::Import);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert_ne!(find(&checks, "speckit").status, CheckStatus::Fail);
+        assert!(find(&checks, "speckit").message.contains("skipped"));
+    }
+
+    #[test]
+    fn speckit_check_runs_for_native_when_analyze_step_pins_speckit() {
+        // The default template keeps an `analyze` step pinned to /speckit.analyze
+        // even under native; that explicit step legitimately still needs speckit,
+        // so the PATH check runs (not skipped).
+        let (dir, config) = config_for(SpecProviderChoice::Native);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert!(!find(&checks, "speckit").message.contains("skipped"));
+    }
+
+    #[test]
+    fn speckit_check_runs_when_step_pins_speckit_command_under_native() {
+        // A native provider but a step still explicitly pins a /speckit.*
+        // command: the speckit PATH check must run (not be skipped). Start from
+        // the native rewrite, then add an explicit speckit command back to one
+        // step.
+        let rendered = derrick_config::render_init_template(
+            TEMPLATE,
+            derrick_config::InitTemplateVars {
+                site_name: "t",
+                prefix: "tst",
+                mode: "solo",
+            },
+        );
+        let yaml = crate::commands::spec_provider_init::apply_spec_provider(
+            &rendered,
+            SpecProviderChoice::Native,
+        )
+        .expect("rewrite");
+        let mut value: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("parse");
+        let steps = value
+            .get_mut("pipeline")
+            .and_then(serde_yaml::Value::as_sequence_mut)
+            .expect("pipeline");
+        for step in steps.iter_mut() {
+            if step.get("id").and_then(serde_yaml::Value::as_str) == Some("tasks") {
+                let map = step.as_mapping_mut().expect("step mapping");
+                // An explicit speckit-pinned step is a normal (non-bare) step:
+                // it carries a role plus host/command, exactly like the
+                // template's speckit steps. Restore the role so the rewritten
+                // step is valid (a bare step has no role/host/command).
+                map.insert(
+                    serde_yaml::Value::String("role".to_owned()),
+                    serde_yaml::Value::String("drafter".to_owned()),
+                );
+                map.insert(
+                    serde_yaml::Value::String("host".to_owned()),
+                    serde_yaml::Value::String("claude".to_owned()),
+                );
+                map.insert(
+                    serde_yaml::Value::String("command".to_owned()),
+                    serde_yaml::Value::String("/speckit.tasks".to_owned()),
+                );
+            }
+        }
+        let (dir, config) = write_and_load(serde_yaml::to_string(&value).expect("serialize"));
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert!(!find(&checks, "speckit").message.contains("skipped"));
+    }
+
+    #[test]
+    fn native_spec_roles_pass_when_resolvable() {
+        let (dir, config) = config_for(SpecProviderChoice::Native);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert_eq!(find(&checks, "native spec roles").status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn import_missing_source_file_warns() {
+        let (dir, config) = import_config_with_source(Some("does-not-exist.md"));
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        let check = find(&checks, "import source");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("does not exist"));
+    }
+
+    #[test]
+    fn import_existing_source_file_passes() {
+        let (dir, config) = import_config_with_source(Some("spec.md"));
+        std::fs::write(dir.path().join("spec.md"), "# spec").expect("write spec");
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert_eq!(find(&checks, "import source").status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn import_unset_source_warns_with_spec_hint() {
+        let (dir, config) = import_config_with_source(None);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        let check = find(&checks, "import source");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("unset"));
     }
 }

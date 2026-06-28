@@ -233,7 +233,7 @@ derrick gain
 
 ## Architecture
 
-21 crates, one binary:
+22 crates, one binary:
 
 | Crate | Role |
 |---|---|
@@ -241,6 +241,7 @@ derrick gain
 | `derrick-survey` | Native code-graph index: SQLite + FTS5 symbol/reference/call-graph at `.derrick/index.db`, queried by agents over MCP; CLI `survey build/search/context/impact/status` |
 | `derrick-survey-hub` | Multi-repo survey hub: serves N indexes over one streamable-HTTP MCP endpoint with per-call workspace routing, scoped bearer-token auth, and Local/Pushed sourcing; CLI `survey hub` (D80–D84) |
 | `derrick-flow` | Pipeline executor, state machine |
+| `derrick-specify` | Native spec provider: survey-grounded, clarify-first, schema-validated spec→plan→tasks generation; one of three `tools.specify.provider` options (D85) |
 | `derrick-assay` | Multi-reviewer adversarial assay + shared pipeline types (RunError, StepExecution, io helpers) |
 | `derrick-config` | Typed schema, layered loader, 14 validation rules |
 | `derrick-scrub` | CLI noise filter — rules for git, gh, claude, codex, copilot, cargo; records bytes_raw/bytes_saved per step |
@@ -311,12 +312,13 @@ You can override any role binding in `roles`, and pin a role's model to a concre
 
 ## Status
 
-**Active development.** Architecture and 84 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 85 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
 - ✅ `derrick drill` — positional-prompt shorthand; `run drill` for scripts
 - ✅ Full pipeline executor with multi-reviewer assay and `parallel_group` steps
+- ✅ Pluggable spec providers — `tools.specify.provider`: `speckit` (default) / `native` (survey-grounded, clarify-first, schema-validated in-process generation) / `import` (bring-your-own spec via `--spec` or `derrick spec import`); back-compatible, speckit stays default (D85). See [docs/spec-providers.md](./docs/spec-providers.md)
 - ✅ Foreman dispatch loop (attached and detached daemon)
 - ✅ Ticket state machine (ready → in-flight → in-review → done / blocked / rejected)
 - ✅ `derrick ticket code-review` — adversarial pre-PR code review with auto-remediation loop
@@ -351,7 +353,7 @@ What's landed and tested:
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 - 🔜 Homebrew tap (v1.1)
 
-903+ tests passing across 21 crates.
+903+ tests passing across 22 crates.
 
 ## Coverage
 
@@ -367,7 +369,8 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 84 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 85 decisions
+- [docs/spec-providers.md](./docs/spec-providers.md) — spec providers: speckit / native / import, config, and the `derrick spec import` + `--spec` flow (D85)
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 - [docs/survey.md](./docs/survey.md) — derrick survey deep-dive: how it works, setup, CLI reference, MCP tools, token accounting

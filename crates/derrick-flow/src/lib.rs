@@ -13,7 +13,7 @@ pub use code_review::{CodeReviewOutcome, run_code_review};
 pub use derrick_assay::types::{
     PipelineInput, RunError, RunOutcome, RunStatus, StepRecord, StepStatus,
 };
-pub use import::{ImportSpecifyOutcome, ImportSpecifyRequest, import_specify};
+pub use import::{ImportSpecifyOutcome, ImportSpecifyRequest, import_specify, resolve_file_source};
 pub use manifest::compute_prompt_key;
 pub use progress::{NoopReporter, ProgressReporter, RunProgress, StepProgress};
 pub use runner::Runner;

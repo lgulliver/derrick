@@ -33,9 +33,14 @@ use crate::schema::{Finding, SpecMeta, has_reject};
 /// resolve to a known CLI host. Matches the clarify step's hardcoded host.
 const DEFAULT_HOST: &str = "claude";
 /// Role bound to the spec/tasks drafting tier.
-const DRAFTER_ROLE: &str = "drafter";
+pub const DRAFTER_ROLE: &str = "drafter";
 /// Role bound to the planning tier.
-const PROPOSER_ROLE: &str = "proposer";
+pub const PROPOSER_ROLE: &str = "proposer";
+
+/// The conventional role tiers the native spec generator resolves against
+/// `config.roles()` (the pipeline step's own `role:` is not consulted — bare
+/// spec steps carry no role). `derrick doctor` checks these resolve to a model.
+pub const NATIVE_SPEC_ROLES: [&str; 2] = [DRAFTER_ROLE, PROPOSER_ROLE];
 
 /// Errors raised by the native spec provider.
 #[derive(Debug, thiserror::Error)]

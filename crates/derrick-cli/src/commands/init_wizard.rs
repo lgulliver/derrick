@@ -10,6 +10,7 @@ use crate::commands::init::{
     AiPlan, ModelSpec, RoleBindings, available_model_ids, recommended_role_bindings,
     validate_prefix,
 };
+use crate::commands::spec_provider_init::SpecProviderChoice;
 
 // ─── terminal style ──────────────────────────────────────────────────────────
 //
@@ -78,6 +79,7 @@ pub(crate) struct WizardOutput {
     pub(crate) prefix: String,
     pub(crate) mode: crate::commands::InitMode,
     pub(crate) ai_plan: AiPlan,
+    pub(crate) spec_provider: SpecProviderChoice,
     pub(crate) constitution: ConstitutionMode,
     pub(crate) append_agents_md: bool,
     pub(crate) no_hooks: bool,
@@ -271,6 +273,23 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         validate_role_models(roles, &available_model_ids)?;
     }
 
+    // How should derrick produce specs? Speckit is the default & recommended
+    // path and leaves the generated config untouched; native and import switch
+    // `tools.specify.provider` and route the bare spec steps through the seam.
+    let spec_provider = match ask!(ask_select(
+        "How should derrick produce specs?",
+        &[
+            "speckit   delegate to the speckit host CLI (default & recommended)",
+            "native    derrick-native spec generation",
+            "import    bring your own externally-authored spec",
+        ],
+        0,
+    )) {
+        0 => SpecProviderChoice::Speckit,
+        1 => SpecProviderChoice::Native,
+        _ => SpecProviderChoice::Import,
+    };
+
     let constitution = if greenfield {
         ConstitutionMode::Reference
     } else {
@@ -350,6 +369,7 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         prefix,
         mode,
         ai_plan,
+        spec_provider,
         constitution,
         append_agents_md,
         no_hooks,
@@ -442,6 +462,7 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
         prefix,
         mode,
         ai_plan,
+        spec_provider,
         constitution,
         append_agents_md,
         no_hooks,
@@ -483,6 +504,7 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
     println!("{}", kv("Prefix", prefix));
     println!("{}", kv("Mode", mode.as_str()));
     println!("{}", kv("AI config", &ai_plan.label()));
+    println!("{}", kv("Spec provider", spec_provider.label()));
     if !greenfield {
         println!("{}", kv("Constitution", constitution_label(*constitution)));
         println!(
