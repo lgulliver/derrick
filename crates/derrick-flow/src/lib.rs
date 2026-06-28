@@ -2,6 +2,7 @@
 
 mod clarify;
 mod code_review;
+pub mod import;
 mod manifest;
 mod progress;
 mod runner;
@@ -12,6 +13,7 @@ pub use code_review::{CodeReviewOutcome, run_code_review};
 pub use derrick_assay::types::{
     PipelineInput, RunError, RunOutcome, RunStatus, StepRecord, StepStatus,
 };
+pub use import::{ImportSpecifyOutcome, ImportSpecifyRequest, import_specify};
 pub use manifest::compute_prompt_key;
 pub use progress::{NoopReporter, ProgressReporter, RunProgress, StepProgress};
 pub use runner::Runner;
@@ -2512,15 +2514,40 @@ state:
         async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
             let prompt = request.prompt.clone();
             self.prompts.lock().expect("lock").push(prompt.clone());
+            // The speckit downstream path writes artifacts to disk host-side
+            // (the slash command resolves the feature dir via feature.json),
+            // exactly like the RecordingHost. Mirror that so import's
+            // `plan/tasks: speckit` mode is exercised end-to-end.
+            let speckit_feature = |request: &HostRequest| -> Option<std::path::PathBuf> {
+                let json = std::fs::read_to_string(request.cwd.join(FEATURE_JSON)).ok()?;
+                let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+                let dir = value.get("feature_directory")?.as_str()?;
+                Some(request.cwd.join(dir))
+            };
             let stdout = if prompt.contains("clarify a feature request BEFORE") {
                 "Q: Which format?\nOptions: JSON, YAML\nRecommendation: JSON\n".to_owned()
-            } else if prompt.contains("Write a specification") {
+            } else if prompt.contains("Write a specification")
+                || prompt.contains("Normalize an existing product document")
+            {
                 "---\nschema: derrick.spec/v1\nslug: thing\nintent: do the thing\nrequirements:\n  - id: R1\n    must: it works\nacceptance:\n  - id: A1\n    check: verified\nnon_goals: []\nopen_questions: []\n---\n# Thing\n\n## Context\nx\n\n## Requirements\nR1\n\n## Acceptance Criteria\nA1\n\n## Out of Scope\nnone\n".to_owned()
             } else if prompt.contains("implementation plan") {
                 "---\nschema: derrick.plan/v1\ncovers: [R1]\ntouches: []\n---\n# Plan\nsteps\n"
                     .to_owned()
             } else if prompt.contains("Break this plan into tickets") {
                 "## Ticket one\nImplements R1.\n".to_owned()
+            } else if prompt.contains("/speckit.plan") {
+                if let Some(feature) = speckit_feature(&request) {
+                    let _ = std::fs::write(feature.join("plan.md"), "speckit plan\n");
+                }
+                "ok\n".to_owned()
+            } else if prompt.contains("/speckit.tasks") {
+                if let Some(feature) = speckit_feature(&request) {
+                    let _ = std::fs::write(
+                        feature.join("tasks.md"),
+                        "## Speckit ticket\nImplements R1.\n",
+                    );
+                }
+                "ok\n".to_owned()
             } else {
                 String::new()
             };
@@ -2604,15 +2631,213 @@ state:
         Ok(())
     }
 
-    #[tokio::test]
-    async fn bare_step_with_import_provider_returns_not_yet_available() -> TestResult {
-        let (dir, config, substrate, hosts, _prompts) =
-            harness(bare_drill_pipeline(), "  specify:\n    provider: import\n").await?;
-        let run_dir = dir.path().join(".derrick/runs/import-run");
-        std::fs::create_dir_all(&run_dir)?;
-        let mut state =
-            ExecutionState::new("do the thing".to_owned(), "import-run".to_owned(), run_dir);
+    /// A host registry backed by the universal [`NativeStubHost`], which serves
+    /// the native/import normalize prompts AND the speckit downstream commands.
+    fn stub_hosts(prompts: &Arc<StdMutex<Vec<String>>>) -> Arc<HostRegistry> {
+        let mut hosts = HostRegistry::empty();
+        hosts.register(
+            "claude",
+            Box::new(NativeStubHost {
+                prompts: prompts.clone(),
+            }),
+        );
+        Arc::new(hosts)
+    }
 
+    /// A valid `derrick.spec/v1` document used for passthrough import tests.
+    /// Neutral placeholder content only (no forbidden vocabulary).
+    const VALID_IMPORT_SPEC: &str = "---\nschema: derrick.spec/v1\nslug: widget-export\nintent: Export widgets.\nrequirements:\n  - id: R1\n    must: export widgets as JSON\nacceptance:\n  - id: A1\n    check: a JSON file is produced\nnon_goals: []\nopen_questions: []\n---\n# Widget Export\n\n## Context\nWe need exports.\n\n## Requirements\n- R1\n\n## Acceptance Criteria\n- A1\n\n## Out of Scope\nNothing.\n";
+
+    #[tokio::test]
+    async fn import_passthrough_of_schema_valid_source() -> TestResult {
+        // A PRD that already matches the schema must be written through verbatim
+        // (with a provenance note) — NO model call.
+        let block = "  specify:\n    provider: import\n    import:\n      source: docs/PRD.md\n";
+        let (dir, config, substrate, _hosts, _p) = harness(bare_drill_pipeline(), block).await?;
+        std::fs::create_dir_all(dir.path().join("docs"))?;
+        std::fs::write(dir.path().join("docs/PRD.md"), VALID_IMPORT_SPEC)?;
+
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let hosts = stub_hosts(&prompts);
+        let run_dir = dir.path().join(".derrick/runs/r");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state = ExecutionState::new("do the thing".to_owned(), "r".to_owned(), run_dir);
+
+        let status = run_step(
+            &config,
+            substrate.as_ref(),
+            hosts.clone(),
+            dir.path(),
+            &mut state,
+            "specify",
+        )
+        .await?;
+        assert_eq!(status, StepStatus::Success, "import specify should succeed");
+        assert!(
+            prompts.lock().expect("lock").is_empty(),
+            "passthrough must not call the model, got: {:?}",
+            prompts.lock().expect("lock")
+        );
+        let feature_dir = state.feature_dir.clone().expect("feature_dir set");
+        let spec_md = std::fs::read_to_string(dir.path().join(&feature_dir).join("spec.md"))?;
+        assert!(
+            spec_md.contains("imported verbatim"),
+            "provenance note present"
+        );
+        assert!(!derrick_specify::schema::has_reject(
+            &derrick_specify::schema::validate_spec(&spec_md)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_normalizes_free_form_source() -> TestResult {
+        // A free-form PRD is normalized via one model call into a valid spec.
+        let block =
+            "  specify:\n    provider: import\n    import:\n      source: docs/freeform.txt\n";
+        let (dir, config, substrate, _hosts, _p) = harness(bare_drill_pipeline(), block).await?;
+        std::fs::create_dir_all(dir.path().join("docs"))?;
+        std::fs::write(
+            dir.path().join("docs/freeform.txt"),
+            "We want a thing that exports stuff. It should produce a file.\n",
+        )?;
+
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let hosts = stub_hosts(&prompts);
+        let run_dir = dir.path().join(".derrick/runs/r");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state = ExecutionState::new("do the thing".to_owned(), "r".to_owned(), run_dir);
+
+        let status = run_step(
+            &config,
+            substrate.as_ref(),
+            hosts.clone(),
+            dir.path(),
+            &mut state,
+            "specify",
+        )
+        .await?;
+        assert_eq!(status, StepStatus::Success);
+        assert!(
+            prompts
+                .lock()
+                .expect("lock")
+                .iter()
+                .any(|p| p.contains("Normalize an existing product document")),
+            "free-form source must trigger the normalization model call"
+        );
+        let feature_dir = state.feature_dir.clone().expect("feature_dir set");
+        let spec_md = std::fs::read_to_string(dir.path().join(&feature_dir).join("spec.md"))?;
+        assert!(!derrick_specify::schema::has_reject(
+            &derrick_specify::schema::validate_spec(&spec_md)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_then_native_plan_and_tasks() -> TestResult {
+        // import.plan = native (the default), import.tasks = native: after the
+        // import, the native planner/tasker run and produce valid artifacts.
+        let block = "  specify:\n    provider: import\n    import:\n      source: docs/PRD.md\n      plan: native\n      tasks: native\n";
+        let (dir, config, substrate, _hosts, _p) = harness(bare_drill_pipeline(), block).await?;
+        std::fs::create_dir_all(dir.path().join("docs"))?;
+        std::fs::write(dir.path().join("docs/PRD.md"), VALID_IMPORT_SPEC)?;
+
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let hosts = stub_hosts(&prompts);
+        let run_dir = dir.path().join(".derrick/runs/r");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state = ExecutionState::new("do the thing".to_owned(), "r".to_owned(), run_dir);
+
+        for id in ["specify", "plan", "tasks"] {
+            let status = run_step(
+                &config,
+                substrate.as_ref(),
+                hosts.clone(),
+                dir.path(),
+                &mut state,
+                id,
+            )
+            .await?;
+            assert_eq!(status, StepStatus::Success, "import {id} should succeed");
+        }
+        let feature_dir = state.feature_dir.clone().expect("feature_dir set");
+        let plan_md = std::fs::read_to_string(dir.path().join(&feature_dir).join("plan.md"))?;
+        let tasks_md = std::fs::read_to_string(dir.path().join(&feature_dir).join("tasks.md"))?;
+        assert!(!derrick_specify::schema::has_reject(
+            &derrick_specify::schema::validate_plan(&plan_md, &["R1".to_owned()], &[])
+        ));
+        assert!(!derrick_specify::schema::has_reject(
+            &derrick_specify::schema::validate_tasks(&tasks_md)
+        ));
+        // Native plan, not speckit, ran (the model saw the native plan prompt).
+        assert!(
+            prompts
+                .lock()
+                .expect("lock")
+                .iter()
+                .any(|p| p.contains("implementation plan")),
+            "native planner should have been invoked"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_with_native_spec_and_speckit_tasks_routes_correctly() -> TestResult {
+        // Mixed: import spec + native plan + speckit tasks. Each phase routes to
+        // the right path and produces a valid artifact.
+        let block = "  specify:\n    provider: import\n    import:\n      source: docs/PRD.md\n      plan: native\n      tasks: speckit\n";
+        let (dir, config, substrate, _hosts, _p) = harness(bare_drill_pipeline(), block).await?;
+        std::fs::create_dir_all(dir.path().join("docs"))?;
+        std::fs::write(dir.path().join("docs/PRD.md"), VALID_IMPORT_SPEC)?;
+
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let hosts = stub_hosts(&prompts);
+        let run_dir = dir.path().join(".derrick/runs/r");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state = ExecutionState::new("do the thing".to_owned(), "r".to_owned(), run_dir);
+
+        for id in ["specify", "plan", "tasks"] {
+            let status = run_step(
+                &config,
+                substrate.as_ref(),
+                hosts.clone(),
+                dir.path(),
+                &mut state,
+                id,
+            )
+            .await?;
+            assert_eq!(status, StepStatus::Success, "mixed {id} should succeed");
+        }
+        let issued = prompts.lock().expect("lock").clone();
+        assert!(
+            issued.iter().any(|p| p.contains("implementation plan")),
+            "plan must go through the native planner"
+        );
+        assert!(
+            issued.iter().any(|p| p.contains("/speckit.tasks")),
+            "tasks must go through the speckit command, got: {issued:?}"
+        );
+        let feature_dir = state.feature_dir.clone().expect("feature_dir set");
+        let tasks_md = std::fs::read_to_string(dir.path().join(&feature_dir).join("tasks.md"))?;
+        assert!(
+            tasks_md.contains("Speckit ticket"),
+            "speckit wrote tasks.md"
+        );
+        Ok(())
+    }
+
+    /// Runs the `specify` step through `execute_step` and returns the error it
+    /// surfaces. `execute_step` records a Failed step AND returns `Err`, so a
+    /// failing import never leaves a false "done" — the scaffolded stub keeps its
+    /// marker and `verify_spec_written` would also reject it on resume.
+    async fn run_specify_expecting_error(
+        config: &Config,
+        substrate: &NativeSubstrate,
+        hosts: Arc<HostRegistry>,
+        repo_root: &Path,
+        state: &mut ExecutionState,
+    ) -> derrick_assay::types::RunError {
         let step = config
             .pipeline()
             .iter()
@@ -2620,22 +2845,71 @@ state:
             .expect("specify step")
             .clone();
         let manifest_path = state.run_dir.join("manifest.json");
-        let error = execute_step(
-            &config,
-            substrate.as_ref(),
-            hosts.clone(),
-            dir.path(),
+        execute_step(
+            config,
+            substrate,
+            hosts,
+            repo_root,
             &step,
-            &mut state,
-            "import-run",
+            state,
+            &state.run_id.clone(),
             &manifest_path,
             None,
         )
         .await
-        .expect_err("import provider should error in Phase 1");
+        .expect_err("import specify should fail")
+    }
+
+    #[tokio::test]
+    async fn import_missing_source_fails_loudly() -> TestResult {
+        // A missing source is a RunError (no false done): the scaffolded stub
+        // still carries its marker.
+        let block = "  specify:\n    provider: import\n    import:\n      source: docs/absent.md\n";
+        let (dir, config, substrate, _hosts, _p) = harness(bare_drill_pipeline(), block).await?;
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let hosts = stub_hosts(&prompts);
+        let run_dir = dir.path().join(".derrick/runs/r");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state = ExecutionState::new("do the thing".to_owned(), "r".to_owned(), run_dir);
+
+        let error =
+            run_specify_expecting_error(&config, &substrate, hosts, dir.path(), &mut state).await;
         assert!(
-            error.to_string().contains("not yet available") && error.to_string().contains("import"),
-            "expected a clear not-yet-available error, got: {error}"
+            error.to_string().contains("not found"),
+            "expected a missing-source error, got: {error}"
+        );
+        // The scaffolded stub (if any) still carries the marker — never a
+        // false "done".
+        if let Some(feature_dir) = &state.feature_dir {
+            let spec = dir.path().join(feature_dir).join("spec.md");
+            if spec.exists() {
+                let contents = std::fs::read_to_string(&spec)?;
+                assert!(
+                    contents.contains(derrick_assay::io::SPEC_STUB_MARKER),
+                    "stub marker must remain so resume does not treat import as done"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_non_file_scheme_is_not_supported() -> TestResult {
+        // A non-file scheme returns a clear "not supported yet" error.
+        let block = "  specify:\n    provider: import\n    import:\n      source: \"github:owner/repo#1\"\n";
+        let (dir, config, substrate, _hosts, _p) = harness(bare_drill_pipeline(), block).await?;
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let hosts = stub_hosts(&prompts);
+        let run_dir = dir.path().join(".derrick/runs/r");
+        std::fs::create_dir_all(&run_dir)?;
+        let mut state = ExecutionState::new("do the thing".to_owned(), "r".to_owned(), run_dir);
+
+        let error =
+            run_specify_expecting_error(&config, &substrate, hosts, dir.path(), &mut state).await;
+        let msg = error.to_string();
+        assert!(
+            msg.contains("not supported yet") && msg.contains("github"),
+            "expected a clear not-supported scheme error, got: {msg}"
         );
         Ok(())
     }

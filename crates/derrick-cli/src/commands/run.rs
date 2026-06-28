@@ -12,7 +12,14 @@ use derrick_tools::HostRegistry;
 use crate::progress::CliReporter;
 
 pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliError> {
-    let (_repo_root, _config, _substrate, runner) = build_runner().await?;
+    // A `--spec <path>` override (drill only) forces the `import` provider for
+    // this run at the highest precedence, without editing derrick.yaml. It is
+    // applied to the in-memory config before the runner is built.
+    let spec_override = match &args.command {
+        RunCommand::Drill(drill) => drill.spec.clone(),
+        RunCommand::Resume(_) => None,
+    };
+    let (_repo_root, _config, _substrate, runner) = build_runner(spec_override).await?;
 
     match args.command {
         RunCommand::Drill(drill) => {
@@ -62,7 +69,9 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
     }
 }
 
-async fn build_runner() -> Result<
+async fn build_runner(
+    spec_override: Option<String>,
+) -> Result<
     (
         std::path::PathBuf,
         derrick_config::Config,
@@ -72,7 +81,11 @@ async fn build_runner() -> Result<
     crate::CliError,
 > {
     let repo_root = current_repo_root()?;
-    let config = read_config(&repo_root)?;
+    let mut config = read_config(&repo_root)?;
+    // Highest-precedence run override: `--spec <path>` forces the import provider.
+    if let Some(source) = spec_override {
+        config.force_import_spec(source);
+    }
     // D15/D65: surface model/host issues early without blocking the run.
     crate::commands::models::emit_soft_warnings(&config);
     if config.tools().substrate().backend() != SubstrateBackendKind::Native {

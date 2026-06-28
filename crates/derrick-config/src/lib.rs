@@ -259,6 +259,20 @@ impl Config {
         &self.tools
     }
 
+    /// Forces the `import` spec provider with the given `source` for this run,
+    /// overriding `tools.specify.provider`/`tools.specify.import.source` from the
+    /// config file.
+    ///
+    /// This is the highest-precedence entry point for the CLI `--spec <path>`
+    /// override: it switches the provider to [`SpecProviderKind::Import`] and
+    /// sets the source, leaving the downstream `import.{plan,tasks}` modes (and
+    /// every other config field) untouched. It mutates the in-memory config only
+    /// — the `derrick.yaml` file is never rewritten.
+    pub fn force_import_spec(&mut self, source: String) {
+        self.tools.specify.provider = SpecProviderKind::Import;
+        self.tools.specify.import.source = Some(source);
+    }
+
     /// Returns the configured pipeline steps.
     pub fn pipeline(&self) -> &[PipelineStep] {
         &self.pipeline
@@ -4273,6 +4287,29 @@ state:
             config.tools().specify().import().tasks(),
             DownstreamMode::Native
         );
+    }
+
+    #[test]
+    fn force_import_spec_overrides_provider_and_source() {
+        // The `--spec <path>` CLI override forces the import provider + source
+        // in memory, leaving the downstream plan/tasks modes untouched.
+        let yaml = minimal_yaml().replace(
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n",
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n  specify:\n    \
+             provider: speckit\n    import:\n      plan: speckit\n      tasks: native\n",
+        );
+        let mut config = load_yaml(&yaml).expect("load speckit provider");
+        assert_eq!(
+            config.tools().specify().provider(),
+            SpecProviderKind::Speckit
+        );
+        config.force_import_spec("docs/PRD.md".to_owned());
+        let specify = config.tools().specify();
+        assert_eq!(specify.provider(), SpecProviderKind::Import);
+        assert_eq!(specify.import().source(), Some("docs/PRD.md"));
+        // Downstream modes are preserved from the config file.
+        assert_eq!(specify.import().plan(), DownstreamMode::Speckit);
+        assert_eq!(specify.import().tasks(), DownstreamMode::Native);
     }
 
     #[test]

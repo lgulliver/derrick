@@ -97,6 +97,7 @@ pub(crate) async fn execute(args: DrillArgs) -> Result<CliExitCode, CliError> {
         no_clarify: args.no_clarify,
         no_assay: args.no_assay,
         no_github_issues: args.no_github_issues,
+        spec: args.spec,
         auto_resume,
         force_prior_run_id,
     };
@@ -202,6 +203,7 @@ mod tests {
             no_assay: false,
             no_github_issues: false,
             force: false,
+            spec: None,
         }
     }
 

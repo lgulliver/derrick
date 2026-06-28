@@ -85,6 +85,7 @@ async fn dispatch(cli: Cli) -> Result<exit_code::CliExitCode, CliError> {
             .map_err(|error| message(error.to_string())),
         Command::Switch(args) => commands::switch::execute(args).await,
         Command::Survey(args) => commands::survey::execute(args).await,
+        Command::Spec(args) => commands::spec::execute(args).await,
         Command::Reset(args) => commands::reset::execute(args).await,
         Command::Undo(args) => commands::undo::execute(args).await,
     }

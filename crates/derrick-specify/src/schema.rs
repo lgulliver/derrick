@@ -466,6 +466,19 @@ fn body_has_heading(body: &str, heading: &str) -> bool {
     body.lines().any(|l| l.trim_start() == heading)
 }
 
+/// True if `md` already conforms to the spec schema closely enough to be
+/// written through verbatim (a structural passthrough) rather than normalized
+/// by a model.
+///
+/// Used by the `import` provider: a source document that already validates with
+/// no [`Severity::Reject`] findings is a real `derrick.spec/v1` document and is
+/// imported as-is (the import provider then injects its own grounding). A
+/// document with any hard reject (no front-matter, missing requirements, leftover
+/// open questions, …) is sent through one model normalization pass instead.
+pub fn looks_like_spec(md: &str) -> bool {
+    !has_reject(&validate_spec(md))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
