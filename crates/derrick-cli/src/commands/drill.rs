@@ -34,6 +34,7 @@ use crate::commands::{DrillArgs, DrillRunArgs, RunArgs, RunCommand};
 use crate::exit_code::CliExitCode;
 use crate::{CliError, current_repo_root, read_config};
 
+/// Executes the `derrick drill` subcommand (the primary entry point for running a pipeline).
 pub(crate) async fn execute(args: DrillArgs) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root()?;
 

@@ -6,6 +6,7 @@ use crate::commands::ObserveArgs;
 use crate::exit_code::CliExitCode;
 use crate::{CliError, message};
 
+/// Executes the `derrick observe` subcommand (launches the TUI dashboard).
 pub(crate) async fn execute(args: ObserveArgs) -> Result<CliExitCode, CliError> {
     let initial_tab = match args.tab.as_deref() {
         Some(name) => name

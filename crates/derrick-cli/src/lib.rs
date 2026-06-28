@@ -45,6 +45,7 @@ where
     }
 }
 
+/// Routes the parsed CLI command to its executor.
 async fn dispatch(cli: Cli) -> Result<exit_code::CliExitCode, CliError> {
     match cli.command {
         Command::Drill(args) => {
@@ -112,6 +113,7 @@ enum CliError {
     Json(#[from] serde_json::Error),
 }
 
+/// Wraps a plain string into a [`CliError::Message`].
 fn message(text: impl Into<String>) -> CliError {
     CliError::Message(text.into())
 }
@@ -126,6 +128,7 @@ fn invoked_via_add_alias() -> bool {
         .is_some_and(|token| token == "add")
 }
 
+/// Walks ancestors of `start` until a `.git` directory is found.
 fn find_repo_root(start: &Path) -> Result<PathBuf, CliError> {
     for candidate in start.ancestors() {
         if candidate.join(".git").exists() {
@@ -136,6 +139,7 @@ fn find_repo_root(start: &Path) -> Result<PathBuf, CliError> {
     Err(message("derrick init must be run inside a git repo"))
 }
 
+/// Returns the repository root for the current working directory.
 fn current_repo_root() -> Result<PathBuf, CliError> {
     let cwd = std::env::current_dir().map_err(|source| CliError::Io {
         path: PathBuf::from("."),
@@ -144,10 +148,12 @@ fn current_repo_root() -> Result<PathBuf, CliError> {
     find_repo_root(&cwd)
 }
 
+/// Loads and parses `derrick.yaml` from the repository root.
 fn read_config(repo_root: &Path) -> Result<derrick_config::Config, CliError> {
     derrick_config::Config::load_from_path(&repo_root.join("derrick.yaml")).map_err(Into::into)
 }
 
+/// Builds native substrate paths from the repo root and config.
 fn native_paths(
     repo_root: &Path,
     config: &derrick_config::Config,
@@ -158,6 +164,7 @@ fn native_paths(
     }
 }
 
+/// Writes `contents` to `path`, mapping I/O errors to [`CliError`].
 fn write_file(path: &Path, contents: &str) -> Result<(), CliError> {
     std::fs::write(path, contents).map_err(|source| CliError::Io {
         path: path.to_path_buf(),
@@ -165,6 +172,7 @@ fn write_file(path: &Path, contents: &str) -> Result<(), CliError> {
     })
 }
 
+/// Creates `path` and all missing parents, mapping I/O errors to [`CliError`].
 fn create_dir_all(path: &Path) -> Result<(), CliError> {
     std::fs::create_dir_all(path).map_err(|source| CliError::Io {
         path: path.to_path_buf(),

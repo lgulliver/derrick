@@ -130,6 +130,7 @@ fn print_splash() {
     println!();
 }
 
+/// Runs the interactive `derrick init` wizard and returns the user's selections.
 pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliError> {
     print_splash();
     print_info(&input);

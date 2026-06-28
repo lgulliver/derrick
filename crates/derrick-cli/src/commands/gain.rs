@@ -8,6 +8,7 @@ use crate::commands::GainArgs;
 use crate::output::OutputFormat;
 use crate::telemetry;
 
+/// Runs the `derrick gain` subcommand (reports token savings from recent sessions).
 pub(crate) async fn run(args: GainArgs) -> Result<()> {
     if let Some(run_id) = args.run.clone() {
         return run_for_run_id(args, &run_id).await;

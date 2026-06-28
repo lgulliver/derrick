@@ -16,6 +16,7 @@ use crate::commands::{SpecArgs, SpecCommand, SpecImportArgs};
 use crate::exit_code::CliExitCode;
 use crate::{current_repo_root, message, read_config};
 
+/// Executes the `derrick spec` subcommand (import specification sources).
 pub(crate) async fn execute(args: SpecArgs) -> Result<CliExitCode, crate::CliError> {
     match args.command {
         SpecCommand::Import(import) => run_import(import).await,

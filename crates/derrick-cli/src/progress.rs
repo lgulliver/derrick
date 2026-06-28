@@ -28,6 +28,7 @@ pub(crate) struct CliReporter {
 }
 
 impl CliReporter {
+    /// Creates a new reporter, enabling styled output when stderr is a TTY.
     pub(crate) fn new() -> Self {
         let styled = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
         Self {
@@ -111,6 +112,7 @@ impl ProgressReporter for CliReporter {
 }
 
 impl CliReporter {
+    /// Formats a completed step as a resolved status line with elapsed time and token cost.
     fn format_outcome(&self, p: &StepProgress<'_>) -> String {
         let (glyph, word) = outcome_glyph(p.status);
         let mut suffix = String::new();
@@ -139,6 +141,7 @@ impl CliReporter {
         }
     }
 
+    /// Formats the overall pipeline result as a summary line.
     fn format_summary(&self, p: &RunProgress<'_>) -> String {
         let (glyph, word) = run_glyph(p.status);
         let mut parts = vec![format!("run {}", p.run_id), word.to_owned()];
@@ -162,6 +165,7 @@ impl CliReporter {
     }
 }
 
+/// Returns the glyph and word for a completed step status.
 fn outcome_glyph(status: StepStatus) -> (&'static str, &'static str) {
     match status {
         StepStatus::Success => ("✓", "done"),
@@ -171,6 +175,7 @@ fn outcome_glyph(status: StepStatus) -> (&'static str, &'static str) {
     }
 }
 
+/// Returns the glyph and word for an overall run status.
 fn run_glyph(status: RunStatus) -> (&'static str, &'static str) {
     match status {
         RunStatus::Success => ("✓", "success"),
@@ -184,6 +189,7 @@ fn format_tokens(tokens_in: u32, tokens_out: u32) -> Option<String> {
     format_tokens_u64(u64::from(tokens_in), u64::from(tokens_out))
 }
 
+/// Format a u64 token delta, or `None` when both are zero.
 fn format_tokens_u64(tokens_in: u64, tokens_out: u64) -> Option<String> {
     if tokens_in == 0 && tokens_out == 0 {
         return None;

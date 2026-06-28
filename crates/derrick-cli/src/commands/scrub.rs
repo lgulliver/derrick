@@ -8,6 +8,7 @@ use derrick_scrub::Scrubber;
 
 use crate::commands::ScrubArgs;
 
+/// Runs the `derrick scrub` subcommand (redacts sensitive data from a transcript on stdin).
 pub(crate) async fn run(args: ScrubArgs) -> Result<()> {
     let mut input = Vec::new();
     io::stdin().lock().read_to_end(&mut input)?;

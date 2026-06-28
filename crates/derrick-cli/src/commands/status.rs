@@ -13,6 +13,7 @@ use crate::exit_code::CliExitCode;
 use crate::output::OutputFormat;
 use crate::{current_repo_root, message, native_paths, read_config};
 
+/// Executes the `derrick status` subcommand.
 pub(crate) async fn execute(args: StatusArgs) -> Result<CliExitCode, crate::CliError> {
     if args.watch {
         loop {

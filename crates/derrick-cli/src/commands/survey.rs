@@ -17,6 +17,7 @@ use crate::exit_code::CliExitCode;
 use crate::output::OutputFormat;
 use crate::{create_dir_all, current_repo_root, message};
 
+/// Executes the `derrick survey` subcommand (indexes repositories for ticket sourcing).
 pub(crate) async fn execute(args: SurveyArgs) -> Result<CliExitCode, crate::CliError> {
     // Setup and Hub don't open the current repo's index — Setup wires up a
     // single repo, and Hub loads its own multi-repo registry. Handle both

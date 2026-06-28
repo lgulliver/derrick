@@ -30,6 +30,7 @@ use crate::{current_repo_root, message, native_paths, read_config};
 const PID_FILE: &str = "foreman.pid";
 const LOG_FILE: &str = "foreman.log";
 
+/// Executes the `derrick foreman` subcommand (start, stop, or tick the background worker).
 pub(crate) async fn execute(args: ForemanArgs) -> Result<CliExitCode, crate::CliError> {
     match args.command {
         ForemanCommand::Start(start) => foreman_start(start).await,

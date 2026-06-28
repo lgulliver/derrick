@@ -197,6 +197,7 @@ struct ResolvedInitOptions {
     default_profile: String,
 }
 
+/// Executes the `derrick init` subcommand (scaffolds derrick into a repository).
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
     // DESIGN §5.2 step 1: prerequisites are always checked first, with no
     // partial init. This runs even under --dry-run so a dry run reports

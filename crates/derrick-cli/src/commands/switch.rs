@@ -29,6 +29,7 @@ struct SwitchChanges {
     role_changes: Vec<(String, String, String)>,
 }
 
+/// Executes the `derrick switch` subcommand (updates `derrick.yaml` model bindings).
 pub(crate) async fn execute(
     args: crate::commands::SwitchArgs,
 ) -> Result<CliExitCode, crate::CliError> {

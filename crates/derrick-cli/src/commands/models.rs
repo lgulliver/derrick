@@ -343,6 +343,7 @@ pub(crate) fn emit_soft_warnings(config: &Config) {
     }
 }
 
+/// Executes the `derrick models` subcommand (check and validate model configuration).
 pub(crate) async fn execute(args: ModelsArgs) -> Result<CliExitCode, crate::CliError> {
     match args.command {
         ModelsCommand::Check(check_args) => {
