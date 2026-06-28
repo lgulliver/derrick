@@ -56,7 +56,17 @@ async fn list() -> Result<CliExitCode, CliError> {
 
 async fn show(name: &str) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let config = read_config(&repo_root).map_err(|e| crate::message(e.to_string()))?;
+    // Fall back to the default config when derrick.yaml is missing so that
+    // built-in profiles are always inspectable before `derrick init`.
+    let config = match read_config(&repo_root) {
+        Ok(c) => c,
+        Err(CliError::Config(derrick_config::ConfigError::Io { ref source, .. }))
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            derrick_config::Config::defaults()
+        }
+        Err(e) => return Err(e),
+    };
 
     let desc = config
         .profiles()
@@ -75,23 +85,37 @@ async fn show(name: &str) -> Result<CliExitCode, CliError> {
         .with_profile(name)
         .map_err(|e| crate::message(e.to_string()))?;
 
-    let mut changes: Vec<(&str, &str)> = profiled
+    let mut all_changes: Vec<(String, String)> = profiled
         .roles()
         .as_map()
         .iter()
         .filter(|(k, v)| original_roles.get(*k).map(String::as_str) != Some(v.as_str()))
-        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    changes.sort_by_key(|(k, _)| *k);
+    all_changes.sort_by_key(|(k, _)| k.clone());
 
     println!("Profile: {name}");
     println!("  {desc}");
     println!();
     println!("Stage bindings changed by this profile:");
-    if changes.is_empty() {
+    if all_changes.is_empty() {
         println!("  (no bindings changed — aliases not found or profile has no overrides)");
     } else {
-        for (stage, alias) in changes {
+        // Group `assay-reviewer-N` entries back into a single `assay` display
+        // line so the output reflects the stage name the profile defines.
+        let (mut assay_reviewers, other): (Vec<_>, Vec<_>) = all_changes
+            .into_iter()
+            .partition(|(k, _)| k.starts_with("assay-reviewer-"));
+        assay_reviewers.sort_by_key(|(k, _)| {
+            k.strip_prefix("assay-reviewer-")
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(0)
+        });
+        if !assay_reviewers.is_empty() {
+            let aliases: Vec<&str> = assay_reviewers.iter().map(|(_, v)| v.as_str()).collect();
+            println!("  {:<18}  [{}]", "assay", aliases.join(", "));
+        }
+        for (stage, alias) in &other {
             println!("  {stage:<18}  {alias}");
         }
     }

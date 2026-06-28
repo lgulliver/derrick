@@ -36,10 +36,20 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
     // A `--profile <name>` override (drill only) applies the named profile's
     // stage bindings to the in-memory config for this run. When absent on a
     // fresh drill, the config's `default_profile` (if any) is applied.
-    // Resume paths must never apply `default_profile` — they reuse the prior
-    // run's pinned config and altering bindings mid-run would be wrong.
+    // Resume paths must never apply a profile — they reuse the prior run's
+    // pinned config and altering bindings mid-run violates the same contract
+    // as `--spec` + resume. Reject it up front with a clear error.
     let profile_override = match &args.command {
-        RunCommand::Drill(drill) => drill.profile.clone(),
+        RunCommand::Drill(drill) => {
+            if drill.profile.is_some() && (drill.resume_from.is_some() || drill.auto_resume) {
+                return Err(crate::message(
+                    "`--profile` cannot be combined with resuming an existing run \
+                     (--resume-from or an auto-resumed prompt); resume the run as-is \
+                     or start a fresh drill run instead",
+                ));
+            }
+            drill.profile.clone()
+        }
         RunCommand::Resume(_) => None,
     };
     let is_resume = match &args.command {
