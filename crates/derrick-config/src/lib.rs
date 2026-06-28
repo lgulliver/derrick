@@ -583,6 +583,7 @@ impl RoleBindings {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tools {
     speckit: Speckit,
+    specify: Specify,
     assay: Assay,
     substrate: Substrate,
     copilot: Copilot,
@@ -598,6 +599,11 @@ impl Tools {
     /// Returns speckit configuration.
     pub fn speckit(&self) -> &Speckit {
         &self.speckit
+    }
+
+    /// Returns spec-provider configuration (`tools.specify`).
+    pub fn specify(&self) -> &Specify {
+        &self.specify
     }
 
     /// Returns assay configuration.
@@ -653,6 +659,7 @@ impl Default for Tools {
                 enabled: true,
                 version: ">=0.4.0".to_owned(),
             },
+            specify: Specify::default(),
             assay: Assay::default(),
             substrate: Substrate {
                 backend: SubstrateBackendKind::Native,
@@ -845,6 +852,93 @@ impl Speckit {
     /// Returns the expected speckit version requirement.
     pub fn version(&self) -> &str {
         &self.version
+    }
+}
+
+/// Which provider produces the spec/plan/tasks artifacts for the `specify`,
+/// `plan`, and `tasks` pipeline steps when those steps are declared **bare**
+/// (no `host`/`command`/`runner`). Selected via `tools.specify.provider`.
+///
+/// This is distinct from [`Speckit`] (`tools.speckit`), which governs speckit
+/// version detection and PATH checks. `tools.specify` chooses the dispatch
+/// path; `tools.speckit` still describes the speckit toolchain itself.
+///
+/// Default is [`SpecProviderKind::Speckit`], preserving the historical
+/// behaviour: bare spec steps delegate to the speckit host CLI exactly as the
+/// explicit `host: claude` + `command: "/speckit.specify …"` steps do.
+/// `Native` and `Import` are config-accepted in Phase 1 but their dispatch
+/// arms return a "not yet available" error until Phases 2/3 land.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum SpecProviderKind {
+    /// Delegate to the speckit host CLI (the historical behaviour).
+    #[default]
+    Speckit,
+    /// Derrick-native spec generation (Phase 2 — not yet wired).
+    Native,
+    /// Import an externally-authored spec (Phase 3 — not yet wired).
+    Import,
+}
+
+/// Downstream-phase mode for the `import` provider. Controls how `plan` and
+/// `tasks` are produced once a spec has been imported. Defaults to
+/// [`DownstreamMode::Native`].
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum DownstreamMode {
+    /// Produce the artifact with derrick-native generation.
+    #[default]
+    Native,
+    /// Delegate the artifact to the speckit host CLI.
+    Speckit,
+    /// Import the artifact from an external source.
+    Import,
+}
+
+/// Spec-provider configuration block (`tools.specify`).
+///
+/// An omitted `tools.specify` block finalizes to `provider: Speckit` via
+/// [`Default`], which is the back-compat path — existing configs that never
+/// mention `tools.specify` keep dispatching bare spec steps through speckit.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Specify {
+    provider: SpecProviderKind,
+    import: ImportConfig,
+}
+
+impl Specify {
+    /// Returns the configured spec provider.
+    pub fn provider(&self) -> SpecProviderKind {
+        self.provider
+    }
+
+    /// Returns the import-provider sub-configuration.
+    pub fn import(&self) -> &ImportConfig {
+        &self.import
+    }
+}
+
+/// Import-provider sub-configuration (`tools.specify.import`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ImportConfig {
+    source: Option<String>,
+    plan: DownstreamMode,
+    tasks: DownstreamMode,
+}
+
+impl ImportConfig {
+    /// Returns the optional import source (path or locator). Interpreted by the
+    /// import provider in Phase 3.
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+
+    /// Returns the downstream mode for the `plan` phase.
+    pub fn plan(&self) -> DownstreamMode {
+        self.plan
+    }
+
+    /// Returns the downstream mode for the `tasks` phase.
+    pub fn tasks(&self) -> DownstreamMode {
+        self.tasks
     }
 }
 
@@ -1516,6 +1610,17 @@ fn validate_roles(roles: &RoleBindings, models: &ModelRegistry) -> Result<(), Co
     Ok(())
 }
 
+/// Returns whether `step` is a *bare* spec step — one of `specify`/`plan`/
+/// `tasks` with no `role`, `runner`, `host`, or `command`. Such steps are
+/// dispatched through the spec-provider seam (`tools.specify.provider`).
+fn is_bare_spec_step(step: &PipelineStep) -> bool {
+    matches!(step.id.as_str(), "specify" | "plan" | "tasks")
+        && step.role.is_none()
+        && step.runner.is_none()
+        && step.host.is_none()
+        && step.command.is_none()
+}
+
 fn validate_pipeline(steps: &[PipelineStep], roles: &RoleBindings) -> Result<(), ConfigError> {
     for step in steps {
         match (&step.role, step.runner) {
@@ -1524,6 +1629,12 @@ fn validate_pipeline(steps: &[PipelineStep], roles: &RoleBindings) -> Result<(),
                     "pipeline.{}: role and runner are mutually exclusive",
                     step.id
                 ));
+            }
+            // A *bare* spec step (`specify`/`plan`/`tasks` with no
+            // role/runner/host/command) is valid: it dispatches through the
+            // spec-provider seam (`tools.specify.provider`). See DESIGN.md §5.3.
+            (None, None) if is_bare_spec_step(step) => {
+                // Accepted — dispatched by the spec-provider seam.
             }
             (None, None) => {
                 return validation(format!(
@@ -1669,6 +1780,28 @@ fn parse_stack_backend(value: &str) -> Result<StackBackendKind, ConfigError> {
         )),
         other => validation(format!(
             "tools.git.stacking.backend: {other:?} must be one of none | native"
+        )),
+    }
+}
+
+fn parse_spec_provider(value: &str) -> Result<SpecProviderKind, ConfigError> {
+    match value {
+        "speckit" => Ok(SpecProviderKind::Speckit),
+        "native" => Ok(SpecProviderKind::Native),
+        "import" => Ok(SpecProviderKind::Import),
+        other => validation(format!(
+            "tools.specify.provider: {other:?} must be one of speckit | native | import"
+        )),
+    }
+}
+
+fn parse_downstream_mode(value: &str, path: &str) -> Result<DownstreamMode, ConfigError> {
+    match value {
+        "native" => Ok(DownstreamMode::Native),
+        "speckit" => Ok(DownstreamMode::Speckit),
+        "import" => Ok(DownstreamMode::Import),
+        other => validation(format!(
+            "{path}: {other:?} must be one of native | speckit | import"
         )),
     }
 }
@@ -2180,6 +2313,7 @@ impl From<ModelDef> for ModelDefLayer {
 #[serde(deny_unknown_fields)]
 struct ToolsLayer {
     speckit: Option<SpeckitLayer>,
+    specify: Option<SpecifyLayer>,
     assay: Option<AssayLayer>,
     substrate: Option<SubstrateLayer>,
     copilot: Option<CopilotLayer>,
@@ -2194,6 +2328,7 @@ struct ToolsLayer {
 impl ToolsLayer {
     fn merge(&mut self, other: Self) {
         merge_nested(&mut self.speckit, other.speckit, SpeckitLayer::merge);
+        merge_nested(&mut self.specify, other.specify, SpecifyLayer::merge);
         merge_nested(&mut self.assay, other.assay, AssayLayer::merge);
         merge_nested(&mut self.substrate, other.substrate, SubstrateLayer::merge);
         merge_nested(&mut self.copilot, other.copilot, CopilotLayer::merge);
@@ -2216,6 +2351,7 @@ impl ToolsLayer {
     fn finalize(self) -> Result<Tools, ConfigError> {
         Ok(Tools {
             speckit: required(self.speckit, "tools.speckit")?.finalize()?,
+            specify: self.specify.unwrap_or_default().finalize()?,
             assay: self.assay.unwrap_or_default().finalize()?,
             substrate: required(self.substrate, "tools.substrate")?.finalize()?,
             copilot: self.copilot.unwrap_or_default().finalize()?,
@@ -2233,6 +2369,7 @@ impl From<Tools> for ToolsLayer {
     fn from(tools: Tools) -> Self {
         Self {
             speckit: Some(tools.speckit.into()),
+            specify: Some(tools.specify.into()),
             assay: Some(tools.assay.into()),
             substrate: Some(tools.substrate.into()),
             copilot: Some(tools.copilot.into()),
@@ -2418,6 +2555,95 @@ impl From<Speckit> for SpeckitLayer {
         Self {
             enabled: Some(speckit.enabled),
             version: Some(speckit.version),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpecifyLayer {
+    provider: Option<String>,
+    import: Option<ImportLayer>,
+}
+
+impl SpecifyLayer {
+    fn merge(&mut self, other: Self) {
+        merge_scalar(&mut self.provider, other.provider);
+        merge_nested(&mut self.import, other.import, ImportLayer::merge);
+    }
+
+    fn finalize(self) -> Result<Specify, ConfigError> {
+        Ok(Specify {
+            // Omitted `provider` defaults to speckit — the back-compat path.
+            provider: match self.provider {
+                Some(value) => parse_spec_provider(&value)?,
+                None => SpecProviderKind::default(),
+            },
+            import: self.import.unwrap_or_default().finalize()?,
+        })
+    }
+}
+
+impl From<Specify> for SpecifyLayer {
+    fn from(specify: Specify) -> Self {
+        Self {
+            provider: Some(
+                match specify.provider {
+                    SpecProviderKind::Speckit => "speckit",
+                    SpecProviderKind::Native => "native",
+                    SpecProviderKind::Import => "import",
+                }
+                .to_owned(),
+            ),
+            import: Some(specify.import.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportLayer {
+    source: Option<String>,
+    plan: Option<String>,
+    tasks: Option<String>,
+}
+
+impl ImportLayer {
+    fn merge(&mut self, other: Self) {
+        merge_scalar(&mut self.source, other.source);
+        merge_scalar(&mut self.plan, other.plan);
+        merge_scalar(&mut self.tasks, other.tasks);
+    }
+
+    fn finalize(self) -> Result<ImportConfig, ConfigError> {
+        Ok(ImportConfig {
+            source: self.source,
+            plan: match self.plan {
+                Some(value) => parse_downstream_mode(&value, "tools.specify.import.plan")?,
+                None => DownstreamMode::default(),
+            },
+            tasks: match self.tasks {
+                Some(value) => parse_downstream_mode(&value, "tools.specify.import.tasks")?,
+                None => DownstreamMode::default(),
+            },
+        })
+    }
+}
+
+impl From<ImportConfig> for ImportLayer {
+    fn from(import: ImportConfig) -> Self {
+        let mode_str = |mode: DownstreamMode| {
+            match mode {
+                DownstreamMode::Native => "native",
+                DownstreamMode::Speckit => "speckit",
+                DownstreamMode::Import => "import",
+            }
+            .to_owned()
+        };
+        Self {
+            source: import.source,
+            plan: Some(mode_str(import.plan)),
+            tasks: Some(mode_str(import.tasks)),
         }
     }
 }
@@ -3976,6 +4202,126 @@ state:
         assert!(
             !config.tools().output_compression().enabled(),
             "output_compression.enabled should be false"
+        );
+    }
+
+    // ---- spec provider (tools.specify) ----
+
+    #[test]
+    fn default_tools_use_speckit_spec_provider() {
+        let tools = Tools::default();
+        assert_eq!(tools.specify().provider(), SpecProviderKind::Speckit);
+        assert_eq!(tools.specify().import().plan(), DownstreamMode::Native);
+        assert_eq!(tools.specify().import().tasks(), DownstreamMode::Native);
+        assert_eq!(tools.specify().import().source(), None);
+    }
+
+    #[test]
+    fn omitting_specify_block_loads_as_speckit() {
+        // `minimal_yaml()` carries no `tools.specify` — the back-compat path.
+        let config = load_yaml(&minimal_yaml()).expect("load minimal config");
+        assert_eq!(
+            config.tools().specify().provider(),
+            SpecProviderKind::Speckit,
+            "an omitted tools.specify must default to the speckit provider"
+        );
+    }
+
+    #[test]
+    fn specify_provider_native_round_trips() {
+        let yaml = minimal_yaml().replace(
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n",
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n  specify:\n    provider: native\n",
+        );
+        let config = load_yaml(&yaml).expect("load native provider");
+        assert_eq!(
+            config.tools().specify().provider(),
+            SpecProviderKind::Native
+        );
+    }
+
+    #[test]
+    fn specify_import_block_round_trips() {
+        let yaml = minimal_yaml().replace(
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n",
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n  \
+             specify:\n    provider: import\n    import:\n      source: ./docs/spec.md\n      \
+             plan: speckit\n      tasks: native\n",
+        );
+        let config = load_yaml(&yaml).expect("load import provider");
+        let specify = config.tools().specify();
+        assert_eq!(specify.provider(), SpecProviderKind::Import);
+        assert_eq!(specify.import().source(), Some("./docs/spec.md"));
+        assert_eq!(specify.import().plan(), DownstreamMode::Speckit);
+        assert_eq!(specify.import().tasks(), DownstreamMode::Native);
+    }
+
+    #[test]
+    fn specify_import_defaults_to_native_downstream() {
+        // An `import` provider with no explicit plan/tasks modes defaults both
+        // to native.
+        let yaml = minimal_yaml().replace(
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n",
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n  specify:\n    provider: import\n",
+        );
+        let config = load_yaml(&yaml).expect("load import provider");
+        assert_eq!(
+            config.tools().specify().import().plan(),
+            DownstreamMode::Native
+        );
+        assert_eq!(
+            config.tools().specify().import().tasks(),
+            DownstreamMode::Native
+        );
+    }
+
+    #[test]
+    fn unknown_spec_provider_is_actionable_error() {
+        let yaml = minimal_yaml().replace(
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n",
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n  specify:\n    provider: bogus\n",
+        );
+        match load_yaml(&yaml) {
+            Err(ConfigError::Validation(message)) => {
+                assert!(
+                    message.contains("tools.specify.provider")
+                        && message.contains("speckit | native | import"),
+                    "expected actionable provider error, got: {message}"
+                );
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_downstream_mode_is_actionable_error() {
+        let yaml = minimal_yaml().replace(
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n",
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n  \
+             specify:\n    provider: import\n    import:\n      plan: nonsense\n",
+        );
+        match load_yaml(&yaml) {
+            Err(ConfigError::Validation(message)) => {
+                assert!(
+                    message.contains("tools.specify.import.plan")
+                        && message.contains("native | speckit | import"),
+                    "expected actionable downstream-mode error, got: {message}"
+                );
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn specify_unknown_field_is_rejected() {
+        // `deny_unknown_fields` on the specify block guards against typos.
+        let yaml = minimal_yaml().replace(
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n",
+            "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n  specify:\n    providr: speckit\n",
+        );
+        assert!(
+            load_yaml(&yaml).is_err(),
+            "an unknown field under tools.specify must be rejected"
         );
     }
 }

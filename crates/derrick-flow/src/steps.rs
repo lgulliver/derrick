@@ -35,39 +35,71 @@ pub async fn execute_step(
 ) -> Result<StepRecord, RunError> {
     let started_at = Utc::now();
     let log_path = state.run_dir.join(format!("step-{}.log", step.id()));
-    let result = match (step.role(), step.runner()) {
-        (Some(_), None) => {
-            execute_role_step(
+    // Spec-provider seam (DESIGN.md §5.3): a *bare* spec step — one of
+    // `specify`/`plan`/`tasks` with no `role`/`host`/`command`/`runner` —
+    // dispatches through the provider selected by `tools.specify.provider`.
+    // Steps that name a `role`, a `host`+`command` (the explicit speckit form),
+    // or a `runner` fall through to the existing arms below unchanged. The
+    // `role` check keeps this classifier in lock-step with
+    // `is_bare_spec_step` in derrick-config's pipeline validation.
+    let spec_phase = crate::spec_provider::SpecPhase::from_step_id(step.id());
+    let is_bare = step.role().is_none()
+        && step.host().is_none()
+        && step.command().is_none()
+        && step.runner().is_none();
+    let result = if let (Some(phase), true) = (spec_phase, is_bare) {
+        let provider = config.tools().specify().provider();
+        crate::spec_provider::run_spec_phase(
+            provider,
+            phase,
+            crate::spec_provider::SpecPhaseCtx {
                 config,
-                &hosts,
+                hosts: &hosts,
                 repo_root,
-                step,
                 state,
-                &log_path,
+                step,
+                log_path: &log_path,
                 output_sink,
-            )
-            .await
+            },
+        )
+        .await
+    } else {
+        match (step.role(), step.runner()) {
+            (Some(_), None) => {
+                execute_role_step(
+                    config,
+                    &hosts,
+                    repo_root,
+                    step,
+                    state,
+                    &log_path,
+                    output_sink,
+                    None,
+                    None,
+                )
+                .await
+            }
+            (None, Some(StepRunner::Derrick)) => {
+                execute_derrick_step(
+                    config,
+                    substrate,
+                    hosts.clone(),
+                    repo_root,
+                    step,
+                    state,
+                    &log_path,
+                )
+                .await
+            }
+            (None, Some(StepRunner::Human)) => execute_human_step(config, step, state, &log_path),
+            (None, Some(StepRunner::Bash)) => {
+                execute_bash_step(config, step, state, repo_root, &log_path).await
+            }
+            _ => Err(RunError::Config(format!(
+                "pipeline.{}: either supported role or runner is required",
+                step.id()
+            ))),
         }
-        (None, Some(StepRunner::Derrick)) => {
-            execute_derrick_step(
-                config,
-                substrate,
-                hosts.clone(),
-                repo_root,
-                step,
-                state,
-                &log_path,
-            )
-            .await
-        }
-        (None, Some(StepRunner::Human)) => execute_human_step(config, step, state, &log_path),
-        (None, Some(StepRunner::Bash)) => {
-            execute_bash_step(config, step, state, repo_root, &log_path).await
-        }
-        _ => Err(RunError::Config(format!(
-            "pipeline.{}: either supported role or runner is required",
-            step.id()
-        ))),
     };
     let finished_at = Utc::now();
 
@@ -158,7 +190,18 @@ pub async fn execute_step(
     }
 }
 
-async fn execute_role_step(
+/// Executes a `host:`-backed role step.
+///
+/// `host_override` / `command_override` let the spec-provider seam
+/// ([`crate::spec_provider`]) run a **bare** `specify`/`plan`/`tasks` step
+/// through the identical speckit host path: it supplies the host name and
+/// command template the bare step omits, while everything keyed on
+/// `step.id()` (pre-scaffold, `verify_spec_written`, `detect_artifacts`)
+/// stays byte-identical to the explicit-step path. When both overrides are
+/// `None` the function reads `step.host()` / `step.command()` as before, so
+/// existing explicit speckit steps are completely unaffected.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_role_step(
     config: &derrick_config::Config,
     hosts: &HostRegistry,
     repo_root: &std::path::Path,
@@ -166,9 +209,15 @@ async fn execute_role_step(
     state: &mut ExecutionState,
     log_path: &Path,
     output_sink: Option<derrick_tools::OutputSink>,
+    host_override: Option<&str>,
+    command_override: Option<&str>,
 ) -> Result<StepExecution, RunError> {
-    if let Some(host) = step.host() {
-        let command = derrick_assay::io::required_step_text(step.command(), step.id(), "command")?;
+    let host_from_step = step.host().map(host_name);
+    if let Some(host_name) = host_override.or(host_from_step) {
+        let command = match command_override {
+            Some(command) => command,
+            None => derrick_assay::io::required_step_text(step.command(), step.id(), "command")?,
+        };
         let prompt = render_template(command, &template_context(config, state)?)?;
         let prompt = inject_clarify_answers_for_plan(step.id(), state, repo_root, prompt)?;
         // Apply roughneck prompt injection if enabled.
@@ -177,7 +226,6 @@ async fn execute_role_step(
         } else {
             prompt
         };
-        let host_name = host_name(host);
         let host = hosts
             .get(host_name)
             .ok_or_else(|| RunError::Config(format!("host {host_name:?} is not registered")))?;
@@ -955,7 +1003,7 @@ async fn execute_bash_step(
     }
 }
 
-fn detect_artifacts(
+pub(crate) fn detect_artifacts(
     step_id: &str,
     state: &ExecutionState,
     repo_root: &std::path::Path,
