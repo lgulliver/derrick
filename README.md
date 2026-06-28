@@ -177,8 +177,8 @@ PIPELINE
 
 VISIBILITY
   status       Current batch, in-flight tickets, foreman state
-  observe      Live ratatui dashboard (6 tabs: overview, tickets, stack,
-               activity, tokens, memory)
+  observe      Live ratatui dashboard (8 tabs: overview, tickets, stack,
+               activity, tokens, memory, hands, factory)
   doctor       Toolchain and config health check
 
 TICKET MANAGEMENT
@@ -188,13 +188,15 @@ STACKING
   stack        show / restack / submit — PR stack management
 
 SURVEY (CODE-GRAPH INDEX)
-  survey       build / search / context / impact / status / serve
+  survey       build / search / context / impact / status / serve / hub / setup
                build    — (re)index the repo
                search   — FTS symbol search
                context  — entry points + related symbols + snippets
                impact   — callers / callees / impact radius
                status   — freshness report
                serve    — run MCP server (--mcp for stdio transport)
+               hub      — multi-repo hub over streamable HTTP (--config hub.yaml)
+               setup    — wire the survey MCP server into any repo (no derrick init)
 
 TOKEN TOOLS
   scrub        Filter CLI noise from stdin (git, cargo, claude, gh, ...)
@@ -231,12 +233,13 @@ derrick gain
 
 ## Architecture
 
-19 crates, one binary:
+21 crates, one binary:
 
 | Crate | Role |
 |---|---|
 | `derrick-cli` | Binary, all subcommands |
 | `derrick-survey` | Native code-graph index: SQLite + FTS5 symbol/reference/call-graph at `.derrick/index.db`, queried by agents over MCP; CLI `survey build/search/context/impact/status` |
+| `derrick-survey-hub` | Multi-repo survey hub: serves N indexes over one streamable-HTTP MCP endpoint with per-call workspace routing, scoped bearer-token auth, and Local/Pushed sourcing; CLI `survey hub` (D80–D84) |
 | `derrick-flow` | Pipeline executor, state machine |
 | `derrick-assay` | Multi-reviewer adversarial assay + shared pipeline types (RunError, StepExecution, io helpers) |
 | `derrick-config` | Typed schema, layered loader, 14 validation rules |
@@ -251,6 +254,7 @@ derrick gain
 | `derrick-adopt` | Brownfield adoption — detects AGENTS.md, writes hooks + survey MCP wiring |
 | `derrick-substrate` | Substrate trait + ticket/batch/hand state types |
 | `derrick-substrate-native` | SQLite-backed substrate + foreman loop |
+| `derrick-hand` | Generic host-CLI hand dispatcher: runs codex / opencode / aider as crew executor hands, each in its own git worktree, with pid + structured telemetry |
 | `derrick-claude` | Claude substrate |
 | `derrick-copilot` | Copilot substrate |
 | `derrick-tools` | Host CLI adapters (claude, codex, copilot, opencode, aider) + model catalogue |
@@ -307,7 +311,7 @@ You can override any role binding in `roles`, and pin a role's model to a concre
 
 ## Status
 
-**Active development.** Architecture and 78 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 84 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
@@ -347,7 +351,7 @@ What's landed and tested:
 - ✅ True parallel fan-out for multi-reviewer assay and `parallel_group` steps
 - 🔜 Homebrew tap (v1.1)
 
-903 tests passing across 20 crates.
+903+ tests passing across 21 crates.
 
 ## Coverage
 
@@ -363,7 +367,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 73 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 84 decisions
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
 - [docs/survey.md](./docs/survey.md) — derrick survey deep-dive: how it works, setup, CLI reference, MCP tools, token accounting
