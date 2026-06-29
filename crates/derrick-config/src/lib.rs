@@ -60,6 +60,7 @@ fn host_model(provider: &str, model: &str) -> ModelDef {
         timeout: None,
         rate_limit: None,
         cost_hint: None,
+        estimated: None,
     }
 }
 
@@ -128,6 +129,14 @@ pub struct Config {
     /// Per-stage capability requirements declared under `stages:` (D79). Keyed
     /// by stage/role name; checked by `derrick models check`.
     stage_requirements: BTreeMap<String, Vec<String>>,
+    /// User-defined AI profiles (D80). Built-in profiles are merged at lookup.
+    profiles: ProfileRegistry,
+    /// Optional cost budgets (D80).
+    budgets: Option<BudgetConfig>,
+    /// Default profile applied when none is requested (D80).
+    default_profile: Option<String>,
+    /// Profile applied in-memory for this run, if any (D80).
+    active_profile: Option<String>,
 }
 
 impl Config {
@@ -193,6 +202,10 @@ impl Config {
                 worktree_root: PathBuf::from(".derrick/worktrees"),
             },
             stage_requirements: BTreeMap::new(),
+            profiles: ProfileRegistry::default(),
+            budgets: None,
+            default_profile: None,
+            active_profile: None,
         }
     }
 
@@ -297,6 +310,85 @@ impl Config {
     pub fn stage_requirements(&self) -> &BTreeMap<String, Vec<String>> {
         &self.stage_requirements
     }
+
+    /// Returns the user-defined profile registry (D80).
+    pub fn profiles(&self) -> &ProfileRegistry {
+        &self.profiles
+    }
+
+    /// Returns the cost budgets, if configured (D80).
+    pub fn budgets(&self) -> Option<&BudgetConfig> {
+        self.budgets.as_ref()
+    }
+
+    /// Returns the default profile name, if configured (D80).
+    pub fn default_profile(&self) -> Option<&str> {
+        self.default_profile.as_deref()
+    }
+
+    /// Returns the profile applied in-memory for this run, if any (D80).
+    pub fn active_profile(&self) -> Option<&str> {
+        self.active_profile.as_deref()
+    }
+
+    /// Returns a clone of this config with the named profile applied in-memory.
+    /// Built-in profiles are checked if the name is not found among user-defined
+    /// profiles. Unknown model aliases in the profile are warned and skipped.
+    pub fn with_profile(&self, name: &str) -> Result<Self, ConfigError> {
+        let builtin = builtin_profiles();
+        let profile = self
+            .profiles
+            .0
+            .get(name)
+            .or_else(|| builtin.get(name))
+            .ok_or_else(|| {
+                ConfigError::Validation(format!(
+                    "profile {name:?} is not defined; run `derrick profile list` to see available profiles"
+                ))
+            })?;
+
+        let mut config = self.clone();
+        config.active_profile = Some(name.to_owned());
+
+        for (stage, aliases) in &profile.stages {
+            if aliases.is_empty() {
+                continue;
+            }
+            if stage == "assay" && aliases.len() > 1 {
+                let mut reviewer_roles: Vec<String> = Vec::new();
+                for (i, alias) in aliases.iter().enumerate() {
+                    if config.models.contains_key(alias) {
+                        let role = format!("assay-reviewer-{}", i + 1);
+                        config.roles.0.insert(role.clone(), alias.clone());
+                        reviewer_roles.push(role);
+                    } else {
+                        tracing::warn!(
+                            target: "derrick_config",
+                            "profile {name:?}: stage `assay` references unknown model alias {alias:?}; skipping"
+                        );
+                    }
+                }
+                if !reviewer_roles.is_empty() {
+                    config.tools.assay.enabled = true;
+                    config.tools.assay.role = reviewer_roles[0].clone();
+                    config.tools.assay.reviewers = reviewer_roles;
+                }
+            } else {
+                let alias = &aliases[0];
+                if config.models.contains_key(alias) {
+                    let role = stage_to_role(stage);
+                    config.roles.0.insert(role.to_owned(), alias.clone());
+                } else {
+                    tracing::warn!(
+                        target: "derrick_config",
+                        "profile {name:?}: stage {stage:?} references unknown model alias {alias:?}; keeping existing binding"
+                    );
+                }
+            }
+        }
+
+        Ok(config)
+    }
 }
 
 /// Errors returned while loading or validating derrick configuration.
@@ -392,6 +484,7 @@ pub struct ModelDef {
     timeout: Option<String>,
     rate_limit: Option<String>,
     cost_hint: Option<String>,
+    estimated: Option<ModelEstimate>,
 }
 
 impl ModelDef {
@@ -500,6 +593,11 @@ impl ModelDef {
     pub fn cost_hint(&self) -> Option<&str> {
         self.cost_hint.as_deref()
     }
+
+    /// Returns the optional estimated performance characteristics (D80).
+    pub fn estimated(&self) -> Option<&ModelEstimate> {
+        self.estimated.as_ref()
+    }
 }
 
 /// Declared capabilities for a model alias (D79).
@@ -570,6 +668,237 @@ pub fn builtin_capabilities(model: &str) -> ModelCapabilities {
     } else {
         // Local / unknown models: assume nothing.
         ModelCapabilities::default()
+    }
+}
+
+/// Estimated performance characteristics for a model alias (D80).
+/// All fields are optional; unknown values never prevent execution.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ModelEstimate {
+    latency: Option<String>,
+    cost: Option<String>,
+    quality: Option<String>,
+}
+
+impl ModelEstimate {
+    /// Latency tier hint: `low` | `medium` | `high`.
+    pub fn latency(&self) -> Option<&str> {
+        self.latency.as_deref()
+    }
+    /// Cost tier hint: `very_low` | `low` | `medium` | `high` | `very_high`.
+    pub fn cost(&self) -> Option<&str> {
+        self.cost.as_deref()
+    }
+    /// Quality tier hint: `low` | `medium` | `high` | `very_high`.
+    pub fn quality(&self) -> Option<&str> {
+        self.quality.as_deref()
+    }
+}
+
+/// A profile maps stage names to model alias overrides (D80). Profiles
+/// temporarily override role bindings without modifying `derrick.yaml`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Profile {
+    stages: std::collections::HashMap<String, Vec<String>>,
+    ci: bool,
+    description: Option<String>,
+}
+
+impl Profile {
+    /// Returns the stage→alias(es) bindings.
+    pub fn stages(&self) -> &std::collections::HashMap<String, Vec<String>> {
+        &self.stages
+    }
+    /// Returns true if this is a CI-safe (non-interactive) profile.
+    pub fn ci(&self) -> bool {
+        self.ci
+    }
+    /// Returns a human-readable description.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+}
+
+/// Named profile registry. User-defined profiles live here; built-in
+/// profiles (`speed`, `balanced`, `quality`, `cheap`, `local`, `ci`) are
+/// provided by [`builtin_profiles`] and merged at lookup time.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct ProfileRegistry(std::collections::HashMap<String, Profile>);
+
+impl ProfileRegistry {
+    /// Returns a profile by name.
+    pub fn get(&self, name: &str) -> Option<&Profile> {
+        self.0.get(name)
+    }
+    /// Returns all user-defined profiles.
+    pub fn as_map(&self) -> &std::collections::HashMap<String, Profile> {
+        &self.0
+    }
+}
+
+/// Optional per-operation cost budget (D80). Costs are estimates only
+/// until provider telemetry lands in a later release.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Budget {
+    max_cost: f64,
+}
+
+impl Budget {
+    /// Maximum estimated cost (USD) for the operation.
+    pub fn max_cost(&self) -> f64 {
+        self.max_cost
+    }
+}
+
+/// Budget configuration (D80). All scopes are optional.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct BudgetConfig {
+    per_ticket: Option<Budget>,
+    daily: Option<Budget>,
+    monthly: Option<Budget>,
+}
+
+impl BudgetConfig {
+    /// Returns the per-ticket budget, if set.
+    pub fn per_ticket(&self) -> Option<&Budget> {
+        self.per_ticket.as_ref()
+    }
+    /// Returns the daily budget, if set.
+    pub fn daily(&self) -> Option<&Budget> {
+        self.daily.as_ref()
+    }
+    /// Returns the monthly budget, if set.
+    pub fn monthly(&self) -> Option<&Budget> {
+        self.monthly.as_ref()
+    }
+}
+
+/// Returns the built-in profile definitions (D80). These use common alias
+/// names (`fast`, `strong`, `cheap`, `local`) as a convention. Bindings for
+/// missing aliases are silently skipped by `Config::with_profile`.
+fn builtin_profiles() -> std::collections::HashMap<String, Profile> {
+    let mut profiles = std::collections::HashMap::new();
+
+    let single_stage = |alias: &str| vec![alias.to_owned()];
+
+    // speed — minimise latency
+    let mut stages = std::collections::HashMap::new();
+    for s in &["clarify", "plan", "tasks", "execute"] {
+        stages.insert(s.to_string(), single_stage("fast"));
+    }
+    stages.insert("assay".to_owned(), single_stage("fast"));
+    profiles.insert(
+        "speed".to_owned(),
+        Profile {
+            stages,
+            ci: false,
+            description: Some(
+                "Optimise for latency: fastest runtime, smallest model, minimum reviewers"
+                    .to_owned(),
+            ),
+        },
+    );
+
+    // balanced — default (no stage overrides; effective no-op with a label)
+    profiles.insert(
+        "balanced".to_owned(),
+        Profile {
+            stages: std::collections::HashMap::new(),
+            ci: false,
+            description: Some("Good quality at reasonable speed (default)".to_owned()),
+        },
+    );
+
+    // quality — maximise reasoning quality
+    let mut stages = std::collections::HashMap::new();
+    for s in &["clarify", "plan", "tasks", "execute"] {
+        stages.insert(s.to_string(), single_stage("strong"));
+    }
+    stages.insert(
+        "assay".to_owned(),
+        vec!["strong".to_owned(), "strong".to_owned()],
+    );
+    profiles.insert(
+        "quality".to_owned(),
+        Profile {
+            stages,
+            ci: false,
+            description: Some(
+                "Maximum reasoning quality: stronger models and multiple reviewers".to_owned(),
+            ),
+        },
+    );
+
+    // cheap — minimise cost
+    let mut stages = std::collections::HashMap::new();
+    for s in &["clarify", "plan", "tasks", "execute", "assay"] {
+        stages.insert(s.to_string(), single_stage("cheap"));
+    }
+    profiles.insert(
+        "cheap".to_owned(),
+        Profile {
+            stages,
+            ci: false,
+            description: Some(
+                "Optimise for lowest cost: included CLI usage, local models, cheapest APIs"
+                    .to_owned(),
+            ),
+        },
+    );
+
+    // local — local runtimes only
+    let mut stages = std::collections::HashMap::new();
+    for s in &["clarify", "plan", "tasks", "execute", "assay"] {
+        stages.insert(s.to_string(), single_stage("local"));
+    }
+    profiles.insert(
+        "local".to_owned(),
+        Profile {
+            stages,
+            ci: false,
+            description: Some(
+                "Use only local runtimes (Ollama, LM Studio, vLLM, LiteLLM)".to_owned(),
+            ),
+        },
+    );
+
+    // ci — non-interactive, deterministic
+    let mut stages = std::collections::HashMap::new();
+    for s in &["clarify", "plan", "tasks", "execute"] {
+        stages.insert(s.to_string(), single_stage("fast"));
+    }
+    stages.insert("assay".to_owned(), single_stage("fast"));
+    profiles.insert(
+        "ci".to_owned(),
+        Profile {
+            stages,
+            ci: true,
+            description: Some("Non-interactive, deterministic, suitable for automation".to_owned()),
+        },
+    );
+
+    profiles
+}
+
+/// Returns the names of all built-in profiles (D80).
+pub const BUILTIN_PROFILE_NAMES: [&str; 6] =
+    ["speed", "balanced", "quality", "cheap", "local", "ci"];
+
+/// Maps a profile stage name to the canonical role key it overrides (D86).
+///
+/// Built-in profiles use pipeline stage ids (`clarify`, `plan`, `tasks`,
+/// `execute`) as their stage keys; the live role map uses semantic role names
+/// (`proposer`, `drafter`, `executor`, …). Without this mapping, profile
+/// overrides insert orphan entries that the pipeline never reads.
+///
+/// Stage names that do not appear in the table are returned unchanged so that
+/// user-defined profiles can target arbitrary role names directly.
+fn stage_to_role(stage: &str) -> &str {
+    match stage {
+        "clarify" | "plan" | "analyze" => "proposer",
+        "specify" | "tasks" => "drafter",
+        "execute" => "executor",
+        other => other,
     }
 }
 
@@ -1830,6 +2159,67 @@ fn parse_force_push(value: &str) -> Result<ForcePush, ConfigError> {
     }
 }
 
+/// A profile stage binding: a single alias or a list of aliases (D80).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum ProfileBindingLayer {
+    Single(String),
+    Multi(Vec<String>),
+}
+
+/// A profile's stage→binding map (D80). Stage names are user-defined, so this
+/// is a bare `HashMap` without `deny_unknown_fields`.
+type ProfileLayer = HashMap<String, ProfileBindingLayer>;
+
+/// Deserialize target for the `budgets:` section (D80).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BudgetConfigLayer {
+    per_ticket: Option<BudgetLayer>,
+    daily: Option<BudgetLayer>,
+    monthly: Option<BudgetLayer>,
+}
+
+/// Deserialize target for a single budget scope (D80).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BudgetLayer {
+    max_cost: f64,
+}
+
+impl BudgetConfigLayer {
+    fn merge(&mut self, other: Self) {
+        merge_nested(&mut self.per_ticket, other.per_ticket, BudgetLayer::merge);
+        merge_nested(&mut self.daily, other.daily, BudgetLayer::merge);
+        merge_nested(&mut self.monthly, other.monthly, BudgetLayer::merge);
+    }
+}
+
+impl BudgetLayer {
+    fn merge(&mut self, other: Self) {
+        self.max_cost = other.max_cost;
+    }
+}
+
+fn finalize_profile(layer: ProfileLayer) -> Profile {
+    let mut stages = HashMap::new();
+    for (stage, binding) in layer {
+        match binding {
+            ProfileBindingLayer::Single(alias) => {
+                stages.insert(stage, vec![alias]);
+            }
+            ProfileBindingLayer::Multi(aliases) => {
+                stages.insert(stage, aliases);
+            }
+        }
+    }
+    Profile {
+        stages,
+        ci: false,
+        description: None,
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigLayer {
@@ -1846,6 +2236,12 @@ struct ConfigLayer {
     guardrails: Option<GuardrailsLayer>,
     parallelism: Option<ParallelismLayer>,
     state: Option<StateLayer>,
+    #[serde(default)]
+    profiles: Option<HashMap<String, ProfileLayer>>,
+    #[serde(default)]
+    budgets: Option<BudgetConfigLayer>,
+    #[serde(default)]
+    default_profile: Option<String>,
 }
 
 impl ConfigLayer {
@@ -1873,6 +2269,9 @@ impl ConfigLayer {
             ParallelismLayer::merge,
         );
         merge_nested(&mut self.state, other.state, StateLayer::merge);
+        merge_map(&mut self.profiles, other.profiles);
+        merge_nested(&mut self.budgets, other.budgets, BudgetConfigLayer::merge);
+        merge_scalar(&mut self.default_profile, other.default_profile);
     }
 
     /// Expands an `ai.preset` into concrete `models` and `roles` entries (D79).
@@ -1940,6 +2339,37 @@ impl ConfigLayer {
             parallelism: required(self.parallelism, "parallelism")?.finalize()?,
             state: required(self.state, "state")?.finalize()?,
             stage_requirements,
+            profiles: ProfileRegistry(
+                self.profiles
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(name, layer)| (name, finalize_profile(layer)))
+                    .collect(),
+            ),
+            budgets: self
+                .budgets
+                .map(|b| -> Result<BudgetConfig, ConfigError> {
+                    fn vb(b: BudgetLayer, scope: &'static str) -> Result<Budget, ConfigError> {
+                        if !b.max_cost.is_finite() || b.max_cost < 0.0 {
+                            return Err(ConfigError::Validation(format!(
+                                "budgets.{scope}.max_cost must be a finite non-negative number \
+                                 (got {})",
+                                b.max_cost
+                            )));
+                        }
+                        Ok(Budget {
+                            max_cost: b.max_cost,
+                        })
+                    }
+                    Ok(BudgetConfig {
+                        per_ticket: b.per_ticket.map(|b| vb(b, "per_ticket")).transpose()?,
+                        daily: b.daily.map(|b| vb(b, "daily")).transpose()?,
+                        monthly: b.monthly.map(|b| vb(b, "monthly")).transpose()?,
+                    })
+                })
+                .transpose()?,
+            default_profile: self.default_profile,
+            active_profile: None,
         })
     }
 }
@@ -2019,6 +2449,46 @@ impl From<Config> for ConfigLayer {
             guardrails: Some(config.guardrails.into()),
             parallelism: Some(config.parallelism.into()),
             state: Some(config.state.into()),
+            profiles: if config.profiles.0.is_empty() {
+                None
+            } else {
+                Some(
+                    config
+                        .profiles
+                        .0
+                        .into_iter()
+                        .map(|(name, profile)| {
+                            let layer: ProfileLayer = profile
+                                .stages
+                                .into_iter()
+                                .map(|(stage, aliases)| {
+                                    let binding = if aliases.len() == 1 {
+                                        ProfileBindingLayer::Single(
+                                            aliases.into_iter().next().unwrap(),
+                                        )
+                                    } else {
+                                        ProfileBindingLayer::Multi(aliases)
+                                    };
+                                    (stage, binding)
+                                })
+                                .collect();
+                            (name, layer)
+                        })
+                        .collect(),
+                )
+            },
+            budgets: config.budgets.map(|b| BudgetConfigLayer {
+                per_ticket: b.per_ticket.map(|b| BudgetLayer {
+                    max_cost: b.max_cost,
+                }),
+                daily: b.daily.map(|b| BudgetLayer {
+                    max_cost: b.max_cost,
+                }),
+                monthly: b.monthly.map(|b| BudgetLayer {
+                    max_cost: b.max_cost,
+                }),
+            }),
+            default_profile: config.default_profile,
         }
     }
 }
@@ -2105,6 +2575,17 @@ struct ModelDefSpec {
     timeout: Option<String>,
     rate_limit: Option<String>,
     cost_hint: Option<String>,
+    #[serde(default)]
+    estimated: Option<ModelEstimateSpec>,
+}
+
+/// Deserialize target for `models.*.estimated` (D80).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelEstimateSpec {
+    latency: Option<String>,
+    cost: Option<String>,
+    quality: Option<String>,
 }
 
 /// The optional `ai:` section (D79). Currently just a preset selector.
@@ -2288,6 +2769,16 @@ impl ModelDefLayer {
             timeout: spec.timeout,
             rate_limit: spec.rate_limit,
             cost_hint: spec.cost_hint,
+            estimated: spec.estimated.map(|e| {
+                const VALID_LATENCY: &[&str] = &["low", "medium", "high"];
+                const VALID_COST: &[&str] = &["very_low", "low", "medium", "high", "very_high"];
+                const VALID_QUALITY: &[&str] = &["low", "medium", "high", "very_high"];
+                ModelEstimate {
+                    latency: e.latency.filter(|v| VALID_LATENCY.contains(&v.as_str())),
+                    cost: e.cost.filter(|v| VALID_COST.contains(&v.as_str())),
+                    quality: e.quality.filter(|v| VALID_QUALITY.contains(&v.as_str())),
+                }
+            }),
         })
     }
 }
@@ -2318,6 +2809,11 @@ impl From<ModelDef> for ModelDefLayer {
                 timeout: model.timeout,
                 rate_limit: model.rate_limit,
                 cost_hint: model.cost_hint,
+                estimated: model.estimated.map(|e| ModelEstimateSpec {
+                    latency: e.latency,
+                    cost: e.cost,
+                    quality: e.quality,
+                }),
             },
         }
     }
@@ -4360,5 +4856,73 @@ state:
             load_yaml(&yaml).is_err(),
             "an unknown field under tools.specify must be rejected"
         );
+    }
+
+    // D86 — profile stage names must be folded to canonical role keys so that
+    // `--profile speed` actually updates the roles the pipeline reads.
+    #[test]
+    fn d86_profile_stage_names_fold_to_canonical_roles() {
+        // Use `cli-defaults` preset: it wires `proposer → strong`, `drafter → fast`,
+        // `executor → executor`, and provides the `fast` / `strong` model aliases.
+        let yaml = assemble("ai:\n  preset: cli-defaults");
+        let config = load_yaml(&yaml).expect("preset should parse");
+
+        // Baseline: proposer uses the `strong` alias, drafter uses `fast`.
+        assert_eq!(config.roles().get("proposer"), Some("strong"));
+        assert_eq!(config.roles().get("drafter"), Some("fast"));
+
+        // Applying the `quality` profile should update proposer → strong (no change)
+        // and drafter → strong (the change that proves folding works).
+        let quality = config
+            .with_profile("quality")
+            .expect("quality profile should apply");
+        assert_eq!(
+            quality.roles().get("proposer"),
+            Some("strong"),
+            "plan/analyze stages should fold to the `proposer` role"
+        );
+        assert_eq!(
+            quality.roles().get("drafter"),
+            Some("strong"),
+            "tasks/specify stages should fold to the `drafter` role"
+        );
+
+        // Applying the `speed` profile should update both proposer and drafter → fast.
+        let speed = config
+            .with_profile("speed")
+            .expect("speed profile should apply");
+        assert_eq!(
+            speed.roles().get("proposer"),
+            Some("fast"),
+            "plan stage should fold to the `proposer` role"
+        );
+        assert_eq!(
+            speed.roles().get("drafter"),
+            Some("fast"),
+            "tasks stage should fold to the `drafter` role"
+        );
+        assert_eq!(speed.active_profile(), Some("speed"));
+    }
+
+    // D86 — user-defined stage names that are not in the fold table pass through
+    // unchanged so custom pipeline roles can be targeted directly.
+    #[test]
+    fn d86_unknown_stage_name_passes_through_as_role_key() {
+        let yaml = assemble("ai:\n  preset: cli-defaults");
+        let config = load_yaml(&yaml).expect("preset should parse");
+        // `proposer` is not a built-in stage name — it IS a role name.  A
+        // user-defined profile targeting `proposer` directly should keep working.
+        let yaml_with_profile =
+            assemble("ai:\n  preset: cli-defaults\nprofiles:\n  custom:\n    proposer: fast\n");
+        let cfg = load_yaml(&yaml_with_profile).expect("user-defined profile should parse");
+        let applied = cfg
+            .with_profile("custom")
+            .expect("custom profile should apply");
+        assert_eq!(
+            applied.roles().get("proposer"),
+            Some("fast"),
+            "targeting a role name directly in a user-defined profile should work"
+        );
+        let _ = config; // silence unused warning
     }
 }

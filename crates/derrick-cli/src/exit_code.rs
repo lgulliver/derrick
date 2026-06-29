@@ -31,6 +31,7 @@ impl From<CliExitCode> for ExitCode {
     }
 }
 
+/// Converts an i32 exit code to [`ExitCode`], clamping out-of-range values to 1.
 pub(crate) fn from_i32(code: i32) -> ExitCode {
     match u8::try_from(code) {
         Ok(code) => ExitCode::from(code),

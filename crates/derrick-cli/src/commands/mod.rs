@@ -4,6 +4,7 @@ use crate::output::OutputFormat;
 
 pub(crate) mod caveman;
 pub(crate) mod completions;
+pub(crate) mod cost;
 pub(crate) mod doctor;
 pub(crate) mod drill;
 pub(crate) mod foreman;
@@ -12,6 +13,7 @@ pub(crate) mod init;
 pub(crate) mod init_wizard;
 pub(crate) mod models;
 pub(crate) mod observe;
+pub(crate) mod profile;
 pub(crate) mod prompt_input;
 pub(crate) mod reset;
 pub(crate) mod run;
@@ -66,6 +68,10 @@ pub(crate) enum Command {
     Reset(ResetArgs),
     /// Revert the last hand's git commits.
     Undo(UndoArgs),
+    /// Manage and inspect AI profiles.
+    Profile(ProfileArgs),
+    /// Show estimated cost breakdown.
+    Cost(CostArgs),
 }
 
 #[derive(Debug, Args)]
@@ -115,6 +121,11 @@ pub(crate) struct DrillArgs {
     pub(crate) no_assay: bool,
     #[arg(long, help = "Skip the GitHub Issues creation offer")]
     pub(crate) no_github_issues: bool,
+    #[arg(
+        long,
+        help = "Apply a named AI profile for this run (e.g. speed, quality, cheap)"
+    )]
+    pub(crate) profile: Option<String>,
     /// Wipe prior run state and start fresh instead of auto-resuming.
     #[arg(long, help = "Discard any prior incomplete run and start from scratch")]
     pub(crate) force: bool,
@@ -245,6 +256,7 @@ pub(crate) enum InitMode {
 }
 
 impl InitMode {
+    /// Returns the string representation used in `derrick.yaml` for this mode.
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Solo => "solo",
@@ -328,6 +340,11 @@ pub(crate) struct DrillRunArgs {
     pub(crate) no_assay: bool,
     #[arg(long, help = "Skip the GitHub Issues creation offer")]
     pub(crate) no_github_issues: bool,
+    #[arg(
+        long,
+        help = "Apply a named AI profile for this run (e.g. speed, quality, cheap)"
+    )]
+    pub(crate) profile: Option<String>,
     /// Import an existing spec/PRD for this run: forces the `import` provider
     /// with this source path (highest precedence; does not edit config).
     #[arg(long = "spec", value_name = "PATH")]
@@ -488,6 +505,7 @@ pub(crate) struct ForemanStartArgs {
 }
 
 impl ForemanStartArgs {
+    /// Returns the requested start mode, or `None` if neither `--attached` nor `--detached` was passed.
     pub(crate) fn mode(&self) -> Option<ForemanStartMode> {
         if self.attached {
             Some(ForemanStartMode::Attached)
@@ -672,6 +690,37 @@ pub(crate) struct SpecImportArgs {
     /// name and ground the normalization. Defaults to the source file stem.
     #[arg(long)]
     pub(crate) prompt: Option<String>,
+}
+
+// ---------- Profile subcommand group (D86) --------------------------------
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileArgs {
+    #[command(subcommand)]
+    pub(crate) command: ProfileCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProfileCommand {
+    /// List all profiles (built-in and user-defined).
+    List,
+    /// Show the stage bindings for a specific profile.
+    Show(ProfileShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProfileShowArgs {
+    /// Profile name to show.
+    pub(crate) name: String,
+}
+
+// ---------- Cost subcommand (D86) -----------------------------------------
+
+#[derive(Debug, Args)]
+pub(crate) struct CostArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+    pub(crate) format: OutputFormat,
 }
 
 impl From<CompletionShell> for clap_complete::Shell {

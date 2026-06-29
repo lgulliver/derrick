@@ -13,6 +13,7 @@ use crate::exit_code::CliExitCode;
 use crate::output::OutputFormat;
 use crate::{current_repo_root, message, native_paths, read_config};
 
+/// Executes the `derrick status` subcommand.
 pub(crate) async fn execute(args: StatusArgs) -> Result<CliExitCode, crate::CliError> {
     if args.watch {
         loop {
@@ -51,6 +52,7 @@ struct StatusSnapshot {
     in_flight: usize,
     done: usize,
     foreman: String,
+    default_profile: Option<String>,
 }
 
 async fn load_status() -> Result<StatusSnapshot, crate::CliError> {
@@ -69,6 +71,7 @@ async fn load_status() -> Result<StatusSnapshot, crate::CliError> {
             in_flight: 0,
             done: 0,
             foreman: "disabled".to_owned(),
+            default_profile: config.default_profile().map(str::to_owned),
         }),
     }
 }
@@ -118,6 +121,7 @@ async fn native_status(
             Some(pid) => format!("detached (pid {pid})"),
             None => "stopped".to_owned(),
         },
+        default_profile: config.default_profile().map(str::to_owned),
     })
 }
 
@@ -141,6 +145,9 @@ fn print_status(status: &StatusSnapshot, format: OutputFormat) -> Result<(), cra
                 status.done, status.in_flight, status.ready
             );
             println!("foreman      {}", status.foreman);
+            if let Some(profile) = &status.default_profile {
+                println!("default profile  {profile}");
+            }
         }
         OutputFormat::Json => {
             let body = json!({
@@ -155,7 +162,8 @@ fn print_status(status: &StatusSnapshot, format: OutputFormat) -> Result<(), cra
                     "in_flight": status.in_flight,
                     "done": status.done
                 },
-                "foreman": status.foreman
+                "foreman": status.foreman,
+                "default_profile": status.default_profile
             });
             println!("{}", serde_json::to_string(&body)?);
         }

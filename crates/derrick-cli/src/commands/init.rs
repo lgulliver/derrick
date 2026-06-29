@@ -13,6 +13,9 @@ use crate::exit_code::CliExitCode;
 use crate::ui;
 use crate::{create_dir_all, current_repo_root, message, native_paths, read_config, write_file};
 
+/// The default AI profile used when no explicit profile is configured.
+pub(crate) const DEFAULT_PROFILE: &str = "balanced";
+
 const INIT_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../templates/derrick.yaml.in"
@@ -44,6 +47,7 @@ pub(crate) struct RoleBindings {
 }
 
 impl RoleBindings {
+    /// Creates bindings where every role uses the same model.
     pub(crate) fn one_model(model: String) -> Self {
         Self {
             proposer: model.clone(),
@@ -54,6 +58,7 @@ impl RoleBindings {
         }
     }
 
+    /// Returns all role-to-model pairs as a fixed-size array.
     pub(crate) fn entries(&self) -> [(&'static str, &str); 5] {
         [
             ("proposer", &self.proposer),
@@ -194,8 +199,13 @@ struct ResolvedInitOptions {
     spec_provider: crate::commands::spec_provider_init::SpecProviderChoice,
     conventional_commits: bool,
     branch_prefix: String,
+    default_profile: String,
+    /// Serialised YAML of the existing `profiles:` mapping, preserved across
+    /// init reruns so user-defined profiles survive a `derrick init` rerun.
+    existing_profiles_yaml: Option<String>,
 }
 
+/// Executes the `derrick init` subcommand (scaffolds derrick into a repository).
 pub(crate) async fn execute(args: InitArgs) -> Result<CliExitCode, crate::CliError> {
     // DESIGN §5.2 step 1: prerequisites are always checked first, with no
     // partial init. This runs even under --dry-run so a dry run reports
@@ -302,6 +312,17 @@ fn resolve_options(
     let constitution = constitution_mode(&args);
 
     if should_run_wizard(&args) {
+        let (existing_default_profile, existing_profiles_yaml) =
+            if repo_root.join("derrick.yaml").exists() {
+                let existing_config = crate::read_config(repo_root).ok();
+                let default_profile = existing_config
+                    .as_ref()
+                    .and_then(|c| c.default_profile().map(str::to_owned));
+                let profiles_yaml = read_existing_profiles_yaml(repo_root);
+                (default_profile, profiles_yaml)
+            } else {
+                (None, None)
+            };
         let wizard_input = WizardInput {
             repo_root,
             has_existing_config: repo_root.join("derrick.yaml").exists(),
@@ -318,6 +339,7 @@ fn resolve_options(
             default_jetbrains: args.jetbrains,
             default_force: args.force,
             available_models: available_model_choices(),
+            default_profile: existing_default_profile,
         };
         let selection = crate::commands::init_wizard::run(wizard_input)?;
         return match selection {
@@ -346,6 +368,8 @@ fn resolve_options(
                     spec_provider: selection.spec_provider,
                     conventional_commits: selection.conventional_commits,
                     branch_prefix: selection.branch_prefix,
+                    default_profile: selection.default_profile,
+                    existing_profiles_yaml,
                 }))
             }
         };
@@ -374,6 +398,11 @@ fn resolve_options(
         spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
         conventional_commits: true,
         branch_prefix: "feat/".to_owned(),
+        default_profile: crate::read_config(repo_root)
+            .ok()
+            .and_then(|c| c.default_profile().map(str::to_owned))
+            .unwrap_or_else(|| DEFAULT_PROFILE.to_owned()),
+        existing_profiles_yaml: read_existing_profiles_yaml(repo_root),
     }))
 }
 
@@ -726,6 +755,23 @@ fn apply_text_overrides(
         }
     }
 
+    // Serialize the profile name through serde_yaml so special characters
+    // (`:`, `#`, whitespace) are properly quoted in the output.
+    let profile_scalar =
+        serde_yaml::to_string(&serde_yaml::Value::String(resolved.default_profile.clone()))
+            .map_err(|e| message(e.to_string()))?;
+    lines.push(format!(
+        "default_profile: {}",
+        profile_scalar.trim_end_matches('\n')
+    ));
+
+    if let Some(profiles_yaml) = &resolved.existing_profiles_yaml {
+        lines.push("profiles:".to_owned());
+        for line in profiles_yaml.lines() {
+            lines.push(format!("  {line}"));
+        }
+    }
+
     let out = format!("{}\n", lines.join("\n"));
     // Speckit is a no-op here (returns `out` unchanged), so the template's
     // comments survive on the common catalogue path; native/import round-trip
@@ -752,6 +798,20 @@ fn apply_config_overrides(
 
     apply_ai_plan(root, &resolved.ai_plan);
 
+    root.insert(
+        serde_yaml::Value::String("default_profile".to_owned()),
+        serde_yaml::Value::String(resolved.default_profile.clone()),
+    );
+
+    if let Some(profiles_yaml) = &resolved.existing_profiles_yaml {
+        if let Ok(profiles_value) = serde_yaml::from_str::<serde_yaml::Value>(profiles_yaml) {
+            root.insert(
+                serde_yaml::Value::String("profiles".to_owned()),
+                profiles_value,
+            );
+        }
+    }
+
     if matches!(resolved.mode, crate::commands::InitMode::Crew) {
         ensure_crew_pipeline(root)?;
     }
@@ -760,6 +820,23 @@ fn apply_config_overrides(
     crate::commands::spec_provider_init::apply_spec_provider(&out, resolved.spec_provider)
 }
 
+/// Reads the `profiles:` mapping from the existing `derrick.yaml`, serialising
+/// it back to a YAML string so it can be merged into re-rendered configs.
+/// Returns `None` when the file is absent or has no non-empty profiles block.
+fn read_existing_profiles_yaml(repo_root: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(repo_root.join("derrick.yaml")).ok()?;
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+    let profiles = yaml.get("profiles")?;
+    if profiles.is_null() {
+        return None;
+    }
+    if profiles.as_mapping().is_some_and(|m| m.is_empty()) {
+        return None;
+    }
+    serde_yaml::to_string(profiles).ok()
+}
+
+/// Returns a mutable reference to a nested YAML mapping, creating it if absent.
 pub(crate) fn nested_mapping<'a>(
     mapping: &'a mut serde_yaml::Mapping,
     key: &str,
@@ -788,6 +865,7 @@ fn role_mapping_value(roles: &RoleBindings) -> serde_yaml::Mapping {
     mapping
 }
 
+/// Ensures the `pipeline` section contains the required `bridge` and `foreman` steps.
 pub(crate) fn ensure_crew_pipeline(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliError> {
     let key = serde_yaml::Value::String("pipeline".to_owned());
     let pipeline_value = root
@@ -817,6 +895,7 @@ pub(crate) fn ensure_crew_pipeline(root: &mut serde_yaml::Mapping) -> Result<(),
     Ok(())
 }
 
+/// Builds a YAML step mapping from a slice of key-value string pairs.
 pub(crate) fn yaml_step(entries: &[(&str, &str)]) -> serde_yaml::Value {
     let mut step = serde_yaml::Mapping::new();
     for (key, value) in entries {
@@ -828,6 +907,7 @@ pub(crate) fn yaml_step(entries: &[(&str, &str)]) -> serde_yaml::Value {
     serde_yaml::Value::Mapping(step)
 }
 
+/// Extracts the `id` string from a YAML step value, or `None` if absent.
 pub(crate) fn step_id(step: &serde_yaml::Value) -> Option<&str> {
     let id_key = serde_yaml::Value::String("id".to_owned());
     step.as_mapping()?.get(&id_key)?.as_str()
@@ -847,6 +927,7 @@ fn validate_role_bindings(
     Ok(())
 }
 
+/// Returns the recommended role-to-model bindings for the given init mode and available models.
 pub(crate) fn recommended_role_bindings(
     mode: crate::commands::InitMode,
     available_models: &BTreeMap<String, &'static str>,
@@ -947,6 +1028,7 @@ fn pick_model(available_models: &BTreeMap<String, &'static str>, candidates: &[&
         .unwrap_or_else(|| "claude-sonnet".to_owned())
 }
 
+/// Returns all available model IDs mapped to their descriptions.
 pub(crate) fn available_model_ids() -> BTreeMap<String, &'static str> {
     available_model_choices()
         .into_iter()
@@ -954,6 +1036,7 @@ pub(crate) fn available_model_ids() -> BTreeMap<String, &'static str> {
         .collect()
 }
 
+/// Returns the list of (model-id, description) pairs the wizard can offer.
 pub(crate) fn available_model_choices() -> Vec<(&'static str, &'static str)> {
     vec![
         ("claude-opus", "good for architecture and planning"),
@@ -1011,6 +1094,7 @@ fn write_jetbrains_configs(repo_root: &Path) -> Result<(), crate::CliError> {
     Ok(())
 }
 
+/// Derives a default site name from the repository's directory name.
 pub(crate) fn default_site_name(repo_root: &Path) -> String {
     repo_root
         .file_name()
@@ -1019,6 +1103,7 @@ pub(crate) fn default_site_name(repo_root: &Path) -> String {
         .to_owned()
 }
 
+/// Derives a default ticket prefix from the site name (first 3 ASCII letters, lowercase).
 pub(crate) fn default_prefix(site_name: &str) -> String {
     let prefix: String = site_name
         .chars()
@@ -1033,6 +1118,7 @@ pub(crate) fn default_prefix(site_name: &str) -> String {
     }
 }
 
+/// Validates that a site prefix is 1–6 lowercase ASCII letters.
 pub(crate) fn validate_prefix(prefix: &str) -> Result<(), crate::CliError> {
     if (1..=6).contains(&prefix.len()) && prefix.bytes().all(|byte| byte.is_ascii_lowercase()) {
         Ok(())
@@ -1613,6 +1699,8 @@ mod tests {
             spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
             conventional_commits: true,
             branch_prefix: "feat/".to_owned(),
+            default_profile: DEFAULT_PROFILE.to_owned(),
+            existing_profiles_yaml: None,
         }
     }
 

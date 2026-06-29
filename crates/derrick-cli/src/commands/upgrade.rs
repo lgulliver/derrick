@@ -10,6 +10,7 @@ use crate::exit_code::CliExitCode;
 use crate::message;
 use crate::upgrade::github::{GithubRelease, ReleaseAsset, ReleaseClient, ReqwestReleaseClient};
 
+/// Executes the `derrick upgrade` subcommand (downloads and installs a new derrick release).
 pub(crate) async fn execute(args: UpgradeArgs) -> Result<CliExitCode, crate::CliError> {
     let client = ReqwestReleaseClient::new().map_err(|error| message(error.to_string()))?;
     run_upgrade(&args, &client).await

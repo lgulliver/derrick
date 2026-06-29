@@ -20,6 +20,7 @@ use crate::commands::{StackArgs, StackCommand, StackRestackArgs, StackSubmitArgs
 use crate::exit_code::CliExitCode;
 use crate::{current_repo_root, message, native_paths, read_config};
 
+/// Executes the `derrick stack` subcommand (PR stacking operations).
 pub(crate) async fn execute(args: StackArgs) -> Result<CliExitCode, crate::CliError> {
     let repo_root = current_repo_root()?;
     let config = read_config(&repo_root)?;

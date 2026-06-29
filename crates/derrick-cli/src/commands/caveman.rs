@@ -16,6 +16,7 @@ fn map_intensity(i: CavemanIntensity) -> Intensity {
     }
 }
 
+/// Runs the `derrick caveman` subcommand (compresses a transcript on stdin).
 pub(crate) async fn run(args: CavemanArgs) -> Result<()> {
     let mut raw = Vec::new();
     io::stdin().lock().read_to_end(&mut raw)?;

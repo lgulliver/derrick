@@ -6,10 +6,13 @@ use derrick_adopt::ConstitutionMode;
 use inquire::validator::Validation;
 use inquire::{Confirm, MultiSelect, Select, Text};
 
+use derrick_config::BUILTIN_PROFILE_NAMES;
+
 use crate::commands::init::{
-    AiPlan, ModelSpec, RoleBindings, available_model_ids, recommended_role_bindings,
-    validate_prefix,
+    AiPlan, DEFAULT_PROFILE, ModelSpec, RoleBindings, available_model_ids,
+    recommended_role_bindings, validate_prefix,
 };
+use crate::commands::profile::builtin_description;
 use crate::commands::spec_provider_init::SpecProviderChoice;
 
 // ─── terminal style ──────────────────────────────────────────────────────────
@@ -70,6 +73,8 @@ pub(crate) struct WizardInput<'a> {
     pub(crate) default_jetbrains: bool,
     pub(crate) default_force: bool,
     pub(crate) available_models: Vec<(&'static str, &'static str)>,
+    /// The existing repo's configured default profile, used to pre-select the wizard prompt.
+    pub(crate) default_profile: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +83,7 @@ pub(crate) struct WizardOutput {
     pub(crate) site_name: String,
     pub(crate) prefix: String,
     pub(crate) mode: crate::commands::InitMode,
+    pub(crate) default_profile: String,
     pub(crate) ai_plan: AiPlan,
     pub(crate) spec_provider: SpecProviderChoice,
     pub(crate) constitution: ConstitutionMode,
@@ -129,6 +135,7 @@ fn print_splash() {
     println!();
 }
 
+/// Runs the interactive `derrick init` wizard and returns the user's selections.
 pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliError> {
     print_splash();
     print_info(&input);
@@ -176,6 +183,38 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         1 => crate::commands::InitMode::Copilot,
         _ => crate::commands::InitMode::Crew,
     };
+
+    let mut profile_options: Vec<(String, String)> = BUILTIN_PROFILE_NAMES
+        .iter()
+        .map(|name| {
+            (
+                name.to_string(),
+                format!("{name:<10}  {}", builtin_description(name)),
+            )
+        })
+        .collect();
+    let preferred = input.default_profile.as_deref().unwrap_or(DEFAULT_PROFILE);
+    // Inject a user-defined profile name when it isn't in the built-in set so
+    // it round-trips unchanged through the wizard instead of silently reverting
+    // to the first built-in.
+    if !profile_options.iter().any(|(alias, _)| alias == preferred) {
+        profile_options.push((
+            preferred.to_owned(),
+            format!("{preferred:<10}  (user-defined)"),
+        ));
+    }
+    let profile_labels: Vec<&str> = profile_options.iter().map(|(_, l)| l.as_str()).collect();
+    let default_profile_idx = profile_options
+        .iter()
+        .position(|(alias, _)| alias == preferred)
+        .unwrap_or(0);
+    let default_profile = profile_options[ask!(ask_select(
+        "Default AI profile?",
+        &profile_labels,
+        default_profile_idx
+    ))]
+    .0
+    .as_str();
 
     let available_model_ids = available_model_ids();
     let role_defaults = recommended_role_bindings(mode, &available_model_ids);
@@ -368,6 +407,7 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         site_name,
         prefix,
         mode,
+        default_profile: default_profile.to_owned(),
         ai_plan,
         spec_provider,
         constitution,
@@ -461,6 +501,7 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
         site_name,
         prefix,
         mode,
+        default_profile,
         ai_plan,
         spec_provider,
         constitution,
@@ -503,6 +544,7 @@ fn print_preview(input: &WizardInput<'_>, output: &WizardOutput) {
     println!("{}", kv("Project", site_name));
     println!("{}", kv("Prefix", prefix));
     println!("{}", kv("Mode", mode.as_str()));
+    println!("{}", kv("Profile", default_profile));
     println!("{}", kv("AI config", &ai_plan.label()));
     println!("{}", kv("Spec provider", spec_provider.label()));
     if !greenfield {

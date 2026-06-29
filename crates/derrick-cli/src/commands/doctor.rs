@@ -13,6 +13,7 @@ use crate::exit_code::CliExitCode;
 use crate::output::OutputFormat;
 use crate::{current_repo_root, native_paths};
 
+/// Executes the `derrick doctor` subcommand.
 pub(crate) async fn execute(args: DoctorArgs) -> Result<CliExitCode, crate::CliError> {
     let repo_root = current_repo_root()?;
     let checks = run_checks(&repo_root).await;

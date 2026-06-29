@@ -11,6 +11,7 @@ use derrick_tools::HostRegistry;
 
 use crate::progress::CliReporter;
 
+/// Executes the `derrick run` subcommand (drill or resume).
 pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliError> {
     // A `--spec <path>` override (drill only) forces the `import` provider for
     // this run at the highest precedence, without editing derrick.yaml. It is
@@ -33,7 +34,31 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
         }
         RunCommand::Resume(_) => None,
     };
-    let (_repo_root, _config, _substrate, runner) = build_runner(spec_override).await?;
+    // A `--profile <name>` override (drill only) applies the named profile's
+    // stage bindings to the in-memory config for this run. When absent on a
+    // fresh drill, the config's `default_profile` (if any) is applied.
+    // Resume paths must never apply a profile — they reuse the prior run's
+    // pinned config and altering bindings mid-run violates the same contract
+    // as `--spec` + resume. Reject it up front with a clear error.
+    let profile_override = match &args.command {
+        RunCommand::Drill(drill) => {
+            if drill.profile.is_some() && (drill.resume_from.is_some() || drill.auto_resume) {
+                return Err(crate::message(
+                    "`--profile` cannot be combined with resuming an existing run \
+                     (--resume-from or an auto-resumed prompt); resume the run as-is \
+                     or start a fresh drill run instead",
+                ));
+            }
+            drill.profile.clone()
+        }
+        RunCommand::Resume(_) => None,
+    };
+    let is_resume = match &args.command {
+        RunCommand::Drill(drill) => drill.auto_resume || drill.resume_from.is_some(),
+        RunCommand::Resume(_) => true,
+    };
+    let (_repo_root, _config, _substrate, runner) =
+        build_runner(spec_override, profile_override, !is_resume).await?;
 
     match args.command {
         RunCommand::Drill(drill) => {
@@ -83,8 +108,11 @@ pub(crate) async fn execute(args: RunArgs) -> Result<CliExitCode, crate::CliErro
     }
 }
 
+/// Builds the substrate, runner, and resolved config for a run or resume.
 async fn build_runner(
     spec_override: Option<String>,
+    profile_override: Option<String>,
+    allow_default_profile: bool,
 ) -> Result<
     (
         std::path::PathBuf,
@@ -96,6 +124,25 @@ async fn build_runner(
 > {
     let repo_root = current_repo_root()?;
     let mut config = read_config(&repo_root)?;
+    // Apply the requested profile (or the configured default profile) before any
+    // other override: `--profile <name>` takes precedence over `default_profile`.
+    // On resume paths `allow_default_profile` is false to preserve the original
+    // run's role bindings.
+    config = if let Some(profile_name) = &profile_override {
+        config
+            .with_profile(profile_name)
+            .map_err(|e| crate::message(e.to_string()))?
+    } else if allow_default_profile {
+        if let Some(default) = config.default_profile().map(str::to_owned) {
+            config
+                .with_profile(&default)
+                .map_err(|e| crate::message(e.to_string()))?
+        } else {
+            config
+        }
+    } else {
+        config
+    };
     // Highest-precedence run override: `--spec <path>` forces the import provider.
     if let Some(source) = spec_override {
         config.force_import_spec(source);
@@ -120,6 +167,7 @@ async fn build_runner(
     Ok((repo_root, config, substrate, runner))
 }
 
+/// Constructs a [`PipelineInput`] from the resolved drill arguments.
 fn pipeline_input(args: crate::commands::DrillRunArgs) -> Result<PipelineInput, crate::CliError> {
     let mut skip = args
         .skip
@@ -149,6 +197,7 @@ fn pipeline_input(args: crate::commands::DrillRunArgs) -> Result<PipelineInput, 
     })
 }
 
+/// Maps a pipeline run status to the CLI exit code.
 fn status_code(status: derrick_flow::RunStatus) -> CliExitCode {
     match status {
         derrick_flow::RunStatus::Success => CliExitCode::Success,

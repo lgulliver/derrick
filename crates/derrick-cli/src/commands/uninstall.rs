@@ -10,6 +10,7 @@ use crate::commands::UninstallArgs;
 use crate::exit_code::CliExitCode;
 use crate::{current_repo_root, message};
 
+/// Executes the `derrick uninstall` subcommand (removes derrick config and state from the repo).
 pub(crate) async fn execute(args: UninstallArgs) -> Result<CliExitCode, crate::CliError> {
     let _ = args.purge; // reserved for future use; accepted for forward-compat.
     let repo_root = current_repo_root()?;

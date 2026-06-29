@@ -11,6 +11,7 @@ use crate::commands::UndoArgs;
 use crate::exit_code::CliExitCode;
 use crate::{CliError, current_repo_root, message, native_paths, read_config};
 
+/// Executes the `derrick undo` subcommand (reverts the last completed run).
 pub(crate) async fn execute(args: UndoArgs) -> Result<CliExitCode, CliError> {
     let repo_root = current_repo_root()?;
     let config = read_config(&repo_root)?;

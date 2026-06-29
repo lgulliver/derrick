@@ -18,6 +18,7 @@ use crate::commands::{
 use crate::exit_code::CliExitCode;
 use crate::{create_dir_all, current_repo_root, message, native_paths, read_config, write_file};
 
+/// Executes the `derrick ticket` subcommand.
 pub(crate) async fn execute(args: TicketArgs) -> Result<CliExitCode, crate::CliError> {
     let repo_root = current_repo_root()?;
     let config = read_config(&repo_root)?;
