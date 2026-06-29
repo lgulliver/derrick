@@ -755,7 +755,15 @@ fn apply_text_overrides(
         }
     }
 
-    lines.push(format!("default_profile: {}", resolved.default_profile));
+    // Serialize the profile name through serde_yaml so special characters
+    // (`:`, `#`, whitespace) are properly quoted in the output.
+    let profile_scalar =
+        serde_yaml::to_string(&serde_yaml::Value::String(resolved.default_profile.clone()))
+            .map_err(|e| message(e.to_string()))?;
+    lines.push(format!(
+        "default_profile: {}",
+        profile_scalar.trim_end_matches('\n')
+    ));
 
     if let Some(profiles_yaml) = &resolved.existing_profiles_yaml {
         lines.push("profiles:".to_owned());
