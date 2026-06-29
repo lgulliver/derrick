@@ -200,6 +200,9 @@ struct ResolvedInitOptions {
     conventional_commits: bool,
     branch_prefix: String,
     default_profile: String,
+    /// Serialised YAML of the existing `profiles:` mapping, preserved across
+    /// init reruns so user-defined profiles survive a `derrick init` rerun.
+    existing_profiles_yaml: Option<String>,
 }
 
 /// Executes the `derrick init` subcommand (scaffolds derrick into a repository).
@@ -309,13 +312,17 @@ fn resolve_options(
     let constitution = constitution_mode(&args);
 
     if should_run_wizard(&args) {
-        let existing_default_profile = if repo_root.join("derrick.yaml").exists() {
-            crate::read_config(repo_root)
-                .ok()
-                .and_then(|c| c.default_profile().map(str::to_owned))
-        } else {
-            None
-        };
+        let (existing_default_profile, existing_profiles_yaml) =
+            if repo_root.join("derrick.yaml").exists() {
+                let existing_config = crate::read_config(repo_root).ok();
+                let default_profile = existing_config
+                    .as_ref()
+                    .and_then(|c| c.default_profile().map(str::to_owned));
+                let profiles_yaml = read_existing_profiles_yaml(repo_root);
+                (default_profile, profiles_yaml)
+            } else {
+                (None, None)
+            };
         let wizard_input = WizardInput {
             repo_root,
             has_existing_config: repo_root.join("derrick.yaml").exists(),
@@ -362,6 +369,7 @@ fn resolve_options(
                     conventional_commits: selection.conventional_commits,
                     branch_prefix: selection.branch_prefix,
                     default_profile: selection.default_profile,
+                    existing_profiles_yaml,
                 }))
             }
         };
@@ -394,6 +402,7 @@ fn resolve_options(
             .ok()
             .and_then(|c| c.default_profile().map(str::to_owned))
             .unwrap_or_else(|| DEFAULT_PROFILE.to_owned()),
+        existing_profiles_yaml: read_existing_profiles_yaml(repo_root),
     }))
 }
 
@@ -748,6 +757,13 @@ fn apply_text_overrides(
 
     lines.push(format!("default_profile: {}", resolved.default_profile));
 
+    if let Some(profiles_yaml) = &resolved.existing_profiles_yaml {
+        lines.push("profiles:".to_owned());
+        for line in profiles_yaml.lines() {
+            lines.push(format!("  {line}"));
+        }
+    }
+
     let out = format!("{}\n", lines.join("\n"));
     // Speckit is a no-op here (returns `out` unchanged), so the template's
     // comments survive on the common catalogue path; native/import round-trip
@@ -779,12 +795,37 @@ fn apply_config_overrides(
         serde_yaml::Value::String(resolved.default_profile.clone()),
     );
 
+    if let Some(profiles_yaml) = &resolved.existing_profiles_yaml {
+        if let Ok(profiles_value) = serde_yaml::from_str::<serde_yaml::Value>(profiles_yaml) {
+            root.insert(
+                serde_yaml::Value::String("profiles".to_owned()),
+                profiles_value,
+            );
+        }
+    }
+
     if matches!(resolved.mode, crate::commands::InitMode::Crew) {
         ensure_crew_pipeline(root)?;
     }
 
     let out = serde_yaml::to_string(&yaml).map_err(|error| message(error.to_string()))?;
     crate::commands::spec_provider_init::apply_spec_provider(&out, resolved.spec_provider)
+}
+
+/// Reads the `profiles:` mapping from the existing `derrick.yaml`, serialising
+/// it back to a YAML string so it can be merged into re-rendered configs.
+/// Returns `None` when the file is absent or has no non-empty profiles block.
+fn read_existing_profiles_yaml(repo_root: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(repo_root.join("derrick.yaml")).ok()?;
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
+    let profiles = yaml.get("profiles")?;
+    if profiles.is_null() {
+        return None;
+    }
+    if profiles.as_mapping().is_some_and(|m| m.is_empty()) {
+        return None;
+    }
+    serde_yaml::to_string(profiles).ok()
 }
 
 /// Returns a mutable reference to a nested YAML mapping, creating it if absent.
@@ -1651,6 +1692,7 @@ mod tests {
             conventional_commits: true,
             branch_prefix: "feat/".to_owned(),
             default_profile: DEFAULT_PROFILE.to_owned(),
+            existing_profiles_yaml: None,
         }
     }
 
