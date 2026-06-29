@@ -184,22 +184,37 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         _ => crate::commands::InitMode::Crew,
     };
 
-    let profile_options: Vec<(&str, String)> = BUILTIN_PROFILE_NAMES
+    let mut profile_options: Vec<(String, String)> = BUILTIN_PROFILE_NAMES
         .iter()
-        .map(|name| (*name, format!("{name:<10}  {}", builtin_description(name))))
+        .map(|name| {
+            (
+                name.to_string(),
+                format!("{name:<10}  {}", builtin_description(name)),
+            )
+        })
         .collect();
-    let profile_labels: Vec<&str> = profile_options.iter().map(|(_, l)| l.as_str()).collect();
     let preferred = input.default_profile.as_deref().unwrap_or(DEFAULT_PROFILE);
+    // Inject a user-defined profile name when it isn't in the built-in set so
+    // it round-trips unchanged through the wizard instead of silently reverting
+    // to the first built-in.
+    if !profile_options.iter().any(|(alias, _)| alias == preferred) {
+        profile_options.push((
+            preferred.to_owned(),
+            format!("{preferred:<10}  (user-defined)"),
+        ));
+    }
+    let profile_labels: Vec<&str> = profile_options.iter().map(|(_, l)| l.as_str()).collect();
     let default_profile_idx = profile_options
         .iter()
-        .position(|(alias, _)| *alias == preferred)
+        .position(|(alias, _)| alias == preferred)
         .unwrap_or(0);
     let default_profile = profile_options[ask!(ask_select(
         "Default AI profile?",
         &profile_labels,
         default_profile_idx
     ))]
-    .0;
+    .0
+    .as_str();
 
     let available_model_ids = available_model_ids();
     let role_defaults = recommended_role_bindings(mode, &available_model_ids);

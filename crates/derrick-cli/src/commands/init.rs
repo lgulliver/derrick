@@ -390,7 +390,10 @@ fn resolve_options(
         spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
         conventional_commits: true,
         branch_prefix: "feat/".to_owned(),
-        default_profile: DEFAULT_PROFILE.to_owned(),
+        default_profile: crate::read_config(repo_root)
+            .ok()
+            .and_then(|c| c.default_profile().map(str::to_owned))
+            .unwrap_or_else(|| DEFAULT_PROFILE.to_owned()),
     }))
 }
 
