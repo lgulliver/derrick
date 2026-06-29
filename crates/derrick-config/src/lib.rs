@@ -4912,9 +4912,8 @@ state:
         let config = load_yaml(&yaml).expect("preset should parse");
         // `proposer` is not a built-in stage name — it IS a role name.  A
         // user-defined profile targeting `proposer` directly should keep working.
-        let yaml_with_profile = assemble(
-            "ai:\n  preset: cli-defaults\nprofiles:\n  custom:\n    proposer: fast\n",
-        );
+        let yaml_with_profile =
+            assemble("ai:\n  preset: cli-defaults\nprofiles:\n  custom:\n    proposer: fast\n");
         let cfg = load_yaml(&yaml_with_profile).expect("user-defined profile should parse");
         let applied = cfg
             .with_profile("custom")
