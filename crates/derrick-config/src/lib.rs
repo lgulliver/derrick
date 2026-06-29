@@ -376,7 +376,8 @@ impl Config {
             } else {
                 let alias = &aliases[0];
                 if config.models.contains_key(alias) {
-                    config.roles.0.insert(stage.clone(), alias.clone());
+                    let role = stage_to_role(stage);
+                    config.roles.0.insert(role.to_owned(), alias.clone());
                 } else {
                     tracing::warn!(
                         target: "derrick_config",
@@ -882,6 +883,24 @@ fn builtin_profiles() -> std::collections::HashMap<String, Profile> {
 /// Returns the names of all built-in profiles (D80).
 pub const BUILTIN_PROFILE_NAMES: [&str; 6] =
     ["speed", "balanced", "quality", "cheap", "local", "ci"];
+
+/// Maps a profile stage name to the canonical role key it overrides (D86).
+///
+/// Built-in profiles use pipeline stage ids (`clarify`, `plan`, `tasks`,
+/// `execute`) as their stage keys; the live role map uses semantic role names
+/// (`proposer`, `drafter`, `executor`, …). Without this mapping, profile
+/// overrides insert orphan entries that the pipeline never reads.
+///
+/// Stage names that do not appear in the table are returned unchanged so that
+/// user-defined profiles can target arbitrary role names directly.
+fn stage_to_role(stage: &str) -> &str {
+    match stage {
+        "clarify" | "plan" | "analyze" => "proposer",
+        "specify" | "tasks" => "drafter",
+        "execute" => "executor",
+        other => other,
+    }
+}
 
 /// Role bindings keyed by role name.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4837,5 +4856,74 @@ state:
             load_yaml(&yaml).is_err(),
             "an unknown field under tools.specify must be rejected"
         );
+    }
+
+    // D86 — profile stage names must be folded to canonical role keys so that
+    // `--profile speed` actually updates the roles the pipeline reads.
+    #[test]
+    fn d86_profile_stage_names_fold_to_canonical_roles() {
+        // Use `cli-defaults` preset: it wires `proposer → strong`, `drafter → fast`,
+        // `executor → executor`, and provides the `fast` / `strong` model aliases.
+        let yaml = assemble("ai:\n  preset: cli-defaults");
+        let config = load_yaml(&yaml).expect("preset should parse");
+
+        // Baseline: proposer uses the `strong` alias, drafter uses `fast`.
+        assert_eq!(config.roles().get("proposer"), Some("strong"));
+        assert_eq!(config.roles().get("drafter"), Some("fast"));
+
+        // Applying the `quality` profile should update proposer → strong (no change)
+        // and drafter → strong (the change that proves folding works).
+        let quality = config
+            .with_profile("quality")
+            .expect("quality profile should apply");
+        assert_eq!(
+            quality.roles().get("proposer"),
+            Some("strong"),
+            "plan/analyze stages should fold to the `proposer` role"
+        );
+        assert_eq!(
+            quality.roles().get("drafter"),
+            Some("strong"),
+            "tasks/specify stages should fold to the `drafter` role"
+        );
+
+        // Applying the `speed` profile should update both proposer and drafter → fast.
+        let speed = config
+            .with_profile("speed")
+            .expect("speed profile should apply");
+        assert_eq!(
+            speed.roles().get("proposer"),
+            Some("fast"),
+            "plan stage should fold to the `proposer` role"
+        );
+        assert_eq!(
+            speed.roles().get("drafter"),
+            Some("fast"),
+            "tasks stage should fold to the `drafter` role"
+        );
+        assert_eq!(speed.active_profile(), Some("speed"));
+    }
+
+    // D86 — user-defined stage names that are not in the fold table pass through
+    // unchanged so custom pipeline roles can be targeted directly.
+    #[test]
+    fn d86_unknown_stage_name_passes_through_as_role_key() {
+        let yaml = assemble("ai:\n  preset: cli-defaults");
+        let config = load_yaml(&yaml).expect("preset should parse");
+        // `proposer` is not a built-in stage name — it IS a role name.  A
+        // user-defined profile targeting `proposer` directly should keep working.
+        let yaml_with_profile = assemble(
+            "ai:\n  preset: cli-defaults\nprofiles:\n  custom:\n    proposer: fast\n",
+        );
+        let cfg = load_yaml(&yaml_with_profile).expect("user-defined profile should parse");
+        let applied = cfg
+            .with_profile("custom")
+            .expect("custom profile should apply");
+        assert_eq!(
+            applied.roles().get("proposer"),
+            Some("fast"),
+            "targeting a role name directly in a user-defined profile should work"
+        );
+        let _ = config; // silence unused warning
     }
 }
