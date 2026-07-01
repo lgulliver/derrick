@@ -1,0 +1,25 @@
+lets commit to a branch and open a PR
+
+---
+
+work through PR comments
+
+---
+
+the other thing it should be is simple to use different providers and agent.md files for each agent.
+
+---
+
+address the PR comments
+
+---
+
+its merged, but readme.md needs updating
+
+---
+
+push it to main
+
+---
+
+great, lets do a new release
