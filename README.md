@@ -26,18 +26,15 @@ That one line walks the entire pipeline, remembers what it learns about your cod
 derrick drill "description"
       │
       ▼
-  clarify ──► plan ──► checkpoint ──► assay (adversarial review)
-                                          │
-                                          ▼
-                               analyze ──► tasks ──► bridge
-                                                         │
-                                                         ▼
-                                                  foreman (dispatch)
-                                                         │
-                                           ┌─────────────┴─────────────┐
-                                           ▼                           ▼
-                                       hand A                      hand B
-                                    (git worktree)              (git worktree)
+  specify ──► clarify ──► plan ──► assay (adversarial review) ──► tasks
+                                                                       │
+                                                                       ▼
+                                                            bridge ──► foreman
+                                                                       │
+                                                         ┌─────────────┴─────────────┐
+                                                         ▼                           ▼
+                                                     hand A                      hand B
+                                                  (git worktree)              (git worktree)
 ```
 
 Every step is configured in your repo's `derrick.yaml`. Skip any step at invocation time (`--no-clarify`, `--no-assay`, `--dry-run`) or remove it from the pipeline entirely.
@@ -248,7 +245,7 @@ derrick gain
 | `derrick-roughneck` | LLM output compressor via prompt injection — lite / full / ultra; records roughneck_tokens_saved per step |
 | `derrick-caveman` | Prose compressor — lite / full / ultra intensities |
 | `derrick-memory` | Tiered retrieval, tag index, lesson curation |
-| `derrick-tui` | ratatui dashboard (6 tabs) |
+| `derrick-tui` | ratatui dashboard (8 tabs) |
 | `derrick-observe` | TUI wiring, stack refresh, event loop |
 | `derrick-stack` | PR stacking — native engine (plain git + gh); `StackBackend` trait as extension seam |
 | `derrick-models` | Model trait + host-delegated providers (one per host CLI) + shell escape hatch |
@@ -352,7 +349,7 @@ What's landed and tested:
 - ✅ `derrick upgrade` — binary self-update from GitHub releases (`--check`, `--force`, atomic replacement with permission preservation)
 - ✅ Constitution seeding in `derrick init` wizard
 - ✅ `derrick init` initial commit fix — creates HEAD before first `derrick drill`
-- ✅ Pipeline step order fix — `tasks` before `analyze`
+- ✅ Native default pipeline — `specify → clarify → plan → assay → tasks`; speckit remains opt-in for explicit `/speckit.*` compatibility flows
 - ✅ `derrick observe` — live ratatui dashboard (8 tabs: overview, tickets, stack, activity, tokens, memory, hands, factory)
 - ✅ Factory view — animated ASCII factory floor of workers with unicode avatars per `HandKind`, smokestack/conveyor/dock, ~100 ms animation tick (D78)
 - ✅ Structured hand telemetry — `HandStarted`/`HandProgress`/`HandExited` events replace free-text dispatcher `Note`s; throttled progress (D76)
@@ -387,7 +384,7 @@ cargo llvm-cov --workspace --all-features --fail-under-lines 80
 
 ## Read next
 
-- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 85 decisions
+- [DESIGN.md](./DESIGN.md) — full architecture, pipeline schema, and all 88 decisions
 - [docs/spec-providers.md](./docs/spec-providers.md) — spec providers: speckit / native / import, config, and the `derrick spec import` + `--spec` flow (D85)
 - [AGENTS.md](./AGENTS.md) — operational contract for agents building derrick
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — engineering standards and PR workflow
