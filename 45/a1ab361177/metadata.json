@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.7.8",
+  "checkpoint_version": "branch-v1",
+  "checkpoint_id": "45a1ab361177",
+  "strategy": "manual-commit",
+  "branch": "codex/native-spec-provider-default",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "crates/derrick-config/src/lib.rs",
+    "crates/derrick-flow/src/lib.rs",
+    "crates/derrick-flow/src/steps.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/45/a1ab361177/0/metadata.json",
+      "transcript": "/45/a1ab361177/0/full.jsonl",
+      "compact_transcript": "/45/a1ab361177/0/transcript.jsonl",
+      "content_hash": "/45/a1ab361177/0/content_hash.txt",
+      "prompt": "/45/a1ab361177/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1574179,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 22858368,
+    "output_tokens": 73170,
+    "api_call_count": 211
+  }
+}
