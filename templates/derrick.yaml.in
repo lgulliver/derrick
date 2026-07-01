@@ -21,11 +21,17 @@ models:
     # complexity. Pin a specific id here to override.
     model: auto
 roles:
+  # Short form: role -> model alias.
   proposer: claude-opus
   drafter: claude-sonnet
   reviewer: codex-gpt5
   executor: copilot
   summariser: claude-haiku
+  # Expanded form: choose a provider/model alias and a host-native agent file
+  # for the same role.
+  # reviewer:
+  #   model: codex-gpt5
+  #   agent: .codex/agents/integrations-engineer.md
 tools:
   specify:
     provider: native

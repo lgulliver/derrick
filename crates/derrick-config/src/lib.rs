@@ -64,6 +64,13 @@ fn host_model(provider: &str, model: &str) -> ModelDef {
     }
 }
 
+fn role_model(model: &str) -> RoleBinding {
+    RoleBinding {
+        model: model.to_owned(),
+        agent: None,
+    }
+}
+
 /// Returns the host CLI binary backing a `*-cli` runtime, or `None` for API,
 /// local, and `shell` runtimes that do not shell out to a managed host.
 pub fn cli_host_for_runtime(runtime: &str) -> Option<&'static str> {
@@ -169,11 +176,11 @@ impl Config {
         models.insert("copilot".to_owned(), host_model("copilot", "auto"));
 
         let roles = HashMap::from([
-            ("proposer".to_owned(), "claude-opus".to_owned()),
-            ("drafter".to_owned(), "claude-sonnet".to_owned()),
-            ("reviewer".to_owned(), "codex-gpt5".to_owned()),
-            ("executor".to_owned(), "copilot".to_owned()),
-            ("summariser".to_owned(), "claude-haiku".to_owned()),
+            ("proposer".to_owned(), role_model("claude-opus")),
+            ("drafter".to_owned(), role_model("claude-sonnet")),
+            ("reviewer".to_owned(), role_model("codex-gpt5")),
+            ("executor".to_owned(), role_model("copilot")),
+            ("summariser".to_owned(), role_model("claude-haiku")),
         ]);
 
         Self {
@@ -359,7 +366,7 @@ impl Config {
                 for (i, alias) in aliases.iter().enumerate() {
                     if config.models.contains_key(alias) {
                         let role = format!("assay-reviewer-{}", i + 1);
-                        config.roles.0.insert(role.clone(), alias.clone());
+                        config.roles.0.insert(role.clone(), role_model(alias));
                         reviewer_roles.push(role);
                     } else {
                         tracing::warn!(
@@ -377,7 +384,11 @@ impl Config {
                 let alias = &aliases[0];
                 if config.models.contains_key(alias) {
                     let role = stage_to_role(stage);
-                    config.roles.0.insert(role.to_owned(), alias.clone());
+                    if let Some(binding) = config.roles.0.get_mut(role) {
+                        binding.model = alias.clone();
+                    } else {
+                        config.roles.0.insert(role.to_owned(), role_model(alias));
+                    }
                 } else {
                     tracing::warn!(
                         target: "derrick_config",
@@ -902,18 +913,43 @@ fn stage_to_role(stage: &str) -> &str {
     }
 }
 
+/// A role binding names the model alias for a role and, optionally, the
+/// host-native agent instruction file that should shape that role.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoleBinding {
+    model: String,
+    agent: Option<PathBuf>,
+}
+
+impl RoleBinding {
+    /// Returns the model alias this role resolves to.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Returns the optional role-specific agent instruction file.
+    pub fn agent(&self) -> Option<&Path> {
+        self.agent.as_deref()
+    }
+}
+
 /// Role bindings keyed by role name.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RoleBindings(HashMap<String, String>);
+pub struct RoleBindings(HashMap<String, RoleBinding>);
 
 impl RoleBindings {
     /// Returns the model name for a role.
     pub fn get(&self, role: &str) -> Option<&str> {
-        self.0.get(role).map(String::as_str)
+        self.0.get(role).map(RoleBinding::model)
+    }
+
+    /// Returns the optional agent instruction file for a role.
+    pub fn agent(&self, role: &str) -> Option<&Path> {
+        self.0.get(role).and_then(RoleBinding::agent)
     }
 
     /// Returns all role bindings.
-    pub fn as_map(&self) -> &HashMap<String, String> {
+    pub fn as_map(&self) -> &HashMap<String, RoleBinding> {
         &self.0
     }
 
@@ -1933,7 +1969,8 @@ fn required<T>(value: Option<T>, path: &str) -> Result<T, ConfigError> {
 }
 
 fn validate_roles(roles: &RoleBindings, models: &ModelRegistry) -> Result<(), ConfigError> {
-    for (role, model) in roles.as_map() {
+    for (role, binding) in roles.as_map() {
+        let model = binding.model();
         if !models.contains_key(model) {
             return validation(format!(
                 "roles.{role}: references unknown model {model:?} in models"
@@ -2218,7 +2255,7 @@ struct ConfigLayer {
     #[serde(default)]
     ai: Option<AiLayer>,
     models: Option<HashMap<String, ModelDefLayer>>,
-    roles: Option<HashMap<String, String>>,
+    roles: Option<HashMap<String, RoleBindingLayer>>,
     #[serde(default)]
     stages: Option<HashMap<String, StageBindingLayer>>,
     tools: Option<ToolsLayer>,
@@ -2285,7 +2322,7 @@ impl ConfigLayer {
         for (role, alias) in roles {
             role_map
                 .entry(role.to_owned())
-                .or_insert_with(|| alias.to_owned());
+                .or_insert_with(|| RoleBindingLayer::from(alias));
         }
         Ok(())
     }
@@ -2309,7 +2346,10 @@ impl ConfigLayer {
         // Fold stage bindings into role bindings and, for a multi-model `assay`
         // stage, into the assay reviewer list — so this must run before the
         // tools (assay) layer is finalized.
-        let mut roles = required(self.roles, "roles")?;
+        let mut roles: HashMap<String, RoleBinding> = required(self.roles, "roles")?
+            .into_iter()
+            .map(|(role, layer)| (role, layer.binding))
+            .collect();
         let mut tools_layer = self.tools.unwrap_or_default();
         let stage_requirements = apply_stages(
             self.stages.unwrap_or_default(),
@@ -2369,17 +2409,17 @@ impl ConfigLayer {
 /// requirements. A `stages:` entry overrides a role binding from a lower layer.
 fn apply_stages(
     stages: HashMap<String, StageBindingLayer>,
-    roles: &mut HashMap<String, String>,
+    roles: &mut HashMap<String, RoleBinding>,
     tools: &mut ToolsLayer,
 ) -> Result<BTreeMap<String, Vec<String>>, ConfigError> {
     let mut requirements = BTreeMap::new();
     for (stage, binding) in stages {
         match binding {
             StageBindingLayer::Alias(alias) => {
-                roles.insert(stage, alias);
+                upsert_role_model(roles, &stage, alias);
             }
             StageBindingLayer::Structured { model, requires } => {
-                roles.insert(stage.clone(), model);
+                upsert_role_model(roles, &stage, model);
                 if !requires.is_empty() {
                     requirements.insert(stage, requires);
                 }
@@ -2404,7 +2444,7 @@ fn apply_stages(
                     .enumerate()
                     .map(|(index, alias)| {
                         let role = format!("assay-reviewer-{}", index + 1);
-                        roles.insert(role.clone(), alias);
+                        upsert_role_model(roles, &role, alias);
                         role
                     })
                     .collect();
@@ -2416,6 +2456,19 @@ fn apply_stages(
         }
     }
     Ok(requirements)
+}
+
+fn upsert_role_model(
+    roles: &mut HashMap<String, RoleBinding>,
+    role: &str,
+    model: impl Into<String>,
+) {
+    let model = model.into();
+    if let Some(binding) = roles.get_mut(role) {
+        binding.model = model;
+    } else {
+        roles.insert(role.to_owned(), role_model(&model));
+    }
 }
 
 impl From<Config> for ConfigLayer {
@@ -2432,7 +2485,14 @@ impl From<Config> for ConfigLayer {
                     .map(|(name, model)| (name, model.into()))
                     .collect(),
             ),
-            roles: Some(config.roles.0),
+            roles: Some(
+                config
+                    .roles
+                    .0
+                    .into_iter()
+                    .map(|(role, binding)| (role, binding.into()))
+                    .collect(),
+            ),
             stages: None,
             tools: Some(config.tools.into()),
             pipeline: Some(config.pipeline.into_iter().map(Into::into).collect()),
@@ -2605,6 +2665,73 @@ enum StageBindingLayer {
         #[serde(default)]
         requires: Vec<String>,
     },
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoleBindingSpec {
+    model: String,
+    #[serde(default)]
+    agent: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+struct RoleBindingLayer {
+    binding: RoleBinding,
+}
+
+impl From<&str> for RoleBindingLayer {
+    fn from(model: &str) -> Self {
+        Self {
+            binding: role_model(model),
+        }
+    }
+}
+
+impl From<RoleBinding> for RoleBindingLayer {
+    fn from(binding: RoleBinding) -> Self {
+        Self { binding }
+    }
+}
+
+impl<'de> Deserialize<'de> for RoleBindingLayer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RoleBindingLayerVisitor;
+
+        impl<'de> Visitor<'de> for RoleBindingLayerVisitor {
+            type Value = RoleBindingLayer;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a model alias string or a role mapping")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<RoleBindingLayer, E>
+            where
+                E: de::Error,
+            {
+                Ok(RoleBindingLayer::from(value))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<RoleBindingLayer, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let spec =
+                    RoleBindingSpec::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(RoleBindingLayer {
+                    binding: RoleBinding {
+                        model: spec.model,
+                        agent: spec.agent,
+                    },
+                })
+            }
+        }
+
+        deserializer.deserialize_any(RoleBindingLayerVisitor)
+    }
 }
 
 /// A model-alias layer entry. Accepts either the structured mapping form or the
@@ -4420,7 +4547,9 @@ models:
     rate_limit: 10/s
     cost_hint: high
 roles:
-  drafter: full
+  drafter:
+    model: full
+    agent: .codex/agents/drafter.md
   executor: full
 tools:
   speckit:
@@ -4510,6 +4639,11 @@ state:
         assert_eq!(model.cost_hint(), Some("high"));
         assert_eq!(config.roles().as_map().len(), 2);
         assert_eq!(config.roles().get("drafter"), Some("full"));
+        assert_eq!(
+            config.roles().agent("drafter"),
+            Some(Path::new(".codex/agents/drafter.md"))
+        );
+        assert_eq!(config.roles().agent("executor"), None);
 
         assert!(!config.tools().speckit().enabled());
         assert_eq!(config.tools().speckit().version(), ">=1.0.0");

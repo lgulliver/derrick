@@ -220,6 +220,8 @@ pub(crate) async fn execute_role_step(
         };
         let prompt = render_template(command, &template_context(config, state)?)?;
         let prompt = inject_clarify_answers_for_plan(step.id(), state, repo_root, prompt)?;
+        let prompt =
+            apply_role_agent_context(config, step.role(), working_dir(state, repo_root), prompt)?;
         // Apply roughneck prompt injection if enabled.
         let prompt = if config.tools().roughneck().enabled() {
             derrick_roughneck::inject_prompt(&prompt, config.tools().roughneck().level())
@@ -354,6 +356,8 @@ pub(crate) async fn execute_role_step(
             .map_or_else(|| state.prompt.clone(), ToOwned::to_owned);
         let rendered = render_template(&prompt, &template_context(config, state)?)?;
         let rendered = inject_clarify_answers_for_plan(step.id(), state, repo_root, rendered)?;
+        let rendered =
+            apply_role_agent_context(config, Some(role), working_dir(state, repo_root), rendered)?;
         // Apply roughneck prompt injection if enabled.
         let rendered = if config.tools().roughneck().enabled() {
             derrick_roughneck::inject_prompt(&rendered, config.tools().roughneck().level())
@@ -390,6 +394,33 @@ pub(crate) async fn execute_role_step(
                 .with_roughneck(roughneck_saved),
         )
     }
+}
+
+fn apply_role_agent_context(
+    config: &derrick_config::Config,
+    role: Option<&str>,
+    working_dir: &Path,
+    prompt: String,
+) -> Result<String, RunError> {
+    let Some(role) = role else {
+        return Ok(prompt);
+    };
+    let Some(agent_path) = config.roles().agent(role) else {
+        return Ok(prompt);
+    };
+    let full_path = if agent_path.is_absolute() {
+        agent_path.to_path_buf()
+    } else {
+        working_dir.join(agent_path)
+    };
+    let instructions = std::fs::read_to_string(&full_path).map_err(|source| RunError::Io {
+        path: full_path.clone(),
+        source,
+    })?;
+    Ok(format!(
+        "Use these role-specific agent instructions for role `{role}` from `{path}`:\n\n{instructions}\n\n---\n\n{prompt}",
+        path = agent_path.display()
+    ))
 }
 
 async fn execute_derrick_step(

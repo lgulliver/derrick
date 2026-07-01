@@ -187,11 +187,14 @@ models:
   # my-tool:      { provider: shell, command: "my-tool --prompt-envelope" }
 
 # Role bindings — pipeline steps name a role; the role names a model.
-# Changing one model changes the whole class of step that uses it.
+# Changing one model changes the whole class of step that uses it. Use the
+# expanded form when the role should also carry a host-native agent file.
 roles:
   proposer:  claude-opus       # plan (heavy reasoning)
   drafter:   claude-sonnet     # specify + tasks (mechanical)
-  reviewer:  codex-gpt5        # assay (adversarial, different family)
+  reviewer:
+    model: codex-gpt5          # assay (adversarial, different family)
+    agent: .codex/agents/integrations-engineer.md
   executor:  copilot           # ticket dispatch in crew/copilot mode
   summariser: claude-sonnet    # inter-step caveman-augmented summary, if used
 
@@ -1013,7 +1016,9 @@ When derrick invokes a step on a host CLI it deliberately does
 bypass the host's rule loading. The contract:
 
 - Derrick passes the working directory (the user's repo) and the
-  step command. That's it.
+  step command. If `roles.<role>.agent` is configured, derrick
+  reads that repo-local agent file and prepends it to the step as
+  explicit user-configured role context.
 - The host loads its **own** files: `CLAUDE.md`, `AGENTS.md`,
   sub-agents under `.claude/agents/`, skills under
   `.claude/skills/`, plugins, hooks, `.codex/`, `~/.codex/`,
@@ -1035,6 +1040,35 @@ A brownfield repo with a carefully tuned AGENTS.md and twenty
 agents gets exactly the same Claude Code behaviour inside a
 derrick step as it would in a normal session. Derrick is the
 conductor, not the orchestra.
+
+#### Per-role providers and agent files
+
+The short role form remains the default:
+
+```yaml
+roles:
+  reviewer: codex-gpt5
+```
+
+Use the expanded form to keep provider/model selection and the
+role's agent file together:
+
+```yaml
+roles:
+  reviewer:
+    model: codex-gpt5
+    agent: .codex/agents/integrations-engineer.md
+  executor:
+    model: copilot
+    agent: .github/agents/flow-engineer.md
+```
+
+`model` is the existing model alias, so switching providers is still
+one edit under `models:` or `roles:`. `agent` is a path relative to
+the step working tree unless absolute. Derrick reads the file and
+includes it as role context for that step; host CLIs still load their
+own standard files (`AGENTS.md`, `.codex/instructions.md`,
+`.github/copilot-instructions.md`, etc.) normally.
 
 **One narrowing (D66/D67)**: model selection is the single dimension
 derrick now asserts on the run path. The user picks the HOST (the
@@ -2395,6 +2429,7 @@ links back to the section where it lives.
 | D86 | **AI Profiles, Budgeting & Intelligent Model Selection.** Builds on D79 (runtime-based AI architecture) by introducing three layered additions. **(1) Profiles** — a named set of stage overrides that temporarily replaces role bindings without touching `derrick.yaml`. `profiles:` in config maps a profile name to a `stages:` binding exactly like the top-level `stages:` section; `--profile speed` on `derrick drill` or `derrick run drill` calls `Config::with_profile`, applies the overrides in-memory, and the resulting config is used for that run only. Six built-in profiles ship as compiled defaults: `speed` (fast alias everywhere, minimum reviewers), `balanced` (no overrides — labels the baseline config), `quality` (strong models, multi-reviewer assay), `cheap` (cheap alias everywhere), `local` (local alias everywhere, fails if no local runtime configured), `ci` (same bindings as speed, `ci: true` flag suppresses interactive prompts). Built-in profiles reference the conventional aliases `fast`, `strong`, `cheap`, `local`; missing aliases are warned-and-skipped (never a hard error). User-defined profiles in `derrick.yaml` take precedence over built-ins by name and can reference any alias in the model registry. `derrick profile list` prints all profiles (built-in + user); `derrick profile show <name>` shows one profile's bindings. `default_profile:` in config sets the baseline profile applied when no `--profile` flag is given; wizard exposes this as a single-select during `derrick init --wizard`. **(2) Model estimate metadata** — an optional `estimated:` block on a model alias (`latency: low\|medium\|high`, `cost: very_low\|low\|medium\|high\|very_high`, `quality: low\|medium\|high\|very_high`) informs intelligent selection and the cost report. Unknown values are ignored (forward-compatible). **(3) Budget system** — optional `budgets:` in config adds per-ticket, daily, and monthly cost caps (`max_cost: <f64>` USD). Before execution the foreman estimates cost from `estimated.cost` tiers; if the estimate exceeds the active budget it warns and prompts (y/N) or auto-fails in CI mode. `derrick cost` reports estimated spend by tier, CLI usage, API usage, and local usage. Active profile is visible in `derrick status`, `derrick observe` Overview tab, and structured logs. Architecture constraint: built-in profiles are treated exactly like user-defined profiles at the application layer — no hardcoded names in the selection or dispatch logic beyond the initial fallback lookup. `CONFIG_VERSION` unchanged (all new top-level fields and model-def fields are additive optional). | §6.5 / §6.5.1 / D79 |
 | D85 | **Pluggable spec-provider seam: `tools.specify.provider` selects `speckit` \| `native` \| `import` across the spec→plan→tasks surface. Refines D2/D3; default clause superseded by D87.** The `specify`/`plan`/`tasks` pipeline steps generalise from a single host-delegated speckit invocation into a selectable provider — all three produce the **same on-disk artifacts** (`specs/<NNN>-<slug>/{spec,plan,tasks}.md` + `.specify/feature.json`) so downstream `clarify`/`assay`/`bridge` are unchanged. **(a) `speckit`** — the host-delegated path (D30), preserved as an explicit compatibility provider. **(b) `native`** — a derrick-owned in-process generator (new `derrick-specify` crate) using host-CLI completions: **survey-grounded** (derrick writes the `grounding:` front-matter from the real index, so the model never invents symbol/path names; degrades gracefully with no index), **clarify-first** (the clarify Q&A runs *before* drafting), and **schema-validated** (YAML front-matter + required headings; `validate_spec/plan/tasks` return Reject/Warn findings with one bounded repair pass), wired through roughneck/caveman/prompt-caching for token efficiency. **(c) `import`** — bring-your-own spec/PRD from a local file (v1): passed through verbatim if it already matches the schema, else normalised by one model call; `import.{plan,tasks}` each select `native`\|`speckit`\|`import` downstream. Remote sources (GitHub issue / Notion / Confluence) are a documented deferred limitation — derrick's Rust cannot call agent-side MCP tools; export to a local file. **Seam shape:** a closed `SpecProviderKind` enum + a `run_spec_phase` resolver in `derrick-flow` (not a `dyn` trait), matching the `StackBackendKind`/`SubstrateBackendKind` selection precedent rather than the open `Substrate`/`StackBackend` trait seams. **Back-compat:** the provider is consulted only for a *bare* `specify`/`plan`/`tasks` step (no `role`/`host`/`command`/`runner`); a step pinning `host:`+`command:` runs verbatim through the existing role path. The absent `role` is load-bearing, not incidental: it is part of what classifies a step as bare (`is_bare` in `derrick-flow::steps`, `is_bare_spec_step` in `derrick-config`), so a step that carries a `role:` deliberately does *not* route to the seam. The native generator never reads the step's `role:` — it resolves its own `drafter`/`proposer` tiers from `roles:` internally, and `derrick doctor` validates those two tiers (not the step's role) resolve to a model. `CONFIG_VERSION` unchanged (additive optional fields, per D66/D67). `derrick init` has a provider prompt; `derrick doctor` reports the active provider and scopes the speckit-on-PATH check to the `speckit` provider or steps that pin `/speckit.*`. New MCP-backed import sources touching company systems require IT approval. | §4 / §5.2 / §5.3 / D2 / D3 / D30 |
 | D87 | **Native spec provider is the default for new sites.** Supersedes D85's default-provider clause while preserving its seam and artifact contract. New `derrick init` configs write `tools.specify.provider: native` and bare `specify`/`plan`/`tasks` steps, so a standard `/drill` path no longer requires speckit. Speckit remains an explicit compatibility provider: selecting it pins `/speckit.specify`, `/speckit.plan`, `/speckit.tasks`, and `/speckit.analyze` as host commands, and existing configs with explicit `/speckit.*` steps continue to run verbatim. The default native pipeline drops the optional `/speckit.analyze` step; schema validation in `derrick-specify` plus the assay step are the native quality gates. `derrick doctor` checks for speckit only when provider `speckit` is selected or a pipeline step explicitly pins `/speckit.*`. `CONFIG_VERSION` remains unchanged because existing config semantics are preserved and the change affects generated defaults. | §4 / §5.2 / §5.3 / D85 |
+| D88 | **Roles may bind both model/provider and an agent file.** The `roles:` map keeps its existing short form (`reviewer: codex-gpt5`) and gains an expanded form (`reviewer: { model: codex-gpt5, agent: .codex/agents/integrations-engineer.md }`). `model` is the existing model alias, so provider switching remains a one-line role/model edit; `agent` is an optional repo-local path to the host-native agent instruction file for that role. During role-step execution, derrick reads the configured file from the step working tree and prepends it as explicit user-configured role context before the step prompt. This is not a hidden derrick system prompt and does not replace host-native rule loading: Claude/Codex/Copilot/opencode/aider still load `AGENTS.md`, `.codex/instructions.md`, `.github/copilot-instructions.md`, sub-agent files, skills, hooks, and plugins normally. Profiles and `stages:` overrides update only the role's model binding and preserve any configured agent path. `CONFIG_VERSION` remains unchanged because the short form is still accepted and the expanded form is additive. | §6.5 / §5.2 / D65 / D66 |
 
 ### Remaining open questions
 

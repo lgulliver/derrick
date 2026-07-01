@@ -127,7 +127,7 @@ fn models_check_core_with_probes(
         .roles()
         .as_map()
         .iter()
-        .map(|(role, model)| (role.as_str(), model.as_str()))
+        .map(|(role, binding)| (role.as_str(), binding.model()))
         .collect();
     roles.sort_unstable();
 
