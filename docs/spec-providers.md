@@ -73,9 +73,11 @@ grounding (replaces model-side `grep`/`glob` fan-out), deterministic validation
 (replaces a `/speckit.analyze` model pass), and roughneck/caveman/prompt-caching
 on the model calls.
 
-**Scope note:** the native path covers **spec → plan → tasks**. The old optional
+**Scope note:** this note applies to the spec-provider seam only; the native
+default pipeline still includes `clarify` elsewhere in the flow. The old optional
 `/speckit.analyze` step is not part of the seam and is not included in the
-native default pipeline; validation is handled by native schema checks and assay.
+native default provider path; validation is handled by native schema checks and
+assay.
 
 ---
 

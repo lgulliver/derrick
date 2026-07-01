@@ -148,6 +148,7 @@ fn pin_speckit_steps(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliErr
             Some("specify") => pin_step(mapping, "drafter", "/speckit.specify {{prompt}}"),
             Some("plan") => pin_step(mapping, "proposer", "/speckit.plan"),
             Some("tasks") => pin_step(mapping, "drafter", "/speckit.tasks"),
+            Some("analyze") => pin_step(mapping, "proposer", "/speckit.analyze"),
             _ => {}
         }
     }
@@ -259,6 +260,29 @@ mod tests {
                 "{id} should pin speckit"
             );
         }
+    }
+
+    #[test]
+    fn speckit_choice_pins_existing_analyze_step() {
+        let rendered =
+            rendered_template().replace("  - id: tasks\n", "  - id: tasks\n  - id: analyze\n");
+        let out = apply_spec_provider(&rendered, SpecProviderChoice::Speckit).expect("apply");
+        let config = load(&out);
+        let analyze = config
+            .pipeline()
+            .iter()
+            .find(|step| step.id() == "analyze")
+            .expect("analyze step");
+        assert_eq!(analyze.host(), Some(Host::Claude));
+        assert_eq!(analyze.command(), Some("/speckit.analyze"));
+        assert_eq!(
+            config
+                .pipeline()
+                .iter()
+                .filter(|step| step.id() == "analyze")
+                .count(),
+            1
+        );
     }
 
     #[test]
