@@ -366,7 +366,7 @@ impl Config {
                 for (i, alias) in aliases.iter().enumerate() {
                     if config.models.contains_key(alias) {
                         let role = format!("assay-reviewer-{}", i + 1);
-                        config.roles.0.insert(role.clone(), role_model(alias));
+                        upsert_role_model(&mut config.roles.0, &role, alias.clone());
                         reviewer_roles.push(role);
                     } else {
                         tracing::warn!(
@@ -5048,5 +5048,25 @@ state:
             "targeting a role name directly in a user-defined profile should work"
         );
         let _ = config; // silence unused warning
+    }
+
+    #[test]
+    fn d88_multi_reviewer_profile_preserves_existing_agent_binding() {
+        let yaml = assemble(
+            "ai:\n  preset: cli-defaults\nroles:\n  assay-reviewer-1:\n    model: reviewer\n    agent: .codex/agents/reviewer-one.md\nprofiles:\n  custom:\n    assay: [strong, reviewer]",
+        );
+        let config = load_yaml(&yaml).expect("profile config should parse");
+
+        let applied = config
+            .with_profile("custom")
+            .expect("custom profile should apply");
+
+        assert_eq!(applied.roles().get("assay-reviewer-1"), Some("strong"));
+        assert_eq!(applied.roles().get("assay-reviewer-2"), Some("reviewer"));
+        assert_eq!(
+            applied.roles().agent("assay-reviewer-1"),
+            Some(Path::new(".codex/agents/reviewer-one.md"))
+        );
+        assert_eq!(applied.roles().agent("assay-reviewer-2"), None);
     }
 }
