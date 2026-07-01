@@ -312,20 +312,17 @@ pub(crate) fn run(input: WizardInput<'_>) -> Result<WizardSelection, crate::CliE
         validate_role_models(roles, &available_model_ids)?;
     }
 
-    // How should derrick produce specs? Speckit is the default & recommended
-    // path and leaves the generated config untouched; native and import switch
-    // `tools.specify.provider` and route the bare spec steps through the seam.
     let spec_provider = match ask!(ask_select(
         "How should derrick produce specs?",
         &[
-            "speckit   delegate to the speckit host CLI (default & recommended)",
-            "native    derrick-native spec generation",
+            "native    derrick-native spec generation (default)",
+            "speckit   delegate to the speckit host CLI",
             "import    bring your own externally-authored spec",
         ],
         0,
     )) {
-        0 => SpecProviderChoice::Speckit,
-        1 => SpecProviderChoice::Native,
+        0 => SpecProviderChoice::Native,
+        1 => SpecProviderChoice::Speckit,
         _ => SpecProviderChoice::Import,
     };
 

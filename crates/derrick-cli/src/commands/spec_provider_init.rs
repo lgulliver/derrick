@@ -1,39 +1,11 @@
-//! Spec-provider selection for `derrick init` (Phase 4 of the spec-provider
-//! seam, DESIGN.md §5.3).
-//!
-//! The init wizard asks "How should derrick produce specs?" and the answer is
-//! captured as a [`SpecProviderChoice`]. The choice rewrites the freshly
-//! rendered `derrick.yaml` *after* the AI-plan overrides run:
-//!
-//!   * [`SpecProviderChoice::Speckit`] — the default and historical behaviour.
-//!     The config is returned unchanged: the bundled template already declares
-//!     explicit `host: claude` + `command: "/speckit.specify …"` spec steps and
-//!     omits `tools.specify.provider` (which defaults to speckit). No one who
-//!     does not pick otherwise sees any change.
-//!   * [`SpecProviderChoice::Native`] — writes `tools.specify.provider: native`
-//!     and strips the `host`/`command` from the `specify`/`plan`/`tasks` steps so
-//!     they become *bare* and route through the native generator.
-//!   * [`SpecProviderChoice::Import`] — writes `tools.specify.provider: import`
-//!     plus an `import:` block carrying a commented `source:` stub and the
-//!     `plan`/`tasks: native` downstream defaults, and bares the spec steps the
-//!     same way.
-//!
-//! The rewrite is a `serde_yaml` post-pass. Speckit short-circuits before the
-//! round-trip so the common path keeps the template's comments verbatim.
-//!
-//! Implementor of the rewrite: [`apply_spec_provider`]. Tested in this module's
-//! `tests` against the bundled template and `derrick_config::Config`.
-
 /// How the wizard wants specs produced. Mirrors
 /// [`derrick_config::SpecProviderKind`] but lives in the CLI so the wizard can
 /// own the prompt ordering and labels.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum SpecProviderChoice {
-    /// Delegate to the speckit host CLI (default & recommended; unchanged).
     #[default]
-    Speckit,
-    /// Derrick-native spec generation via the seam.
     Native,
+    Speckit,
     /// Import an externally-authored spec.
     Import,
 }
@@ -49,8 +21,6 @@ impl SpecProviderChoice {
     }
 }
 
-/// The bare spec steps the seam recognises (`SpecPhase::from_step_id`). `analyze`
-/// is *not* part of the seam, so it keeps its explicit speckit host/command.
 const BARE_SPEC_STEPS: [&str; 3] = ["specify", "plan", "tasks"];
 
 /// A commented stub the user must replace with their imported spec path. Kept
@@ -60,18 +30,14 @@ const BARE_SPEC_STEPS: [&str; 3] = ["specify", "plan", "tasks"];
 const IMPORT_SOURCE_HINT: &str =
     "set this to your spec file path, or pass --spec <path> on the command line";
 
-/// Applies a [`SpecProviderChoice`] to an already-rendered `derrick.yaml`.
-///
-/// Returns the input unchanged for [`SpecProviderChoice::Speckit`] so the
-/// template's comments survive. For `native`/`import` it round-trips through
-/// `serde_yaml`: sets `tools.specify.provider`, adds the `import:` block when
-/// importing, and bares the `specify`/`plan`/`tasks` steps so the seam routes
-/// them.
 pub(crate) fn apply_spec_provider(
     rendered: &str,
     choice: SpecProviderChoice,
 ) -> Result<String, crate::CliError> {
-    if choice == SpecProviderChoice::Speckit {
+    if choice == SpecProviderChoice::Native
+        && rendered.contains("provider: native")
+        && !rendered.contains("/speckit.")
+    {
         return Ok(rendered.to_owned());
     }
 
@@ -82,13 +48,16 @@ pub(crate) fn apply_spec_provider(
         .ok_or_else(|| crate::message("rendered config is not a mapping"))?;
 
     let provider = match choice {
-        SpecProviderChoice::Speckit => unreachable!("speckit short-circuits above"),
         SpecProviderChoice::Native => "native",
+        SpecProviderChoice::Speckit => "speckit",
         SpecProviderChoice::Import => "import",
     };
 
     write_specify_block(root, choice, provider);
-    bare_spec_steps(root)?;
+    match choice {
+        SpecProviderChoice::Native | SpecProviderChoice::Import => bare_spec_steps(root)?,
+        SpecProviderChoice::Speckit => pin_speckit_steps(root)?,
+    }
 
     let mut out =
         serde_yaml::to_string(&yaml).map_err(|error| crate::message(error.to_string()))?;
@@ -159,6 +128,66 @@ fn bare_spec_steps(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliError
     Ok(())
 }
 
+fn pin_speckit_steps(root: &mut serde_yaml::Mapping) -> Result<(), crate::CliError> {
+    let key = serde_yaml::Value::String("pipeline".to_owned());
+    let Some(pipeline) = root.get_mut(&key) else {
+        return Ok(());
+    };
+    let steps = pipeline
+        .as_sequence_mut()
+        .ok_or_else(|| crate::message("pipeline is not a sequence"))?;
+
+    for step in steps.iter_mut() {
+        let Some(mapping) = step.as_mapping_mut() else {
+            continue;
+        };
+        let id = mapping
+            .get(serde_yaml::Value::String("id".to_owned()))
+            .and_then(serde_yaml::Value::as_str);
+        match id {
+            Some("specify") => pin_step(mapping, "drafter", "/speckit.specify {{prompt}}"),
+            Some("plan") => pin_step(mapping, "proposer", "/speckit.plan"),
+            Some("tasks") => pin_step(mapping, "drafter", "/speckit.tasks"),
+            _ => {}
+        }
+    }
+
+    if !steps.iter().any(|step| {
+        step.get("id")
+            .and_then(serde_yaml::Value::as_str)
+            .is_some_and(|id| id == "analyze")
+    }) {
+        let insert_at = steps
+            .iter()
+            .position(|step| {
+                step.get("id")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|id| id == "tasks")
+            })
+            .map_or(steps.len(), |index| index + 1);
+        let mut analyze = serde_yaml::Mapping::new();
+        analyze.insert(
+            serde_yaml::Value::String("id".to_owned()),
+            serde_yaml::Value::String("analyze".to_owned()),
+        );
+        pin_step(&mut analyze, "proposer", "/speckit.analyze");
+        steps.insert(insert_at, serde_yaml::Value::Mapping(analyze));
+    }
+
+    Ok(())
+}
+
+fn pin_step(mapping: &mut serde_yaml::Mapping, role: &str, command: &str) {
+    let key = |name: &str| serde_yaml::Value::String(name.to_owned());
+    mapping.remove(key("runner"));
+    mapping.insert(key("role"), serde_yaml::Value::String(role.to_owned()));
+    mapping.insert(key("host"), serde_yaml::Value::String("claude".to_owned()));
+    mapping.insert(
+        key("command"),
+        serde_yaml::Value::String(command.to_owned()),
+    );
+}
+
 /// Inserts a commented `source:` stub directly under the emitted `import:`
 /// mapping so the user has an obvious slot to fill in. The child indentation is
 /// derived from the `import:` line's own indent (serde_yaml's two-space step is
@@ -181,7 +210,7 @@ fn annotate_import_source(yaml: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use derrick_config::{Config, SpecProviderKind};
+    use derrick_config::{Config, Host, SpecProviderKind};
 
     const TEMPLATE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -209,22 +238,27 @@ mod tests {
     }
 
     #[test]
-    fn speckit_choice_returns_input_unchanged() {
+    fn speckit_choice_writes_provider_and_pins_commands() {
         let rendered = rendered_template();
         let out = apply_spec_provider(&rendered, SpecProviderChoice::Speckit).expect("apply");
-        assert_eq!(out, rendered);
-        // Provider defaults to speckit and the explicit steps survive.
         let config = load(&out);
         assert_eq!(
             config.tools().specify().provider(),
             SpecProviderKind::Speckit
         );
-        let specify = config
-            .pipeline()
-            .iter()
-            .find(|step| step.id() == "specify")
-            .expect("specify step");
-        assert!(specify.command().is_some());
+        for id in ["specify", "plan", "tasks", "analyze"] {
+            let step = config
+                .pipeline()
+                .iter()
+                .find(|step| step.id() == id)
+                .unwrap_or_else(|| panic!("{id} step"));
+            assert_eq!(step.host(), Some(Host::Claude), "{id} should pin claude");
+            assert!(
+                step.command()
+                    .is_some_and(|command| command.contains("/speckit.")),
+                "{id} should pin speckit"
+            );
+        }
     }
 
     #[test]
@@ -248,13 +282,7 @@ mod tests {
             // its own drafter/proposer tiers.
             assert!(step.role().is_none(), "{id} should be bare (no role)");
         }
-        // analyze is not part of the seam — its explicit command stays.
-        let analyze = config
-            .pipeline()
-            .iter()
-            .find(|step| step.id() == "analyze")
-            .expect("analyze step");
-        assert!(analyze.command().is_some());
+        assert!(config.pipeline().iter().all(|step| step.id() != "analyze"));
     }
 
     #[test]

@@ -1205,20 +1205,12 @@ impl Speckit {
 /// This is distinct from [`Speckit`] (`tools.speckit`), which governs speckit
 /// version detection and PATH checks. `tools.specify` chooses the dispatch
 /// path; `tools.speckit` still describes the speckit toolchain itself.
-///
-/// Default is [`SpecProviderKind::Speckit`], preserving the historical
-/// behaviour: bare spec steps delegate to the speckit host CLI exactly as the
-/// explicit `host: claude` + `command: "/speckit.specify …"` steps do.
-/// `Native` and `Import` are config-accepted in Phase 1 but their dispatch
-/// arms return a "not yet available" error until Phases 2/3 land.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum SpecProviderKind {
     /// Delegate to the speckit host CLI (the historical behaviour).
     #[default]
     Speckit,
-    /// Derrick-native spec generation (Phase 2 — not yet wired).
     Native,
-    /// Import an externally-authored spec (Phase 3 — not yet wired).
     Import,
 }
 
@@ -1268,8 +1260,6 @@ pub struct ImportConfig {
 }
 
 impl ImportConfig {
-    /// Returns the optional import source (path or locator). Interpreted by the
-    /// import provider in Phase 3.
     pub fn source(&self) -> Option<&str> {
         self.source.as_deref()
     }

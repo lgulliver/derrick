@@ -312,13 +312,13 @@ You can override any role binding in `roles`, and pin a role's model to a concre
 
 ## Status
 
-**Active development.** Architecture and 85 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 87 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
 - ✅ `derrick drill` — positional-prompt shorthand; `run drill` for scripts
 - ✅ Full pipeline executor with multi-reviewer assay and `parallel_group` steps
-- ✅ Pluggable spec providers — `tools.specify.provider`: `speckit` (default) / `native` (survey-grounded, clarify-first, schema-validated in-process generation) / `import` (bring-your-own spec via `--spec` or `derrick spec import`); back-compatible, speckit stays default (D85). See [docs/spec-providers.md](./docs/spec-providers.md)
+- ✅ Pluggable spec providers — `tools.specify.provider`: `native` (default; survey-grounded, clarify-first, schema-validated in-process generation) / `speckit` (opt-in compatibility) / `import` (bring-your-own spec via `--spec` or `derrick spec import`). See [docs/spec-providers.md](./docs/spec-providers.md)
 - ✅ Foreman dispatch loop (attached and detached daemon)
 - ✅ Ticket state machine (ready → in-flight → in-review → done / blocked / rejected)
 - ✅ `derrick ticket code-review` — adversarial pre-PR code review with auto-remediation loop

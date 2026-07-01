@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use std::path::Path;
 
 use derrick_adopt::{AdoptOptions, Adopter, ConstitutionMode};
-use derrick_config::{Config, InitTemplateVars, render_init_template};
+use derrick_config::{Config, InitTemplateVars, SpecProviderKind, render_init_template};
 use derrick_memory::{MemoryPaths, MemoryStore, Seeds};
 use derrick_substrate_native::NativeSubstrate;
 
@@ -393,9 +393,7 @@ fn resolve_options(
         vscode: args.vscode,
         jetbrains: args.jetbrains,
         ai_plan: AiPlan::Catalogue(roles),
-        // Non-interactive / `--yes` / non-TTY always defaults to speckit, which
-        // leaves the config untouched (no behaviour change).
-        spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Speckit,
+        spec_provider: crate::commands::spec_provider_init::SpecProviderChoice::Native,
         conventional_commits: true,
         branch_prefix: "feat/".to_owned(),
         default_profile: crate::read_config(repo_root)
@@ -626,7 +624,7 @@ async fn greenfield_init(
         derrick_adopt::write_codex_instructions(repo_root).map_err(|e| message(e.to_string()))?;
         derrick_adopt::write_claude_settings(repo_root, resolved.force)
             .map_err(|e| message(e.to_string()))?;
-        if which::which("specify").is_err() {
+        if config_requires_speckit(&config) && which::which("specify").is_err() {
             ensure_speckit(resolved.yes)?;
         }
         let written_commands = derrick_adopt::write_claude_commands(repo_root, resolved.force)
@@ -773,9 +771,6 @@ fn apply_text_overrides(
     }
 
     let out = format!("{}\n", lines.join("\n"));
-    // Speckit is a no-op here (returns `out` unchanged), so the template's
-    // comments survive on the common catalogue path; native/import round-trip
-    // through serde to bare the spec steps and set `tools.specify.provider`.
     crate::commands::spec_provider_init::apply_spec_provider(&out, resolved.spec_provider)
 }
 
@@ -1286,6 +1281,14 @@ fn ensure_git_repo(yes: bool, dry_run: bool) -> Result<std::path::PathBuf, crate
     println!("{}", ui::done("git repository initialised"));
 
     Ok(cwd)
+}
+
+fn config_requires_speckit(config: &Config) -> bool {
+    config.tools().specify().provider() == SpecProviderKind::Speckit
+        || config.pipeline().iter().any(|step| {
+            step.command()
+                .is_some_and(|command| command.contains("/speckit."))
+        })
 }
 
 fn ensure_speckit(yes: bool) -> Result<(), crate::CliError> {

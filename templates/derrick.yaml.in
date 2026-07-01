@@ -27,6 +27,8 @@ roles:
   executor: copilot
   summariser: claude-haiku
 tools:
+  specify:
+    provider: native
   speckit:
     enabled: true
     version: ">=0.4.0"
@@ -52,16 +54,10 @@ tools:
     compress_memory: false
 pipeline:
   - id: specify
-    role: drafter
-    host: claude
-    command: "/speckit.specify {{prompt}}"
   - id: clarify
     runner: derrick
     skippable: true
   - id: plan
-    role: proposer
-    host: claude
-    command: "/speckit.plan"
   - id: assay
     runner: derrick
     inputs: ["{{feature_dir}}/spec.md", "{{feature_dir}}/plan.md"]
@@ -69,13 +65,6 @@ pipeline:
     on_reject: halt
     skippable: true
   - id: tasks
-    role: drafter
-    host: claude
-    command: "/speckit.tasks"
-  - id: analyze
-    role: proposer
-    host: claude
-    command: "/speckit.analyze"
 guardrails:
   constitution_path: .specify/memory/constitution.md
   forbid_paths: []

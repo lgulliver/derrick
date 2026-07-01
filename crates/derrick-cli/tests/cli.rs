@@ -84,6 +84,18 @@ fi
 if [ -z "$target" ]; then target="specs/001-test"; fi
 /bin/mkdir -p "$target" .specify
 case "$prompt" in
+  *"clarify a feature request BEFORE"*)
+    printf 'Q: Which format?\nOptions: JSON, YAML\nRecommendation: JSON\n'
+    ;;
+  *"Your previous draft was rejected"*|*"Write a specification"*)
+    printf '%s\n' '---' 'schema: derrick.spec/v1' 'slug: hello' 'intent: Build hello.' 'requirements:' '  - id: R1' '    must: The system handles hello.' 'acceptance:' '  - id: A1' '    check: Hello is handled.' 'non_goals: []' 'open_questions: []' '---' '# Hello' '' '## Context' 'Hello feature.' '' '## Requirements' '- R1' '' '## Acceptance Criteria' '- A1' '' '## Out of Scope' 'Nothing.'
+    ;;
+  *"implementation plan"*)
+    printf '%s\n' '---' 'schema: derrick.plan/v1' 'covers: [R1]' 'touches: []' '---' '# Plan' 'Implement R1.'
+    ;;
+  *"Break this plan into tickets"*)
+    printf '## First ticket\n<!-- complexity: standard -->\nImplements R1.\n\n## Second ticket\nFollow-up for R1.\n'
+    ;;
   *speckit.specify*)
     printf '{"feature_directory":"%s"}' "$target" > .specify/feature.json
     printf 'spec' > "$target/spec.md"
@@ -775,19 +787,12 @@ fn doctor_exit_code_equals_fail_count() -> TestResult {
     greenfield(dir.path())?.success();
     let path = mock_path(dir.path(), &["git"])?;
 
-    // With only `git` on PATH the host CLIs are all absent, so doctor fails the
-    // two pipeline-host binary checks (claude, codex) plus the per-model host
-    // checks (D65 models-check core). The executor role binds the `copilot`
-    // model whose id is now `auto` (D67): `auto` is foreman-selected per ticket,
-    // but the host CLI must still be installed, so the missing `copilot` binary
-    // FAILs before the `auto` short-circuit — the host check runs first. That
-    // leaves seven failures total, and the exit code equals that count.
     let output = derrick()?
         .current_dir(dir.path())
         .env("PATH", path)
         .arg("doctor")
         .assert()
-        .code(7)
+        .code(6)
         .get_output()
         .stdout
         .clone();
@@ -796,7 +801,7 @@ fn doctor_exit_code_equals_fail_count() -> TestResult {
         .lines()
         .filter(|line| line.starts_with("fail"))
         .count();
-    assert_eq!(fail_lines, 7, "exit code must equal the number of failures");
+    assert_eq!(fail_lines, 6, "exit code must equal the number of failures");
     assert_contains(&output, "claude")?;
     assert_contains(&output, "codex")?;
     Ok(())

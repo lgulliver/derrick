@@ -10,6 +10,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use derrick_survey_hub::{
     AuthConfig, Capability, Hub, HubConfig, TokenConfig, WorkspaceConfig, build_router,
@@ -18,6 +19,7 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::service::ServiceExt;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use tokio::sync::OwnedMutexGuard;
 
 /// Write a source file under `root` and ensure `.derrick/` exists.
 fn seed_repo(root: &Path, file: &str, contents: &str) {
@@ -66,7 +68,16 @@ fn token(secret: &str, workspaces: &[&str], caps: &[Capability]) -> TokenConfig 
 
 /// Spawn the hub on an ephemeral loopback port via the production `build_router`,
 /// returning the base URI (no trailing slash) and the server task handle.
-async fn spawn_hub(config: &HubConfig) -> (String, tokio::task::JoinHandle<()>) {
+fn routing_test_lock() -> Arc<tokio::sync::Mutex<()>> {
+    static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn spawn_hub(
+    config: &HubConfig,
+) -> (String, tokio::task::JoinHandle<()>, OwnedMutexGuard<()>) {
+    let guard = routing_test_lock().lock_owned().await;
     let hub = Hub::build(config).await.unwrap();
     let listener = tokio::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
         .await
@@ -76,7 +87,7 @@ async fn spawn_hub(config: &HubConfig) -> (String, tokio::task::JoinHandle<()>) 
     let server = tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{addr}"), server)
+    (format!("http://{addr}"), server, guard)
 }
 
 /// Connect an rmcp client to `uri` (optionally with a bearer token).
@@ -118,7 +129,7 @@ async fn call_tool(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discovery_lists_all_ids_without_auth() {
     let (_a, _b, config) = two_repos(None);
-    let (uri, server) = spawn_hub(&config).await;
+    let (uri, server, _guard) = spawn_hub(&config).await;
     let client = connect(&uri, None).await;
 
     let listing = call_tool(
@@ -142,7 +153,7 @@ async fn discovery_lists_all_ids_without_auth() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discovery_wildcard_token_sees_all() {
     let (_a, _b, config) = two_repos(Some(vec![token("super", &["*"], &[Capability::Read])]));
-    let (uri, server) = spawn_hub(&config).await;
+    let (uri, server, _guard) = spawn_hub(&config).await;
     let client = connect(&uri, Some("super")).await;
 
     let listing = call_tool(
@@ -170,7 +181,7 @@ async fn discovery_scoped_token_sees_only_its_subset() {
         &["repo-a"],
         &[Capability::Read],
     )]));
-    let (uri, server) = spawn_hub(&config).await;
+    let (uri, server, _guard) = spawn_hub(&config).await;
     let client = connect(&uri, Some("a-only")).await;
 
     let listing = call_tool(
@@ -194,7 +205,7 @@ async fn discovery_scoped_token_sees_only_its_subset() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discovery_on_pinned_mount_lists_just_that_id() {
     let (_a, _b, config) = two_repos(None);
-    let (uri, server) = spawn_hub(&config).await;
+    let (uri, server, _guard) = spawn_hub(&config).await;
     // Address the pinned /w/repo-b mount.
     let client = connect(&format!("{uri}/w/repo-b"), None).await;
 
@@ -223,7 +234,7 @@ async fn discovery_on_pinned_mount_lists_just_that_id() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pinned_mount_resolves_without_workspace_argument() {
     let (_a, _b, config) = two_repos(None);
-    let (uri, server) = spawn_hub(&config).await;
+    let (uri, server, _guard) = spawn_hub(&config).await;
 
     // /w/repo-a, no `workspace` argument: resolves to repo-a and finds its symbol.
     let client_a = connect(&format!("{uri}/w/repo-a"), None).await;
@@ -273,7 +284,7 @@ async fn pinned_mount_resolves_without_workspace_argument() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pinned_mount_rejects_mismatched_workspace_argument() {
     let (_a, _b, config) = two_repos(None);
-    let (uri, server) = spawn_hub(&config).await;
+    let (uri, server, _guard) = spawn_hub(&config).await;
     let client = connect(&format!("{uri}/w/repo-a"), None).await;
 
     // A `workspace` argument that disagrees with the pin is an error, not a
@@ -301,7 +312,7 @@ async fn pinned_mount_rejects_mismatched_workspace_argument() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_endpoint_with_explicit_workspace_still_works() {
     let (_a, _b, config) = two_repos(None);
-    let (uri, server) = spawn_hub(&config).await;
+    let (uri, server, _guard) = spawn_hub(&config).await;
     let client = connect(&uri, None).await;
 
     let in_a = call_tool(
@@ -320,7 +331,7 @@ async fn root_endpoint_with_explicit_workspace_still_works() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_endpoint_without_workspace_errors_clearly() {
     let (_a, _b, config) = two_repos(None);
-    let (uri, server) = spawn_hub(&config).await;
+    let (uri, server, _guard) = spawn_hub(&config).await;
     let client = connect(&uri, None).await;
 
     let err = call_tool(
@@ -350,7 +361,7 @@ async fn token_scoped_to_repo_a_is_forbidden_at_pinned_repo_b() {
         &["repo-a"],
         &[Capability::Read],
     )]));
-    let (uri, server) = spawn_hub(&config).await;
+    let (uri, server, _guard) = spawn_hub(&config).await;
     // The token authenticates (it is a valid token), so the handshake succeeds;
     // the per-workspace authz must then forbid the resolved repo-b.
     let client = connect(&format!("{uri}/w/repo-b"), Some("a-only")).await;
