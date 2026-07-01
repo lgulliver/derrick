@@ -1,13 +1,1 @@
-We shoul dhave our own native version of speckit built into derrick. It reduces our dependencies.
-
----
-
-do it. Also update documentation
-
----
-
-the code base
-
----
-
-lets fix those too
+lets commit to a branch and open a PR
