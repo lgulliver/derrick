@@ -21,12 +21,20 @@ models:
     # complexity. Pin a specific id here to override.
     model: auto
 roles:
+  # Short form: role -> model alias.
   proposer: claude-opus
   drafter: claude-sonnet
   reviewer: codex-gpt5
   executor: copilot
   summariser: claude-haiku
+  # Expanded form: choose a provider/model alias and a host-native agent file
+  # for the same role.
+  # reviewer:
+  #   model: codex-gpt5
+  #   agent: .codex/agents/integrations-engineer.md
 tools:
+  specify:
+    provider: native
   speckit:
     enabled: true
     version: ">=0.4.0"
@@ -52,16 +60,10 @@ tools:
     compress_memory: false
 pipeline:
   - id: specify
-    role: drafter
-    host: claude
-    command: "/speckit.specify {{prompt}}"
   - id: clarify
     runner: derrick
     skippable: true
   - id: plan
-    role: proposer
-    host: claude
-    command: "/speckit.plan"
   - id: assay
     runner: derrick
     inputs: ["{{feature_dir}}/spec.md", "{{feature_dir}}/plan.md"]
@@ -69,13 +71,6 @@ pipeline:
     on_reject: halt
     skippable: true
   - id: tasks
-    role: drafter
-    host: claude
-    command: "/speckit.tasks"
-  - id: analyze
-    role: proposer
-    host: claude
-    command: "/speckit.analyze"
 guardrails:
   constitution_path: .specify/memory/constitution.md
   forbid_paths: []

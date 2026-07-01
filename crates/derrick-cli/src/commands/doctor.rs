@@ -874,85 +874,32 @@ mod tests {
 
     #[test]
     fn speckit_check_runs_for_speckit_provider() {
-        // The default template keeps explicit /speckit.* steps, so the PATH
-        // check must run (pass or fail by host) — never "skipped".
         let (dir, config) = config_for(SpecProviderChoice::Speckit);
         let mut checks = Vec::new();
         add_spec_provider_checks(dir.path(), &config, &mut checks);
         assert!(!find(&checks, "speckit").message.contains("skipped"));
     }
 
-    /// Drops any pipeline step that still pins a `/speckit.*` command (e.g. the
-    /// template's `analyze` skill, which is outside the seam). A genuinely
-    /// speckit-free native/import project would not keep these steps; removing
-    /// them here exercises the "no step pins speckit" branch.
-    fn strip_speckit_pinned_steps(yaml: &str) -> String {
-        let mut value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("parse");
-        if let Some(steps) = value
-            .get_mut("pipeline")
-            .and_then(serde_yaml::Value::as_sequence_mut)
-        {
-            steps.retain(|step| {
-                step.get("command")
-                    .and_then(serde_yaml::Value::as_str)
-                    .is_none_or(|command| !command.contains("/speckit."))
-            });
-        }
-        serde_yaml::to_string(&value).expect("serialize")
-    }
-
-    /// Renders + rewrites for `provider`, then strips any remaining
-    /// `/speckit.*`-pinned step, producing a genuinely speckit-free config.
-    fn speckit_free_config(provider: SpecProviderChoice) -> (tempfile::TempDir, Config) {
-        let rendered = derrick_config::render_init_template(
-            TEMPLATE,
-            derrick_config::InitTemplateVars {
-                site_name: "t",
-                prefix: "tst",
-                mode: "solo",
-            },
-        );
-        let yaml = crate::commands::spec_provider_init::apply_spec_provider(&rendered, provider)
-            .expect("rewrite");
-        write_and_load(strip_speckit_pinned_steps(&yaml))
-    }
-
     #[test]
-    fn speckit_check_skipped_for_native_without_pinned_command() {
-        let (dir, config) = speckit_free_config(SpecProviderChoice::Native);
-        let mut checks = Vec::new();
-        add_spec_provider_checks(dir.path(), &config, &mut checks);
-        // Whatever the host environment, the speckit check must not be a failure.
-        assert_ne!(find(&checks, "speckit").status, CheckStatus::Fail);
-        assert!(find(&checks, "speckit").message.contains("skipped"));
-    }
-
-    #[test]
-    fn speckit_check_skipped_for_import_without_pinned_command() {
-        let (dir, config) = speckit_free_config(SpecProviderChoice::Import);
-        let mut checks = Vec::new();
-        add_spec_provider_checks(dir.path(), &config, &mut checks);
-        assert_ne!(find(&checks, "speckit").status, CheckStatus::Fail);
-        assert!(find(&checks, "speckit").message.contains("skipped"));
-    }
-
-    #[test]
-    fn speckit_check_runs_for_native_when_analyze_step_pins_speckit() {
-        // The default template keeps an `analyze` step pinned to /speckit.analyze
-        // even under native; that explicit step legitimately still needs speckit,
-        // so the PATH check runs (not skipped).
+    fn speckit_check_skipped_for_native_default() {
         let (dir, config) = config_for(SpecProviderChoice::Native);
         let mut checks = Vec::new();
         add_spec_provider_checks(dir.path(), &config, &mut checks);
-        assert!(!find(&checks, "speckit").message.contains("skipped"));
+        assert_ne!(find(&checks, "speckit").status, CheckStatus::Fail);
+        assert!(find(&checks, "speckit").message.contains("skipped"));
+    }
+
+    #[test]
+    fn speckit_check_skipped_for_import_default() {
+        let (dir, config) = config_for(SpecProviderChoice::Import);
+        let mut checks = Vec::new();
+        add_spec_provider_checks(dir.path(), &config, &mut checks);
+        assert_ne!(find(&checks, "speckit").status, CheckStatus::Fail);
+        assert!(find(&checks, "speckit").message.contains("skipped"));
     }
 
     #[test]
     fn speckit_check_runs_when_step_pins_speckit_command_under_native() {
-        // A native provider but a step still explicitly pins a /speckit.*
-        // command: the speckit PATH check must run (not be skipped). Start from
-        // the native rewrite, then add an explicit speckit command back to one
-        // step.
         let rendered = derrick_config::render_init_template(
             TEMPLATE,
             derrick_config::InitTemplateVars {
@@ -974,10 +921,6 @@ mod tests {
         for step in steps.iter_mut() {
             if step.get("id").and_then(serde_yaml::Value::as_str) == Some("tasks") {
                 let map = step.as_mapping_mut().expect("step mapping");
-                // An explicit speckit-pinned step is a normal (non-bare) step:
-                // it carries a role plus host/command, exactly like the
-                // template's speckit steps. Restore the role so the rewritten
-                // step is valid (a bare step has no role/host/command).
                 map.insert(
                     serde_yaml::Value::String("role".to_owned()),
                     serde_yaml::Value::String("drafter".to_owned()),

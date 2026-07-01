@@ -289,6 +289,22 @@ models:
 
 `auto` (or `auto:light` / `auto:heavy`) lets the foreman pick the model by the ticket's estimated complexity within the host's tier list (light/standard/heavy); a concrete id always wins. Legacy configs naming the old `anthropic` / `openai-cli` / `copilot-cli` providers still load (aliased to their host).
 
+Roles also accept an expanded form when a role should carry a specific
+host-native agent file:
+
+```yaml
+roles:
+  reviewer:
+    model: codex-gpt5
+    agent: .codex/agents/integrations-engineer.md
+  executor:
+    model: copilot
+    agent: .github/agents/flow-engineer.md
+```
+
+The `model` alias selects the provider/runtime; `agent` points at the role's
+instruction file in the repo. Relative paths are resolved from the working tree.
+
 ### Crew mode role bindings
 
 `crew` mode is role-aware and uses differentiated bindings by default:
@@ -306,19 +322,21 @@ roles:
   summariser: claude-haiku
 ```
 
-You can override any role binding in `roles`, and pin a role's model to a concrete id (instead of `auto`) to take selection out of the foreman's hands.
+You can override any role binding in `roles`, pin a role's model to a concrete id
+(instead of `auto`) to take selection out of the foreman's hands, and attach the
+agent file that should shape that role.
 
 ---
 
 ## Status
 
-**Active development.** Architecture and 85 decisions in [DESIGN.md](./DESIGN.md).
+**Active development.** Architecture and 88 decisions in [DESIGN.md](./DESIGN.md).
 
 What's landed and tested:
 
 - ✅ `derrick drill` — positional-prompt shorthand; `run drill` for scripts
 - ✅ Full pipeline executor with multi-reviewer assay and `parallel_group` steps
-- ✅ Pluggable spec providers — `tools.specify.provider`: `speckit` (default) / `native` (survey-grounded, clarify-first, schema-validated in-process generation) / `import` (bring-your-own spec via `--spec` or `derrick spec import`); back-compatible, speckit stays default (D85). See [docs/spec-providers.md](./docs/spec-providers.md)
+- ✅ Pluggable spec providers — `tools.specify.provider`: `native` (default; survey-grounded, clarify-first, schema-validated in-process generation) / `speckit` (opt-in compatibility) / `import` (bring-your-own spec via `--spec` or `derrick spec import`). See [docs/spec-providers.md](./docs/spec-providers.md)
 - ✅ Foreman dispatch loop (attached and detached daemon)
 - ✅ Ticket state machine (ready → in-flight → in-review → done / blocked / rejected)
 - ✅ `derrick ticket code-review` — adversarial pre-PR code review with auto-remediation loop

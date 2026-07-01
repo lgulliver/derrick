@@ -187,16 +187,20 @@ models:
   # my-tool:      { provider: shell, command: "my-tool --prompt-envelope" }
 
 # Role bindings — pipeline steps name a role; the role names a model.
-# Changing one model changes the whole class of step that uses it.
+# Changing one model changes the whole class of step that uses it. Use the
+# expanded form when the role should also carry a host-native agent file.
 roles:
-  proposer:  claude-opus       # plan + analyze (heavy reasoning)
+  proposer:  claude-opus       # plan (heavy reasoning)
   drafter:   claude-sonnet     # specify + tasks (mechanical)
-  reviewer:  codex-gpt5        # assay (adversarial, different family)
+  reviewer:
+    model: codex-gpt5          # assay (adversarial, different family)
+    agent: .codex/agents/integrations-engineer.md
   executor:  copilot           # ticket dispatch in crew/copilot mode
   summariser: claude-sonnet    # inter-step caveman-augmented summary, if used
 
 # Underlying tool versions / opt-outs
 tools:
+  specify: { provider: native } # native | speckit | import
   speckit: { enabled: true, version: ">=0.4.0" }
   assay:
     enabled: true
@@ -222,16 +226,10 @@ tools:
 # Each step names a role (resolved via `roles:` above) or runner: derrick / human.
 pipeline:
   - id: specify
-    role: drafter
-    host: claude                  # which host CLI loads the prompt (see §6.5)
-    command: "/speckit.specify {{prompt}}"
   - id: clarify
     runner: derrick
     skippable: true
   - id: plan
-    role: proposer
-    host: claude
-    command: "/speckit.plan"
   - id: assay
     runner: derrick               # in-process; uses the reviewer role(s) (§7)
     inputs: [{{feature_dir}}/spec.md, {{feature_dir}}/plan.md]
@@ -241,13 +239,6 @@ pipeline:
     # prompts. Only a `reject` verdict blocks the pipeline; `revise` and
     # `accept` are both treated as pass. Allows CI/automated runs.
   - id: tasks
-    role: drafter
-    host: claude
-    command: "/speckit.tasks"
-  - id: analyze
-    role: proposer
-    host: claude
-    command: "/speckit.analyze"
   - id: bridge
     runner: derrick               # creates tickets in the substrate
     inputs: [{{tasks_md}}]
@@ -1025,7 +1016,9 @@ When derrick invokes a step on a host CLI it deliberately does
 bypass the host's rule loading. The contract:
 
 - Derrick passes the working directory (the user's repo) and the
-  step command. That's it.
+  step command. If `roles.<role>.agent` is configured, derrick
+  reads that repo-local agent file and prepends it to the step as
+  explicit user-configured role context.
 - The host loads its **own** files: `CLAUDE.md`, `AGENTS.md`,
   sub-agents under `.claude/agents/`, skills under
   `.claude/skills/`, plugins, hooks, `.codex/`, `~/.codex/`,
@@ -1047,6 +1040,35 @@ A brownfield repo with a carefully tuned AGENTS.md and twenty
 agents gets exactly the same Claude Code behaviour inside a
 derrick step as it would in a normal session. Derrick is the
 conductor, not the orchestra.
+
+#### Per-role providers and agent files
+
+The short role form remains the default:
+
+```yaml
+roles:
+  reviewer: codex-gpt5
+```
+
+Use the expanded form to keep provider/model selection and the
+role's agent file together:
+
+```yaml
+roles:
+  reviewer:
+    model: codex-gpt5
+    agent: .codex/agents/integrations-engineer.md
+  executor:
+    model: copilot
+    agent: .github/agents/flow-engineer.md
+```
+
+`model` is the existing model alias, so switching providers is still
+one edit under `models:` or `roles:`. `agent` is a path relative to
+the step working tree unless absolute. Derrick reads the file and
+includes it as role context for that step; host CLIs still load their
+own standard files (`AGENTS.md`, `.codex/instructions.md`,
+`.github/copilot-instructions.md`, etc.) normally.
 
 **One narrowing (D66/D67)**: model selection is the single dimension
 derrick now asserts on the run path. The user picks the HOST (the
@@ -1916,16 +1938,15 @@ Every byte across a model boundary earns its place. Seven knobs:
 | Step | Role | Default model | Why |
 |---|---|---|---|
 | `specify`, `tasks` | `drafter` | claude-sonnet | Mechanical, structured |
-| `plan`, `analyze` | `proposer` | claude-opus | Hard reasoning |
+| `plan` | `proposer` | claude-opus | Hard reasoning |
 | `assay` | `reviewer` | codex-gpt5 | Adversarial, different family |
 | `bridge`, `foreman` | — | n/a | Subprocess / in-process |
 | `runner: copilot` steps | `executor` | copilot | Mechanical at Copilot rates |
 | Inter-step summary | `summariser` | claude-sonnet (or `ollama` local) | Hot path; local is free |
 
-Note: `tasks` runs before `analyze` in the pipeline. This is intentional —
-task generation depends on the accepted plan but not on codebase analysis;
-`analyze` then has the full task list available as context. The sequential
-spine is `specify → clarify → plan → tasks → analyze → assay → bridge → foreman`.
+The native default sequential spine is
+`specify → clarify → plan → assay → tasks → bridge → foreman`. Speckit opt-in
+configs may still pin the historical `/speckit.analyze` step after `tasks`.
 
 Re-binding a role re-routes every step that uses it. BYOM means
 you can bind `proposer` to a Bedrock-hosted Claude, or `reviewer`
@@ -2080,8 +2101,8 @@ The hub adds three capabilities over the per-repo stdio server: (1) **Workspace 
 
 ### 9.C — Parallelism
 
-The pipeline has a sequential spine (`specify → plan → assay →
-tasks → analyze`), but everything *around* and *after* it is
+The pipeline has a sequential spine (`specify → clarify → plan → assay →
+tasks`), but everything *around* and *after* it is
 parallel by default. Derrick treats serial work as a justified
 exception.
 
@@ -2124,7 +2145,7 @@ slowest read, not the sum.
 on each other can be marked `parallel_group: <name>` in the yaml
 and derrick will fan them out. v1 ships this for any side-channel
 checks the user adds (lint, type-check, schema validation). v1
-does **not** parallelise `specify → plan → assay → tasks → analyze`
+does **not** parallelise `specify → clarify → plan → assay → tasks`
 — that chain stays sequential because each step consumes the
 previous step's output.
 
@@ -2322,8 +2343,8 @@ links back to the section where it lives.
 | # | Decision | Locus |
 |---|---|---|
 | D1 | **Plugin distribution**: own marketplace at `derrick.dev/marketplace.json` (primary) + GitHub release artefacts (fallback). | §11 |
-| D2 | **Speckit init**: detect-then-defer — use speckit if installed; fall back to a minimal `.specify/` skeleton derrick ships, with a banner requiring the user to author the constitution via `/speckit.constitution` before any pipeline runs. **Refined by D85**: speckit remains the default spec layer, but is now one of three selectable providers (`tools.specify.provider`); `native`/`import` are opt-in and do not change the constitution flow. | §5.2 / §5.2.1 |
-| D3 | **Constitution stub**: derrick prefers speckit as the constitution owner. The detect-then-defer logic in §5.2.1 enforces this: if `specify` is on PATH, init runs `/speckit.constitution` (or `specify init --here`); derrick does **not** write a constitution. **Refined by T011 / D34 era**: when speckit is *not* available and the user explicitly opts in (`--constitution-stub` or `--constitution-from-docs`), `derrick-adopt` may write a minimal banner stub or LLM-drafted constitution as a fallback. Both opt-in modes refuse if speckit is available — derrick still defers. Greenfield init forces the speckit constitution flow. **Refined by D85**: the spec-provider seam adds `native`/`import` providers but does not alter constitution ownership — greenfield init still runs the speckit constitution flow regardless of the chosen spec provider. | §5.2 / §5.6 / T011 |
+| D2 | **Speckit init**: detect-then-defer — use speckit if installed; fall back to a minimal `.specify/` skeleton derrick ships, with a banner requiring the user to author the constitution via `/speckit.constitution` before any pipeline runs. **Refined by D85**: speckit became one of three selectable providers (`tools.specify.provider`). **Superseded in part by D87**: `native` is now the default provider for new sites; speckit remains explicit opt-in/back-compatible. | §5.2 / §5.2.1 |
+| D3 | **Constitution stub**: derrick prefers speckit as the constitution owner. The detect-then-defer logic in §5.2.1 enforces this: if `specify` is on PATH, init runs `/speckit.constitution` (or `specify init --here`); derrick does **not** write a constitution. **Refined by T011 / D34 era**: when speckit is *not* available and the user explicitly opts in (`--constitution-stub` or `--constitution-from-docs`), `derrick-adopt` may write a minimal banner stub or LLM-drafted constitution as a fallback. Both opt-in modes refuse if speckit is available — derrick still defers. Greenfield init forces the speckit constitution flow. **Refined by D85 and D87**: the spec-provider seam does not alter constitution artifact paths, but new sites can use derrick-native spec generation without installing speckit. | §5.2 / §5.6 / T011 |
 | D4 | **Brownfield `--constitution-from-docs` drafts**: marked with a banner; `plan` step refuses to run until the user removes the banner. | §5.6 |
 | D5 | **Assay reviewers in v1**: codex only. Other providers slot in via the model abstraction later — no extra v1 work. | §7 |
 | D6 | **Split-verdict policy**: configurable per repo via `on_split:` (`reject` default fail-closed, `human`, `majority`). | §9.C.2 |
@@ -2371,7 +2392,7 @@ links back to the section where it lives.
 | D48 | **Assay headless mode: only `reject` blocks the pipeline.** When `!isatty(stdin)`, assay runs without interactive prompts. `revise` and `accept` are both treated as pass; round exhaustion without `reject` logs a warning and continues. The hard rounds limit applies. Enables fully unattended CI runs. | §7 headless / §4 assay step |
 | D49 | **Constitution seeding in `derrick init` wizard.** When no existing constitution is found and speckit is unavailable for interactive authoring, the wizard prompts the user to enter constitution content directly. The text is written to `.specify/constitution.md` as real content (no banner stub). `--constitution-stub` still writes the banner for users who prefer to author separately. | §5.2 Step 5 |
 | D50 | **`derrick init` creates an initial commit when the repo has no HEAD.** After writing all init files, if the repo has no commits yet, the wizard runs `git add -A && git commit -m "chore: derrick init"`. Required because `derrick drill` creates git worktrees, which require at least one commit. *(Command renamed from `derrick add` to `derrick drill` by D64; behaviour unchanged.)* | §5.2 Step 7 |
-| D51 | **Pipeline step order fix: `tasks` runs before `analyze`.** Task generation depends on the accepted plan but not on codebase analysis. `analyze` then has the full task list available as context. Canonical order: `specify → clarify → plan → tasks → analyze → assay → bridge → foreman`. All pipeline config, step descriptions, and the §9.B.1 table updated to match. | §4 pipeline yaml / §9.B.1 / §9.C |
+| D51 | **Pipeline step order fix: `tasks` runs before `analyze`.** Task generation depends on the accepted plan but not on codebase analysis. `analyze` then has the full task list available as context. Canonical order at the time: `specify → clarify → plan → tasks → analyze → assay → bridge → foreman`. **Superseded in part by D87**: the native default drops `analyze`; speckit opt-in configs may still pin it. | §4 pipeline yaml / §9.B.1 / §9.C |
 | D52 | **`derrick switch`: solo → crew upgrade command.** New subcommand upgrades a repo from `mode: solo` to `mode: crew` (or `copilot` via `--mode`). Patches `tools.substrate.mode`, adds `peers:` stanza, writes foreman defaults. Idempotent. `--dry-run` previews the yaml diff. | §5.2.2 / §11 |
 | D53 | **`derrick upgrade` name reserved for binary self-update.** The subcommand is registered in the CLI but not yet implemented. It prints a clear "not yet available" message rather than a "command not found" error, preserving the name for the future self-update feature (check GitHub releases, download, replace running binary). | §11 |
 | D54 | **Native code-graph index (`derrick-survey`): native Rust, own SQLite, MCP agent surface.** A pre-built symbol/reference/call-graph index that AI agents query via MCP instead of fanning out across file reads. Three locked choices: (a) **Native Rust, not a Node wrapper** — preserves the single-static-binary, no-external-runtime ethos and D11 substrate/scope discipline; CodeGraph's data model (symbols + `references` edges + FTS5) is the reference, not its runtime. (b) **MCP server as the agent-facing surface** — `derrick survey serve --mcp`; `derrick-adopt` wires the `mcpServers` stanza into Claude Code settings and documents the gap for other hosts (same posture as D34). This is the first MCP seam in derrick; today the boundary is host CLI subprocess (D30) + hooks (D29). CLI subcommands (`build|search|context|impact|status`) ship for Bash/ad-hoc parity. *(Superseded by D57 on MCP host-wiring split.)* (c) **Separate SQLite DB at `.derrick/index.db`, not the substrate DB** — different schema, rebuildable-cache lifecycle (gitignored), and read-heavy concurrency profile incompatible with the substrate's single-writer contract. | §3.1 / §9.B.8 |
@@ -2406,7 +2427,9 @@ links back to the section where it lives.
 | D83 | **Hub auth: scoped bearer tokens, TLS via reverse proxy. Extends D80; supersedes D80's loopback-only rationale for the no-auth case. Resolves OQ3.** The hub config gains an optional `auth` section listing bearer tokens; each token grants a set of workspace ids (or `*` for all) and a set of capabilities (`read`, `refresh`; `upload` reserved for the deferred Pushed upload endpoint that D82 requires). Clients present `Authorization: Bearer <token>`; the hub authenticates (constant-time comparison) and authorizes the requested workspace per the token's scope — one mechanism covers authn, per-workspace authz, and read/write capability separation. **Bind policy** (supersedes D80's phase-1 loopback-only rationale): with no `auth` configured, the hub stays loopback-only — a non-loopback bind without auth is rejected. With `auth` configured, a non-loopback bind is permitted; the operator has opted into authentication. **TLS** is terminated by a reverse proxy (nginx / Caddy / cloud LB); the hub speaks plain HTTP behind it. Built-in hub TLS is out of scope. First slice: token authn + per-workspace authz on the existing read/refresh tools + gated non-loopback bind. The authenticated Pushed upload endpoint (D82's deferred write path, `upload` capability) is deferred to a follow-up and is not a new open question. Rationale: simplest ops for derrick's self-hosted stage (no CA/IdP), forward-compatible (mTLS / OIDC can layer on as additional auth methods), and the token→workspace→capability mapping directly delivers the multi-tenancy half of OQ3. Sequenced before OQ4 (routing). | §9.B.8a / D80 / D82 |
 | D84 | **Hub routing scheme: explicit `workspace` argument (default) + `derrick_survey_list_workspaces` discovery tool + optional path-prefix routing. Subdomain/host-based routing rejected. Extends D80; does not supersede it. Resolves OQ4. Completes the D80–D84 hub arc (D80 hub, D81 freshness, D82 sourcing, D83 auth, D84 routing).** **Default scheme (D80, unchanged):** clients connect to the hub's root MCP endpoint and pass a `workspace` argument on each tool call — backward-compatible with any client already targeting a single workspace. **Discovery:** a new `derrick_survey_list_workspaces` tool returns the workspace ids the caller may reach, auth-scoped (a `*` token sees all configured ids; an `Ids`-scoped token sees only its subset), so clients enumerate rather than hardcode workspace ids. Works in both addressing modes. **Path-prefix routing (additive):** the hub also serves a per-workspace MCP endpoint at a per-workspace path (e.g. `/w/<id>`), where the workspace is fixed by the path so the per-call `workspace` argument is optional; this gives clean per-site URLs that a reverse proxy can route and authorize on, without wildcard DNS. Authorization (D83) binds to the resolved workspace — whether it came from the `workspace` argument or the path pin — so a bearer token must still be scoped to that workspace regardless of addressing mode. **Subdomain/host-based routing rejected:** wildcard DNS and wildcard TLS are required and the operational cost only earns its place at many-tenant scale; revisit if that scale is reached. | §9.B.8a / D80 / D83 |
 | D86 | **AI Profiles, Budgeting & Intelligent Model Selection.** Builds on D79 (runtime-based AI architecture) by introducing three layered additions. **(1) Profiles** — a named set of stage overrides that temporarily replaces role bindings without touching `derrick.yaml`. `profiles:` in config maps a profile name to a `stages:` binding exactly like the top-level `stages:` section; `--profile speed` on `derrick drill` or `derrick run drill` calls `Config::with_profile`, applies the overrides in-memory, and the resulting config is used for that run only. Six built-in profiles ship as compiled defaults: `speed` (fast alias everywhere, minimum reviewers), `balanced` (no overrides — labels the baseline config), `quality` (strong models, multi-reviewer assay), `cheap` (cheap alias everywhere), `local` (local alias everywhere, fails if no local runtime configured), `ci` (same bindings as speed, `ci: true` flag suppresses interactive prompts). Built-in profiles reference the conventional aliases `fast`, `strong`, `cheap`, `local`; missing aliases are warned-and-skipped (never a hard error). User-defined profiles in `derrick.yaml` take precedence over built-ins by name and can reference any alias in the model registry. `derrick profile list` prints all profiles (built-in + user); `derrick profile show <name>` shows one profile's bindings. `default_profile:` in config sets the baseline profile applied when no `--profile` flag is given; wizard exposes this as a single-select during `derrick init --wizard`. **(2) Model estimate metadata** — an optional `estimated:` block on a model alias (`latency: low\|medium\|high`, `cost: very_low\|low\|medium\|high\|very_high`, `quality: low\|medium\|high\|very_high`) informs intelligent selection and the cost report. Unknown values are ignored (forward-compatible). **(3) Budget system** — optional `budgets:` in config adds per-ticket, daily, and monthly cost caps (`max_cost: <f64>` USD). Before execution the foreman estimates cost from `estimated.cost` tiers; if the estimate exceeds the active budget it warns and prompts (y/N) or auto-fails in CI mode. `derrick cost` reports estimated spend by tier, CLI usage, API usage, and local usage. Active profile is visible in `derrick status`, `derrick observe` Overview tab, and structured logs. Architecture constraint: built-in profiles are treated exactly like user-defined profiles at the application layer — no hardcoded names in the selection or dispatch logic beyond the initial fallback lookup. `CONFIG_VERSION` unchanged (all new top-level fields and model-def fields are additive optional). | §6.5 / §6.5.1 / D79 |
-| D85 | **Pluggable spec-provider seam: `tools.specify.provider` selects `speckit` (default) \| `native` \| `import` across the spec→plan→tasks surface. Refines D2/D3; does not supersede them.** The `specify`/`plan`/`tasks` pipeline steps generalise from a single host-delegated speckit invocation into a selectable provider — all three produce the **same on-disk artifacts** (`specs/<NNN>-<slug>/{spec,plan,tasks}.md` + `.specify/feature.json`) so downstream `clarify`/`assay`/`bridge` are unchanged. **(a) `speckit`** — the host-delegated path (D30), unchanged and the default, preserving D2/D3 detect-then-defer. **(b) `native`** — a derrick-owned in-process generator (new `derrick-specify` crate) using host-CLI completions: **survey-grounded** (derrick writes the `grounding:` front-matter from the real index, so the model never invents symbol/path names; degrades gracefully with no index), **clarify-first** (the clarify Q&A runs *before* drafting), and **schema-validated** (YAML front-matter + required headings; `validate_spec/plan/tasks` return Reject/Warn findings with one bounded repair pass), wired through roughneck/caveman/prompt-caching for token efficiency. **(c) `import`** — bring-your-own spec/PRD from a local file (v1): passed through verbatim if it already matches the schema, else normalised by one model call; `import.{plan,tasks}` each select `native`\|`speckit`\|`import` downstream. Remote sources (GitHub issue / Notion / Confluence) are a documented deferred limitation — derrick's Rust cannot call agent-side MCP tools; export to a local file. **Seam shape:** a closed `SpecProviderKind` enum + a `run_spec_phase` resolver in `derrick-flow` (not a `dyn` trait), matching the `StackBackendKind`/`SubstrateBackendKind` selection precedent rather than the open `Substrate`/`StackBackend` trait seams. **Back-compat:** the provider is consulted only for a *bare* `specify`/`plan`/`tasks` step (no `role`/`host`/`command`/`runner`); a step pinning `host:`+`command:` runs verbatim through the existing role path. The absent `role` is load-bearing, not incidental: it is part of what classifies a step as bare (`is_bare` in `derrick-flow::steps`, `is_bare_spec_step` in `derrick-config`), so a step that carries a `role:` deliberately does *not* route to the seam. The native generator never reads the step's `role:` — it resolves its own `drafter`/`proposer` tiers from `roles:` internally, and `derrick doctor` validates those two tiers (not the step's role) resolve to a model. Default `speckit` and `CONFIG_VERSION` unchanged (additive optional fields, per D66/D67) → existing configs and greenfield init are byte-for-byte unaffected. `derrick init` gains a provider prompt (greenfield still defaults to speckit + the D2/D3 constitution flow); `derrick doctor` reports the active provider and scopes the speckit-on-PATH check to the `speckit` provider or steps that pin `/speckit.*`. The native seam covers spec→plan→tasks; `analyze` remains a speckit step unless explicitly removed. New MCP-backed import sources touching company systems require IT approval. | §4 / §5.2 / §5.3 / D2 / D3 / D30 |
+| D85 | **Pluggable spec-provider seam: `tools.specify.provider` selects `speckit` \| `native` \| `import` across the spec→plan→tasks surface. Refines D2/D3; default clause superseded by D87.** The `specify`/`plan`/`tasks` pipeline steps generalise from a single host-delegated speckit invocation into a selectable provider — all three produce the **same on-disk artifacts** (`specs/<NNN>-<slug>/{spec,plan,tasks}.md` + `.specify/feature.json`) so downstream `clarify`/`assay`/`bridge` are unchanged. **(a) `speckit`** — the host-delegated path (D30), preserved as an explicit compatibility provider. **(b) `native`** — a derrick-owned in-process generator (new `derrick-specify` crate) using host-CLI completions: **survey-grounded** (derrick writes the `grounding:` front-matter from the real index, so the model never invents symbol/path names; degrades gracefully with no index), **clarify-first** (the clarify Q&A runs *before* drafting), and **schema-validated** (YAML front-matter + required headings; `validate_spec/plan/tasks` return Reject/Warn findings with one bounded repair pass), wired through roughneck/caveman/prompt-caching for token efficiency. **(c) `import`** — bring-your-own spec/PRD from a local file (v1): passed through verbatim if it already matches the schema, else normalised by one model call; `import.{plan,tasks}` each select `native`\|`speckit`\|`import` downstream. Remote sources (GitHub issue / Notion / Confluence) are a documented deferred limitation — derrick's Rust cannot call agent-side MCP tools; export to a local file. **Seam shape:** a closed `SpecProviderKind` enum + a `run_spec_phase` resolver in `derrick-flow` (not a `dyn` trait), matching the `StackBackendKind`/`SubstrateBackendKind` selection precedent rather than the open `Substrate`/`StackBackend` trait seams. **Back-compat:** the provider is consulted only for a *bare* `specify`/`plan`/`tasks` step (no `role`/`host`/`command`/`runner`); a step pinning `host:`+`command:` runs verbatim through the existing role path. The absent `role` is load-bearing, not incidental: it is part of what classifies a step as bare (`is_bare` in `derrick-flow::steps`, `is_bare_spec_step` in `derrick-config`), so a step that carries a `role:` deliberately does *not* route to the seam. The native generator never reads the step's `role:` — it resolves its own `drafter`/`proposer` tiers from `roles:` internally, and `derrick doctor` validates those two tiers (not the step's role) resolve to a model. `CONFIG_VERSION` unchanged (additive optional fields, per D66/D67). `derrick init` has a provider prompt; `derrick doctor` reports the active provider and scopes the speckit-on-PATH check to the `speckit` provider or steps that pin `/speckit.*`. New MCP-backed import sources touching company systems require IT approval. | §4 / §5.2 / §5.3 / D2 / D3 / D30 |
+| D87 | **Native spec provider is the default for new sites.** Supersedes D85's default-provider clause while preserving its seam and artifact contract. New `derrick init` configs write `tools.specify.provider: native` and bare `specify`/`plan`/`tasks` steps, so a standard `/drill` path no longer requires speckit. Speckit remains an explicit compatibility provider: selecting it pins `/speckit.specify`, `/speckit.plan`, `/speckit.tasks`, and `/speckit.analyze` as host commands, and existing configs with explicit `/speckit.*` steps continue to run verbatim. The default native pipeline drops the optional `/speckit.analyze` step; schema validation in `derrick-specify` plus the assay step are the native quality gates. `derrick doctor` checks for speckit only when provider `speckit` is selected or a pipeline step explicitly pins `/speckit.*`. `CONFIG_VERSION` remains unchanged because existing config semantics are preserved and the change affects generated defaults. | §4 / §5.2 / §5.3 / D85 |
+| D88 | **Roles may bind both model/provider and an agent file.** The `roles:` map keeps its existing short form (`reviewer: codex-gpt5`) and gains an expanded form (`reviewer: { model: codex-gpt5, agent: .codex/agents/integrations-engineer.md }`). `model` is the existing model alias, so provider switching remains a one-line role/model edit; `agent` is an optional repo-local path to the host-native agent instruction file for that role. During role-step execution, derrick reads the configured file from the step working tree and prepends it as explicit user-configured role context before the step prompt. This is not a hidden derrick system prompt and does not replace host-native rule loading: Claude/Codex/Copilot/opencode/aider still load `AGENTS.md`, `.codex/instructions.md`, `.github/copilot-instructions.md`, sub-agent files, skills, hooks, and plugins normally. Profiles and `stages:` overrides update only the role's model binding and preserve any configured agent path. `CONFIG_VERSION` remains unchanged because the short form is still accepted and the expanded form is additive. | §6.5 / §5.2 / D65 / D66 |
 
 ### Remaining open questions
 

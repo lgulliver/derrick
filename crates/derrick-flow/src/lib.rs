@@ -200,6 +200,35 @@ Description of task three.
         }
     }
 
+    struct PromptCapturingHost {
+        name: &'static str,
+        captured_prompt: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HostAdapter for PromptCapturingHost {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn run(&self, request: HostRequest) -> Result<HostResponse, HostError> {
+            *self.captured_prompt.lock().expect("lock") = Some(request.prompt);
+            Ok(HostResponse {
+                stdout: "ok\n".to_owned(),
+                stderr: String::new(),
+                exit_code: 0,
+                elapsed: Duration::from_millis(1),
+                tokens_in: 0,
+                tokens_out: 0,
+                pid: None,
+            })
+        }
+    }
+
     async fn runner(yaml: &str) -> TestResult<(TempDir, Runner)> {
         let dir = tempdir()?;
         std::fs::write(dir.path().join("derrick.yaml"), yaml)?;
@@ -461,6 +490,166 @@ fi
             Some(Some("claude-opus-4-8".to_owned())),
             "host step must forward the role's configured model id, raw"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn host_step_includes_role_agent_file_when_configured() -> TestResult {
+        let dir = tempdir()?;
+        std::fs::create_dir_all(dir.path().join(".codex/agents"))?;
+        std::fs::write(
+            dir.path().join(".codex/agents/reviewer.md"),
+            "Review adversarially.",
+        )?;
+        let yaml = format!(
+            "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  codex-gpt5:\n    provider: codex\n    model: gpt-5.5\nroles:\n  reviewer:\n    model: codex-gpt5\n    agent: .codex/agents/reviewer.md\n{YAML_MID}  - id: probe\n    role: reviewer\n    host: codex\n    command: \"review {{{{prompt}}}}\"\n{YAML_TAIL}",
+        );
+        std::fs::write(dir.path().join("derrick.yaml"), &yaml)?;
+        std::fs::create_dir_all(dir.path().join(".specify/memory"))?;
+        std::fs::create_dir_all(dir.path().join(".derrick"))?;
+        std::fs::write(
+            dir.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )?;
+        let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
+        let substrate = NativeSubstrate::open(
+            NativeConfig {
+                db_path: dir.path().join(".derrick/derrick.db"),
+                worktree_root: dir.path().join(".derrick/worktrees"),
+            },
+            config.site().clone(),
+        )
+        .await?;
+
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let mut hosts = HostRegistry::empty();
+        hosts.register(
+            "codex",
+            Box::new(PromptCapturingHost {
+                name: "codex",
+                captured_prompt: captured.clone(),
+            }),
+        );
+
+        let run_dir = dir.path().join(".derrick/runs/run-1");
+        std::fs::create_dir_all(&run_dir)?;
+        let manifest_path = run_dir.join("manifest.json");
+        let mut state = ExecutionState::new("find defects".to_owned(), "run-1".to_owned(), run_dir);
+        let step = config
+            .pipeline()
+            .iter()
+            .find(|s| s.id() == "probe")
+            .expect("probe step")
+            .clone();
+
+        crate::steps::execute_step(
+            &config,
+            &substrate,
+            Arc::new(hosts),
+            dir.path(),
+            &step,
+            &mut state,
+            "run-1",
+            &manifest_path,
+            None,
+        )
+        .await?;
+
+        let prompt = captured
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("captured prompt");
+        assert!(prompt.contains("role `reviewer`"));
+        assert!(prompt.contains(".codex/agents/reviewer.md"));
+        assert!(prompt.contains("Review adversarially."));
+        assert!(prompt.contains("review find defects"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_host_role_step_does_not_include_role_agent_file() -> TestResult {
+        let dir = tempdir()?;
+        std::fs::create_dir_all(dir.path().join(".codex/agents"))?;
+        std::fs::write(
+            dir.path().join(".codex/agents/reviewer.md"),
+            "Review adversarially.",
+        )?;
+        let capture_path = dir.path().join("captured-prompt.txt");
+        let provider_script = dir.path().join("shell-provider.py");
+        std::fs::write(
+            &provider_script,
+            format!(
+                r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+request = json.load(sys.stdin)
+pathlib.Path(r"{capture}").write_text(request["prompt"])
+print("<<DERRICK-CONTENT>> ok")
+print('<<DERRICK-META>> {{"tokens_in": 1, "tokens_out": 1, "finish_reason": "stop"}}')
+"#,
+                capture = capture_path.display()
+            ),
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&provider_script)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&provider_script, perms)?;
+        }
+        let yaml = format!(
+            "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  shell-reviewer:\n    provider: shell\n    cli: \"{}\"\n    model: shell-reviewer\nroles:\n  reviewer:\n    model: shell-reviewer\n    agent: .codex/agents/reviewer.md\n{YAML_MID}  - id: probe\n    role: reviewer\n{YAML_TAIL}",
+            provider_script.display()
+        );
+        std::fs::write(dir.path().join("derrick.yaml"), &yaml)?;
+        std::fs::create_dir_all(dir.path().join(".specify/memory"))?;
+        std::fs::create_dir_all(dir.path().join(".derrick"))?;
+        std::fs::write(
+            dir.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )?;
+        let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
+        let substrate = NativeSubstrate::open(
+            NativeConfig {
+                db_path: dir.path().join(".derrick/derrick.db"),
+                worktree_root: dir.path().join(".derrick/worktrees"),
+            },
+            config.site().clone(),
+        )
+        .await?;
+
+        let run_dir = dir.path().join(".derrick/runs/run-1");
+        std::fs::create_dir_all(&run_dir)?;
+        let manifest_path = run_dir.join("manifest.json");
+        let mut state = ExecutionState::new("find defects".to_owned(), "run-1".to_owned(), run_dir);
+        let step = config
+            .pipeline()
+            .iter()
+            .find(|s| s.id() == "probe")
+            .expect("probe step")
+            .clone();
+
+        crate::steps::execute_step(
+            &config,
+            &substrate,
+            Arc::new(HostRegistry::empty()),
+            dir.path(),
+            &step,
+            &mut state,
+            "run-1",
+            &manifest_path,
+            None,
+        )
+        .await?;
+
+        let prompt = std::fs::read_to_string(&capture_path)?;
+        assert!(prompt.contains("find defects"));
+        assert!(!prompt.contains("role `reviewer`"));
+        assert!(!prompt.contains(".codex/agents/reviewer.md"));
+        assert!(!prompt.contains("Review adversarially."));
         Ok(())
     }
 

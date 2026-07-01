@@ -81,7 +81,7 @@ async fn show(name: &str) -> Result<CliExitCode, CliError> {
         .roles()
         .as_map()
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| (k.clone(), v.model().to_owned()))
         .collect();
 
     let profiled = config
@@ -92,8 +92,8 @@ async fn show(name: &str) -> Result<CliExitCode, CliError> {
         .roles()
         .as_map()
         .iter()
-        .filter(|(k, v)| original_roles.get(*k).map(String::as_str) != Some(v.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .filter(|(k, v)| original_roles.get(*k).map(String::as_str) != Some(v.model()))
+        .map(|(k, v)| (k.clone(), v.model().to_owned()))
         .collect();
     all_changes.sort_by_key(|(k, _)| k.clone());
 

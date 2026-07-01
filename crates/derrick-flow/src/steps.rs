@@ -220,6 +220,8 @@ pub(crate) async fn execute_role_step(
         };
         let prompt = render_template(command, &template_context(config, state)?)?;
         let prompt = inject_clarify_answers_for_plan(step.id(), state, repo_root, prompt)?;
+        let prompt =
+            apply_role_agent_context(config, step.role(), working_dir(state, repo_root), prompt)?;
         // Apply roughneck prompt injection if enabled.
         let prompt = if config.tools().roughneck().enabled() {
             derrick_roughneck::inject_prompt(&prompt, config.tools().roughneck().level())
@@ -390,6 +392,50 @@ pub(crate) async fn execute_role_step(
                 .with_roughneck(roughneck_saved),
         )
     }
+}
+
+fn apply_role_agent_context(
+    config: &derrick_config::Config,
+    role: Option<&str>,
+    working_dir: &Path,
+    prompt: String,
+) -> Result<String, RunError> {
+    let Some(role) = role else {
+        return Ok(prompt);
+    };
+    let Some(agent_path) = config.roles().agent(role) else {
+        return Ok(prompt);
+    };
+    if agent_path.is_absolute() {
+        return Err(RunError::Config(format!(
+            "roles.{role}.agent must stay inside the working tree: absolute paths are not allowed ({})",
+            agent_path.display()
+        )));
+    }
+    let repo_root = working_dir.canonicalize().map_err(|source| RunError::Io {
+        path: working_dir.to_path_buf(),
+        source,
+    })?;
+    let full_path = working_dir.join(agent_path);
+    let canonical_path = full_path.canonicalize().map_err(|source| RunError::Io {
+        path: full_path.clone(),
+        source,
+    })?;
+    if !canonical_path.starts_with(&repo_root) {
+        return Err(RunError::Config(format!(
+            "roles.{role}.agent must stay inside the working tree: {} escapes {}",
+            agent_path.display(),
+            working_dir.display()
+        )));
+    }
+    let instructions = std::fs::read_to_string(&canonical_path).map_err(|source| RunError::Io {
+        path: canonical_path.clone(),
+        source,
+    })?;
+    Ok(format!(
+        "Use these role-specific agent instructions for role `{role}` from `{path}`:\n\n{instructions}\n\n---\n\n{prompt}",
+        path = agent_path.display()
+    ))
 }
 
 async fn execute_derrick_step(
@@ -1482,5 +1528,63 @@ Update version_matches_cargo_pkg_version.
         assert_bash_receives_literal("`touch pwned`");
         assert_bash_receives_literal("line1\nline2");
         assert_bash_receives_literal("a && rm -rf / ; b");
+    }
+
+    #[test]
+    fn role_agent_context_rejects_absolute_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let yaml = format!(
+            "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  m:\n    provider: claude\n    model: claude-sonnet-4-6\nroles:\n  drafter:\n    model: m\n    agent: {}\ntools:\n  speckit:\n    enabled: false\n    version: \">=0.4.0\"\n  assay:\n    enabled: false\n    role: drafter\n    reviewers: [drafter]\n    rounds: 1\n  substrate:\n    backend: none\n    mode: solo\n  copilot:\n    enabled: false\n    agent_identity: derrick-hand\npipeline:\n  - id: specify\n    role: drafter\n    host: claude\n    command: hi\nguardrails:\n  constitution_path: .specify/memory/constitution.md\n  forbid_paths: []\n  required_labels: []\nparallelism:\n  batch_max: 1\n  step_max: 1\n  assay_max: 1\nstate:\n  dir: .derrick\n  log_runs: false\n  worktree_root: .derrick/worktrees\n",
+            tmp.path().join("agent.md").display()
+        );
+        std::fs::create_dir_all(tmp.path().join(".specify/memory")).expect("memory dir");
+        std::fs::write(
+            tmp.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )
+        .expect("constitution");
+        std::fs::write(tmp.path().join("derrick.yaml"), yaml).expect("write config");
+        let config = derrick_config::Config::load_from_path(&tmp.path().join("derrick.yaml"))
+            .expect("config parses");
+
+        let error = super::apply_role_agent_context(
+            &config,
+            Some("drafter"),
+            tmp.path(),
+            "prompt".to_owned(),
+        )
+        .expect_err("absolute path should fail");
+        assert!(error.to_string().contains("absolute paths are not allowed"));
+    }
+
+    #[test]
+    fn role_agent_context_rejects_paths_outside_working_tree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_root).expect("repo root");
+        std::fs::write(tmp.path().join("agent.md"), "outside").expect("outside agent");
+        let yaml = "version: 1\nsite:\n  name: test\n  prefix: tst\nmodels:\n  m:\n    provider: claude\n    model: claude-sonnet-4-6\nroles:\n  drafter:\n    model: m\n    agent: ../agent.md\ntools:\n  speckit:\n    enabled: false\n    version: \">=0.4.0\"\n  assay:\n    enabled: false\n    role: drafter\n    reviewers: [drafter]\n    rounds: 1\n  substrate:\n    backend: none\n    mode: solo\n  copilot:\n    enabled: false\n    agent_identity: derrick-hand\npipeline:\n  - id: specify\n    role: drafter\n    host: claude\n    command: hi\nguardrails:\n  constitution_path: .specify/memory/constitution.md\n  forbid_paths: []\n  required_labels: []\nparallelism:\n  batch_max: 1\n  step_max: 1\n  assay_max: 1\nstate:\n  dir: .derrick\n  log_runs: false\n  worktree_root: .derrick/worktrees\n";
+        std::fs::create_dir_all(repo_root.join(".specify/memory")).expect("memory dir");
+        std::fs::write(
+            repo_root.join(".specify/memory/constitution.md"),
+            "constitution",
+        )
+        .expect("constitution");
+        std::fs::write(repo_root.join("derrick.yaml"), yaml).expect("write config");
+        let config = derrick_config::Config::load_from_path(&repo_root.join("derrick.yaml"))
+            .expect("config parses");
+
+        let error = super::apply_role_agent_context(
+            &config,
+            Some("drafter"),
+            &repo_root,
+            "prompt".to_owned(),
+        )
+        .expect_err("escaping path should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("must stay inside the working tree")
+        );
     }
 }

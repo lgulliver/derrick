@@ -1,6 +1,6 @@
 # Spec providers — speckit, native, import
 
-> Design decision: D85 (DESIGN.md §12), refining D2/D3. Pipeline: §4 / §5.3.
+> Design decisions: D85 and D87 (DESIGN.md §12), refining D2/D3. Pipeline: §4 / §5.3.
 
 derrick's pipeline turns a feature prompt into a **spec → plan → tasks** trio of
 files under `specs/<NNN>-<slug>/` that the rest of the pipeline (`clarify`,
@@ -13,12 +13,12 @@ switch providers.
 
 | Provider | What it does | When to use |
 |---|---|---|
-| `speckit` (default) | Shells the `/speckit.*` slash-commands to your host CLI — the original behaviour. | You already use speckit; zero change. |
-| `native` | derrick generates the spec itself, in-process: survey-grounded, clarify-first, schema-validated. | You want generation without speckit, grounded in your real code and token-efficient. |
+| `native` (default) | derrick generates the spec itself, in-process: survey-grounded, clarify-first, schema-validated. | You want generation without speckit, grounded in your real code and token-efficient. |
+| `speckit` | Shells the `/speckit.*` slash-commands to your host CLI — the original behaviour. | You already use speckit and want to keep that toolchain. |
 | `import` | Bring your own spec/PRD from a local file; derrick normalises it into the schema. | You already wrote a spec/PRD and want derrick to plan and decompose it. |
 
-The default is `speckit` — existing repos and a fresh `derrick init` behave
-exactly as before unless you opt in.
+The default for new sites is `native`. Existing repos keep running whatever
+their `derrick.yaml` pins; explicit `/speckit.*` steps are never reinterpreted.
 
 ---
 
@@ -29,7 +29,7 @@ In `derrick.yaml`:
 ```yaml
 tools:
   specify:
-    provider: speckit          # speckit (default) | native | import
+    provider: native           # native (default) | speckit | import
     import:
       source: docs/PRD.md      # required for import; local file path (v1)
       plan: native             # native (default) | speckit | import
@@ -38,8 +38,8 @@ tools:
 
 `derrick init` asks which provider to use and writes the right shape:
 
-- **speckit** → explicit `host:`+`command: "/speckit.specify …"` steps (self-documenting).
 - **native** → `provider: native` and *bare* `specify`/`plan`/`tasks` steps (no `role`/`host`/`command`/`runner`), which the seam routes to the native generator. The `role` is stripped too: a step that keeps a `role:` is *not* bare and would bypass the seam. The native generator resolves its own `drafter`/`proposer` tiers from `roles:` instead.
+- **speckit** → explicit `host:`+`command: "/speckit.specify …"` steps (self-documenting).
 - **import** → `provider: import` with a commented `source:` stub to fill in.
 
 **Back-compat:** the provider is consulted only for a *bare* spec step. A step
@@ -73,10 +73,11 @@ grounding (replaces model-side `grep`/`glob` fan-out), deterministic validation
 (replaces a `/speckit.analyze` model pass), and roughneck/caveman/prompt-caching
 on the model calls.
 
-**Scope note:** the native path covers **spec → plan → tasks**. The optional
-`analyze` step is not part of the seam — a default pipeline keeps it as a
-`/speckit.analyze` step, so a fully speckit-free setup should drop or replace
-`analyze`.
+**Scope note:** this note applies to the spec-provider seam only; the native
+default pipeline still includes `clarify` elsewhere in the flow. The old optional
+`/speckit.analyze` step is not part of the seam and is not included in the
+native default provider path; validation is handled by native schema checks and
+assay.
 
 ---
 
