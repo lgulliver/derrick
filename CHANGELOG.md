@@ -6,6 +6,34 @@ aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] — 2026-07-01
+
+### Added
+- **Native spec provider is now the default for new sites (D87).** Fresh
+  `derrick init` configs write `tools.specify.provider: native` and bare
+  `specify` / `plan` / `tasks` steps, so the standard `/drill` path no longer
+  requires speckit. Speckit remains an explicit compatibility provider for
+  host-delegated `/speckit.*` flows.
+- **Role bindings now support repo-local agent files (D88).** `roles:` accepts
+  both the existing short form (`reviewer: codex-gpt5`) and an expanded form
+  with `model` plus `agent`, such as
+  `reviewer: { model: codex-gpt5, agent: .codex/agents/integrations-engineer.md }`.
+  Host-backed role steps prepend that repo-local instruction file as explicit
+  role context.
+
+### Fixed
+- **Speckit compatibility init now pins existing `analyze` steps correctly.**
+  When a repo already had an `analyze` step, the speckit provider init path now
+  normalises that step into the pinned `/speckit.analyze` form instead of
+  leaving it half-converted.
+- **Survey hub integration tests no longer race on startup.** Hub-routing tests
+  now serialise startup around the shared transport/resource path that was
+  causing intermittent failures.
+- **Role-agent review follow-ups.** Host-native role agent files are now kept
+  off the non-host model-completion path, `roles.<role>.agent` is constrained to
+  paths inside the working tree, and profile/stage overrides preserve existing
+  agent bindings on synthesised assay reviewer roles.
+
 ## [0.1.0-alpha.4] — 2026-06-24
 
 ### Added
