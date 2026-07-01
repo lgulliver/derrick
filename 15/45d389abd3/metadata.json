@@ -1,0 +1,37 @@
+{
+  "cli_version": "0.7.8",
+  "checkpoint_version": "branch-v1",
+  "checkpoint_id": "1545d389abd3",
+  "strategy": "manual-commit",
+  "branch": "codex/native-spec-provider-default",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "DESIGN.md",
+    "README.md",
+    "crates/derrick-cli/src/commands/doctor.rs",
+    "crates/derrick-cli/src/commands/init.rs",
+    "crates/derrick-cli/src/commands/init_wizard.rs",
+    "crates/derrick-cli/src/commands/spec_provider_init.rs",
+    "crates/derrick-cli/tests/cli.rs",
+    "crates/derrick-config/src/lib.rs",
+    "crates/derrick-survey-hub/tests/hub_routing.rs",
+    "docs/spec-providers.md",
+    "templates/derrick.yaml.in"
+  ],
+  "sessions": [
+    {
+      "metadata": "/15/45d389abd3/0/metadata.json",
+      "transcript": "/15/45d389abd3/0/full.jsonl",
+      "compact_transcript": "/15/45d389abd3/0/transcript.jsonl",
+      "content_hash": "/15/45d389abd3/0/content_hash.txt",
+      "prompt": "/15/45d389abd3/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 559156,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 11551488,
+    "output_tokens": 35774,
+    "api_call_count": 86
+  }
+}

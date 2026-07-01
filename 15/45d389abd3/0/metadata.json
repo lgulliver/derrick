@@ -1,0 +1,66 @@
+{
+  "cli_version": "0.7.8",
+  "checkpoint_id": "1545d389abd3",
+  "session_id": "019f1e82-7db5-7330-b034-2785dfe78862",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-01T17:00:25.621521Z",
+  "branch": "codex/native-spec-provider-default",
+  "checkpoints_count": 3,
+  "save_step_count": 3,
+  "files_touched": [
+    "DESIGN.md",
+    "README.md",
+    "crates/derrick-cli/src/commands/doctor.rs",
+    "crates/derrick-cli/src/commands/init.rs",
+    "crates/derrick-cli/src/commands/init_wizard.rs",
+    "crates/derrick-cli/src/commands/spec_provider_init.rs",
+    "crates/derrick-cli/tests/cli.rs",
+    "crates/derrick-config/src/lib.rs",
+    "crates/derrick-survey-hub/tests/hub_routing.rs",
+    "docs/spec-providers.md",
+    "templates/derrick.yaml.in"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "751be0df0dde",
+  "token_usage": {
+    "input_tokens": 559156,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 11551488,
+    "output_tokens": 35774,
+    "api_call_count": 86
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 114,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 261,
+      "agent_lines_removed": 205
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 169,
+      "agent_lines_removed": 216
+    }
+  ]
+}
