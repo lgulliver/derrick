@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "cbb8f77ac60d",
+  "strategy": "manual-commit",
+  "branch": "fix/adopt-toctou-oq6",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "crates/derrick-adopt/src/lib.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/cb/b8f77ac60d/0/metadata.json",
+      "transcript": "/cb/b8f77ac60d/0/full.jsonl",
+      "compact_transcript": "/cb/b8f77ac60d/0/transcript.jsonl",
+      "content_hash": "/cb/b8f77ac60d/0/content_hash.txt",
+      "prompt": "/cb/b8f77ac60d/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25554,
+    "cache_creation_tokens": 244374,
+    "cache_read_tokens": 6450780,
+    "output_tokens": 45988,
+    "api_call_count": 56
+  }
+}

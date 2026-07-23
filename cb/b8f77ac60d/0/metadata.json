@@ -1,0 +1,67 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "cbb8f77ac60d",
+  "session_id": "eede6f22-e3de-4aac-bdbb-ff7ea081603f",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-23T19:00:33.903649Z",
+  "branch": "fix/adopt-toctou-oq6",
+  "checkpoints_count": 3,
+  "save_step_count": 2,
+  "files_touched": [
+    "crates/derrick-adopt/src/lib.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "180fdf82627f",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 25554,
+    "cache_creation_tokens": 244374,
+    "cache_read_tokens": 6450780,
+    "output_tokens": 45988,
+    "api_call_count": 56
+  },
+  "session_metrics": {
+    "turn_count": 24
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-23T19:00:33.863371Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 202,
+    "human_modified": 27,
+    "human_removed": 0,
+    "total_committed": 202,
+    "total_lines_changed": 238,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 211,
+      "user_lines_removed": 18,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "crates/derrick-adopt/src/lib.rs": 211
+      },
+      "user_removed_per_file": {
+        "crates/derrick-adopt/src/lib.rs": 18
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 18,
+      "user_lines_removed": 9,
+      "agent_lines_added": 211,
+      "agent_lines_removed": 18,
+      "user_added_per_file": {
+        "DESIGN.md": 18
+      },
+      "user_removed_per_file": {
+        "DESIGN.md": 9
+      }
+    }
+  ]
+}
