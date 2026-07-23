@@ -160,3 +160,54 @@ Files touched:
 Note: this is the doc entry only — `crates/derrick-caveman/src/lib.rs` still contains the banned substitutions (lines ~810–819). That code change is out of scope for design-keeper; it belongs to whoever implements this against the new D93 entry (likely `token-economist`).</result>
 <usage><subagent_tokens>53998</subagent_tokens><tool_uses>12</tool_uses><duration_ms>70584</duration_ms></usage>
 </task-notification>
+
+---
+
+<task-notification>
+<task-id>a450ca9fb78374ca6</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a450ca9fb78374ca6.output</output-file>
+<status>completed</status>
+<summary>Agent "Drop caveman invented abbreviations" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>This is exactly the intended fix. Everything is confined to `crates/derrick-caveman/`; the `DESIGN.md` D93 entry visible in `git status` was already staged by a parallel process before I started (it matches exactly what I implemented) — I did not touch it.
+
+## Summary
+
+**Mappings removed from `rewrite_word`** (`/Users/lgulliver/repos/derrick/crates/derrick-caveman/src/lib.rs`), each an Ultra-only match arm:
+
+| Removed | Justification (SKILL.md quote) |
+|---|---|
+| `authentication`/`authenticate`/`authorization` → `auth` | Ultra row: *"NO prose abbreviations (cfg/impl/req/res/fn/**auth**)"* |
+| `request`/`requests` → `req` | Rules: *"never invent new abbreviations (cfg/impl/**req**/res/fn)"*; Ultra row repeats `req` |
+| `response`/`responses` → `res` | Rules + Ultra row both name `**res**` |
+| `function`/`functions` → `fn` | Rules + Ultra row both name `**fn**` |
+| `implementation`/`implementations` → `impl` | Rules + Ultra row both name `**impl**` |
+
+**Kept, deliberately:**
+- `database`/`databases` → `DB` — Rules line's explicit carve-out: *"Standard well-known tech acronyms OK (**DB**/API/HTTP)"*.
+- `configuration`/`configure` → `config` — the skill's banned list names `cfg`, never `config`; `config` is the plain word, not a further invented truncation the way `cfg` is.
+- `however`→`but`, `nevertheless`/`nonetheless`→`still`, `additionally`→`also` — these are the "short synonym" class the Rules line permits (*"big not extensive, fix not..."*), not truncations.
+
+**Corpus fixtures updated** (all under `tests/corpus/ultra/`, verified byte-for-byte against `compress()` output, not hand-typed):
+- `abbreviation_and_arrows.out` → `DB response changed, authentication request failed.`
+- `conjunction_stripping.out` → `function implementation are big simple.`
+- `crlf_input.out` → `request is fine.\nNext response.\n`
+- `one_very_long_paragraph.out` → `This request is small paragraph, response has enough words.`
+- `no_trailing_newline.out` → `request is fine.` (no trailing newline)
+
+**`tests/caveman.rs`**: updated `ultra_strips_causal_because_without_arrow`'s expected string, and added `ultra_does_not_invent_prose_abbreviations` (6 word-cases: request/response/function/implementation/authentication/authorization survive Ultra uncompressed).
+
+**D91 harness extension** (`tests/skill_parity.rs`):
+- `vendored_snapshot_still_bans_invented_abbreviations` — content anchor pinning the vendored snapshot to the exact skill wording banning these abbreviations (mirrors the existing D90 arrow anchor).
+- `ultra_never_reintroduces_banned_invented_abbreviations` — class-level regression guard: runs 9 representative sentences through `compress()` at all three intensities and asserts none of `cfg/impl/req/res/fn/auth` ever appear as a standalone output token. This is independent of any hand-maintained fixture string, so it can't be silently defeated by editing a `.out` file.
+- Shared `BANNED_INVENTED_ABBREVIATIONS` list and `contains_banned_word` helper added to `tests/support/mod.rs`, used by both `caveman.rs` and `skill_parity.rs` so the two test files can't drift out of sync on what "banned" means.
+
+**Verification** (`crates/derrick-caveman`):
+- `cargo test -p derrick-caveman` — 21 passed, 0 failed (14 in `caveman.rs`, 2 in `savings_targets.rs`, 5 in `skill_parity.rs`).
+- `cargo clippy -p derrick-caveman --all-targets -- -D warnings` — clean.
+- `cargo fmt -p derrick-caveman -- --check` — clean.
+
+Files touched: `crates/derrick-caveman/src/lib.rs`, `crates/derrick-caveman/tests/caveman.rs`, `crates/derrick-caveman/tests/skill_parity.rs`, `crates/derrick-caveman/tests/support/mod.rs`, and the five `tests/corpus/ultra/*.out` fixtures listed above. No other crate was touched.</result>
+<usage><subagent_tokens>116292</subagent_tokens><tool_uses>54</tool_uses><duration_ms>418986</duration_ms></usage>
+</task-notification>
