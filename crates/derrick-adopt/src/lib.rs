@@ -284,6 +284,7 @@ impl Adopter {
 
         plan.blockers = blockers.into_iter().collect();
         plan.warnings = warnings.into_iter().collect();
+        plan.source_guards = source_guards(detection, &plan.writes);
         plan.sort();
         Ok(plan)
     }
@@ -294,36 +295,30 @@ impl Adopter {
             return Err(AdoptError::Blocked(plan.blockers.clone()));
         }
         self.preflight(plan)?;
+        // Re-read the files the merges were computed against. If any changed
+        // since detect, the staged content is stale — abort rather than
+        // silently clobber the external edit (OQ6, DESIGN.md §5.6).
+        self.revalidate_sources(plan)?;
 
         let state_dir = self.repo_root.join(".derrick");
         fs::create_dir_all(&state_dir).map_err(|source| AdoptError::Io {
             path: state_dir.clone(),
             source,
         })?;
+        // Prune stage dirs left behind by earlier interrupted or partially
+        // failed applies so they do not accumulate under `.derrick/`.
+        self.prune_stale_stage_dirs(&state_dir);
         let stage_dir = state_dir.join(format!(".adopt-stage-{}", Uuid::new_v4()));
-        // TODO(T012): Foreman's D32 cleanup loop must prune stale `.derrick/.adopt-stage-*`.
         fs::create_dir_all(&stage_dir).map_err(|source| AdoptError::Io {
             path: stage_dir.clone(),
             source,
         })?;
 
-        for write in &plan.writes {
-            let staged_path = stage_dir.join(&write.path);
-            if let Some(parent) = staged_path.parent() {
-                fs::create_dir_all(parent).map_err(|source| AdoptError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
-            fs::write(&staged_path, &write.content).map_err(|source| AdoptError::Io {
-                path: staged_path,
-                source,
-            })?;
-        }
-
-        let staged_config = stage_dir.join("derrick.yaml");
-        if staged_config.exists() {
-            Config::load_from_path(&staged_config)?;
+        // Stage everything before touching real files. On any staging error,
+        // remove the half-built stage dir so it does not leak.
+        if let Err(error) = self.stage_writes(plan, &stage_dir) {
+            let _ = fs::remove_dir_all(&stage_dir);
+            return Err(error);
         }
 
         let mut written = Vec::new();
@@ -396,6 +391,77 @@ impl Adopter {
             bookkeeping,
             partial_failure: None,
         })
+    }
+
+    /// Re-reads every file a merge write depended on and compares it against the
+    /// content captured at detect. Returns [`AdoptError::StaleDetection`] listing
+    /// any file whose on-disk state diverged (edited, created, or deleted) since
+    /// detection. Read errors other than "not found" propagate as IO errors.
+    fn revalidate_sources(&self, plan: &AdoptionPlan) -> Result<(), AdoptError> {
+        let mut stale = Vec::new();
+        for guard in &plan.source_guards {
+            let path = self.repo_root.join(&guard.path);
+            let current = match fs::read_to_string(&path) {
+                Ok(contents) => Some(contents),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(source) => return Err(AdoptError::Io { path, source }),
+            };
+            if current.as_deref() != guard.expected.as_deref() {
+                stale.push(guard.path.clone());
+            }
+        }
+        if stale.is_empty() {
+            Ok(())
+        } else {
+            stale.sort();
+            stale.dedup();
+            Err(AdoptError::StaleDetection(stale))
+        }
+    }
+
+    /// Best-effort removal of leftover `.derrick/.adopt-stage-*` directories from
+    /// prior runs. Failures are ignored so a stray locked directory never blocks
+    /// an otherwise-valid apply.
+    fn prune_stale_stage_dirs(&self, state_dir: &Path) {
+        let Ok(entries) = fs::read_dir(state_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_stage_dir = path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| name.starts_with(".adopt-stage-"));
+            if is_stage_dir {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+    }
+
+    /// Writes every planned file into the staging directory and validates the
+    /// staged `derrick.yaml`. Kept separate from promotion so a staging-phase
+    /// failure can tear the stage dir down without touching real files.
+    fn stage_writes(&self, plan: &AdoptionPlan, stage_dir: &Path) -> Result<(), AdoptError> {
+        for write in &plan.writes {
+            let staged_path = stage_dir.join(&write.path);
+            if let Some(parent) = staged_path.parent() {
+                fs::create_dir_all(parent).map_err(|source| AdoptError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            fs::write(&staged_path, &write.content).map_err(|source| AdoptError::Io {
+                path: staged_path,
+                source,
+            })?;
+        }
+
+        let staged_config = stage_dir.join("derrick.yaml");
+        if staged_config.exists() {
+            Config::load_from_path(&staged_config)?;
+        }
+        Ok(())
     }
 
     fn relative_if_file(&self, relative: impl AsRef<Path>) -> Option<PathBuf> {
@@ -1040,6 +1106,10 @@ pub struct AdoptionPlan {
     pub blockers: Vec<String>,
     /// When true, `apply` runs `specify integration install claude` after writing files.
     pub install_speckit_integration: bool,
+    /// Detect-time snapshot of every file a merge write was computed against.
+    /// `apply` re-reads these before promotion and aborts if any changed since
+    /// detection (guards the OQ6 detect→apply TOCTOU, DESIGN.md §5.6).
+    pub source_guards: Vec<SourceGuard>,
 }
 
 impl AdoptionPlan {
@@ -1049,7 +1119,24 @@ impl AdoptionPlan {
                 .cmp(&right.path)
                 .then(left.as_field.cmp(&right.as_field))
         });
+        self.source_guards
+            .sort_by(|left, right| left.path.cmp(&right.path));
     }
+}
+
+/// A detect-time content snapshot for a file that a merge write depends on.
+///
+/// Captured at `propose` time from the detection report. At `apply` time the
+/// file is re-read and compared: any divergence means the on-disk state changed
+/// between detect and apply, so the pre-computed merge is stale and `apply`
+/// aborts rather than silently clobbering the external edit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceGuard {
+    /// Relative path of the guarded file.
+    pub path: PathBuf,
+    /// Content observed at detect time. `None` means the file was absent at
+    /// detect and must still be absent at apply.
+    pub expected: Option<String>,
 }
 
 /// A planned filesystem write.
@@ -1126,6 +1213,13 @@ pub enum AdoptError {
     /// Proposal has blockers.
     #[error("adoption blocked: {}", .0.join("; "))]
     Blocked(Vec<String>),
+    /// A file changed on disk between detect and apply, so the staged merges
+    /// are stale. The user must re-run `derrick init` to re-detect.
+    #[error(
+        "files changed since detection ({}); re-run `derrick init`",
+        .0.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+    )]
+    StaleDetection(Vec<PathBuf>),
     /// Config parsing or validation failed.
     #[error("{0}")]
     Config(#[from] derrick_config::ConfigError),
@@ -1153,6 +1247,32 @@ struct AdoptionHistoryEntry {
     timestamp: String,
     written: Vec<PathBuf>,
     references: Vec<PathBuf>,
+}
+
+/// Builds the detect-time guards for every merge write in `writes`.
+///
+/// Only `Append`/`MergeJson` writes carry pre-computed merges of existing
+/// content, so only those need revalidation. For each such write we record the
+/// content captured at detect (or `None` when the file was absent), so `apply`
+/// can detect an external edit and abort instead of clobbering it. `Create`
+/// writes replace wholesale and are already gated by blockers, so they are not
+/// guarded here.
+fn source_guards(detection: &DetectionReport, writes: &[PlannedWrite]) -> Vec<SourceGuard> {
+    let mut seen = BTreeSet::new();
+    let mut guards = Vec::new();
+    for write in writes {
+        if !matches!(write.mode, WriteMode::Append | WriteMode::MergeJson) {
+            continue;
+        }
+        if !seen.insert(write.path.clone()) {
+            continue;
+        }
+        guards.push(SourceGuard {
+            path: write.path.clone(),
+            expected: detection.file_contents.get(&write.path).cloned(),
+        });
+    }
+    guards
 }
 
 fn render_derrick_yaml(
@@ -2618,6 +2738,79 @@ mod tests {
         let state = fs::read_to_string(dir.path().join(".derrick/state.json"))
             .unwrap_or_else(|error| panic!("read state failed: {error}"));
         assert!(state.matches("timestamp").count() >= 2);
+    }
+
+    #[tokio::test]
+    async fn apply_aborts_when_snapshotted_file_changed_after_detect() {
+        let dir = git_repo();
+        let mcp = dir.path().join(".mcp.json");
+        // A pre-existing merge target: detect snapshots this content and the
+        // plan's .mcp.json merge is computed against it.
+        write(&mcp, r#"{"mcpServers":{"other":{"command":"foo"}}}"#);
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+        assert!(
+            plan.source_guards
+                .iter()
+                .any(|guard| guard.path == Path::new(".mcp.json") && guard.expected.is_some()),
+            "expected a content guard for the pre-existing .mcp.json"
+        );
+
+        // External edit lands between detect and apply.
+        let external = r#"{"mcpServers":{"other":{"command":"CHANGED-EXTERNALLY"}}}"#;
+        write(&mcp, external);
+
+        let error = adopter
+            .apply(&plan)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("expected stale-detection abort"));
+        assert!(
+            matches!(&error, AdoptError::StaleDetection(paths) if paths.contains(&PathBuf::from(".mcp.json"))),
+            "expected StaleDetection for .mcp.json, got: {error}"
+        );
+        assert!(error.to_string().contains("re-run `derrick init`"));
+
+        // The external edit must survive — the stale merge must not clobber it.
+        let after = fs::read_to_string(&mcp).unwrap_or_else(|error| panic!("read failed: {error}"));
+        assert_eq!(after, external, "external edit must not be silently lost");
+        // Nothing should have been promoted.
+        assert!(!dir.path().join("derrick.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn apply_prunes_stale_adopt_stage_dirs() {
+        let dir = git_repo();
+        // Simulate a stage dir left behind by an earlier partial failure.
+        let stale = dir.path().join(".derrick/.adopt-stage-stale");
+        fs::create_dir_all(&stale).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        fs::write(stale.join("leftover.txt"), "old")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+
+        adopter
+            .apply(&plan)
+            .await
+            .unwrap_or_else(|error| panic!("apply failed: {error}"));
+
+        assert!(
+            !stale.exists(),
+            "stale .adopt-stage-* dir should be pruned at apply start"
+        );
+        assert!(dir.path().join("derrick.yaml").is_file());
     }
 
     #[test]

@@ -747,14 +747,22 @@ overwrite**. It runs an adoption pass *before* writing anything:
    of files derrick would create or append to* (nothing else). The
    user reviews, accepts or edits, then derrick writes.
 
-**Known gap (OQ6):** merges of `hooks`/`.mcp.json`/
-`.claude/settings.json` are computed against the snapshot captured
-at step 1 (Detect) and are not re-read from disk before step 3's
-write (Promote). An external edit to any of those files between
-detect and apply is silently lost. A detect→merge revalidation
-pass — re-read on-disk state immediately before promotion and
-refuse or re-merge if it changed — is the leaning fix; not yet
-built. See §12 OQ6.
+**TOCTOU gap closed (OQ6, resolved by D94, T013):** merges of
+`hooks`/`.mcp.json`/`.claude/settings.json` are computed against a
+snapshot captured at step 1 (Detect). To stop that snapshot going
+stale by step 3 (Promote), each `Append`/`MergeJson` write now
+records a `SourceGuard` capturing the file content it merged
+against; immediately before promotion, `revalidate_sources`
+re-reads every guarded file and re-diffs it against its guard. Any
+divergence since detect — edited, created where it didn't exist,
+or deleted — aborts the whole apply with
+`AdoptError::StaleDetection` ("files changed since detection;
+re-run `derrick init`") rather than silently clobbering the
+external edit or attempting a re-merge (rejected as risky: apply
+time lacks the context to recompute a correct three-way merge).
+Stale `.derrick/.adopt-stage-*` staging directories from aborted or
+interrupted runs are cleaned up as part of the same pass. See §12
+D94.
 
 Concrete behaviours:
 
@@ -2468,6 +2476,7 @@ links back to the section where it lives.
 | D91 | **Automated skill-parity harness enforcing D7.** D7 ("caveman byte-identical to the skill at matched intensities") had no automated enforcement — `skill_parity` was a 9-line ignored placeholder test — which is exactly how the D90 drift (arrows vs. no arrows) shipped unnoticed. Decision: build a real parity harness that runs the installed caveman skill and the crate's `compress()` over the shared corpus and diffs the two outputs, wired into CI so any future D7 drift fails the build instead of silently diverging. Depends on D90 landing first — building the harness against the old arrow behaviour would lock in the wrong output. | §9.B.3 / D7 / D90 |
 | D92 | **`batch_max` bounds active hands, not total in-flight footprint.** Confirmed intent: the foreman's `parallelism.batch_max` caps only tickets in `InFlight` — tickets in `InReview` (worktree still held, PR open, awaiting merge) are not counted against it. This is deliberate, not an oversight: the cap bounds concurrent *active workers* (hands actually running), not the total resource footprint held across every non-terminal ticket state. No behaviour change from this decision; §9.C now documents the semantics explicitly so the cap isn't mistaken for a footprint limit. | §9.C |
 | D93 | **Caveman must not emit invented prose abbreviations.** The installed caveman `SKILL.md` explicitly bans invented abbreviations (`cfg`/`impl`/`req`/`res`/`fn`/`auth`), citing zero token saving under the tokenizer and a clarity cost — but `rewrite_word` (`crates/derrick-caveman/src/lib.rs`, ultra intensity) produced exactly those substitutions, a D7 byte-parity violation of the same class as D90. Decision: drop the invented-abbreviation substitutions from `rewrite_word`; those words now pass through in full. The D91 parity harness is extended to catch this whole class of drift, not just the D90 arrow rule. | §9.B.3 / D7 / D90 / D91 |
+| D94 | **`derrick-adopt` closes the detect→apply TOCTOU by aborting, not re-merging.** Resolves OQ6 (T013). At detect/propose time, each `Append`/`MergeJson` write now records a `SourceGuard` capturing the file content it merged against. At apply time, `revalidate_sources` re-reads every guarded file immediately before promotion (the final write) and re-diffs it against the guard; any divergence — edited, created where it didn't exist, or deleted since detect — aborts the whole apply with `AdoptError::StaleDetection` ("files changed since detection; re-run `derrick init`"). Re-merging was considered and rejected: by apply time derrick no longer holds the context needed to recompute a correct three-way merge, so a silent re-merge risks clobbering an external edit rather than protecting it. Stale `.derrick/.adopt-stage-*` staging directories left behind by aborted or interrupted runs are now cleaned up as part of the same pass. | §5.6 / OQ6 / T013 |
 
 ### Remaining open questions
 
@@ -2478,7 +2487,7 @@ links back to the section where it lives.
 | OQ3 | **Hub auth and multi-tenancy.** ~~A network-exposed server holding multiple teams' source requires at minimum bearer-token gating and likely per-workspace access scoping. The stdio model never had this surface; it should be treated as first-class design, not a bolt-on. Exact mechanism (static tokens, OAuth, mTLS, per-workspace ACL table) is unresolved.~~ **Resolved by D83**: scoped bearer tokens in hub config; each token grants workspace ids and capabilities (`read`/`refresh`; `upload` deferred); TLS terminated by reverse proxy; non-loopback bind gated on auth presence. | Resolved — see D83. | D80 / D83 / §9.B.8a |
 | OQ4 | **Hub routing scheme.** ~~`repo`/`workspace` selector argument on each tool (recommended starting point per D80) vs. per-workspace tool namespacing at the MCP layer. Start with the selector-arg approach; revisit if client ergonomics demand otherwise.~~ **Resolved by D84**: explicit `workspace` argument remains the default (D80, backward-compatible); a `derrick_survey_list_workspaces` discovery tool enumerates auth-scoped workspace ids; optional path-prefix routing (e.g. `/w/<id>`) gives clean per-site URLs for reverse-proxy routing without per-call `workspace` argument; subdomain/host-based routing rejected (requires wildcard DNS + TLS, not justified at current scale). All OQ2–OQ5 are now resolved. | Resolved — see D84. | D80 / D84 / §9.B.8a |
 | OQ5 | **Where does indexing happen? Hub-as-indexer vs hub-as-index-registry (the `WorkspaceSource` fork).** ~~The hub's query layer depends only on `index.db`, not on how it was produced, which enables two sourcing modes. **Local (indexer mode, current):** `root` points at a working tree on the hub's disk; the hub builds and refreshes it (D81 poll-TTL + `derrick_survey_refresh`). Implies source code lives on the hub. **Pushed (registry mode):** no `root`; a producer (CI/dev machine) builds `index.db` where the code already lives and uploads it; the hub opens and serves it, never seeing source. A `WorkspaceSource` enum (`Local { root }` \| `Pushed { … }`) is the natural seam: `WorkspaceConfig` becomes a tagged enum, `WorkspaceEntry.root` moves into a `source` field, only the build/refresh path branches — the serving tools (`search`/`context`/`impact`/`status`) are untouched. Modes can be mixed within one `hub.yaml`, giving a migration path. Two new costs in registry mode only: (1) **Schema/version portability** — a pushed DB from a different `derrick-survey` binary version must be accepted or rejected cleanly. **This is already implemented**: `db.rs` uses `PRAGMA user_version` (currently 2, set by `migrations/0002_meta_table.sql`), and `migrate()` enforces a `SchemaTooNew` hard-error when the stored version exceeds `SCHEMA_VERSION`. Cross-machine portability is therefore largely solved; no new stamping work is required. (2) **Atomic swap** — replacing a pushed DB while queries are in flight requires open-new, atomically swap the `Arc<Survey>`, drop-old; the current entry only rebuilds in place. The registry write path also implies an authenticated upload endpoint, coupling to OQ3 (auth). Registry mode makes D81's poll-TTL moot (freshness becomes push-based) and reshapes the OQ4 routing discussion (a registry hub stores `.db` files only; no source on shared infra).~~ **Resolved by D82**: `WorkspaceSource` abstraction (`Local { root }` \| `Pushed { db_path }`) is adopted as permanent; `Local` is unchanged; `Pushed` serves a prebuilt DB via atomic hot-swap; authenticated HTTP upload deferred to OQ3. | Resolved — see D82. | D80 / D81 / D82 / §9.B.8a |
-| OQ6 | **`derrick-adopt` detect→apply TOCTOU.** The adoption pass (§5.6) merges `hooks`/`.mcp.json`/`.claude/settings.json` against a snapshot captured at *detect* time and never re-reads disk before *promotion* (the final write) — an external edit to any of those files between detect and apply is silently lost. | Build a detect→merge revalidation pass: re-read the on-disk state immediately before promotion, re-diff against the detect-time snapshot, and refuse (or re-merge) if it changed. | §5.6 |
+| OQ6 | **`derrick-adopt` detect→apply TOCTOU.** ~~The adoption pass (§5.6) merges `hooks`/`.mcp.json`/`.claude/settings.json` against a snapshot captured at *detect* time and never re-reads disk before *promotion* (the final write) — an external edit to any of those files between detect and apply is silently lost.~~ **Resolved by D94**: `SourceGuard`s recorded at detect/propose time are revalidated against disk (`revalidate_sources`) immediately before promotion; any divergence aborts the apply with `AdoptError::StaleDetection` rather than silently re-merging. | Resolved — see D94. | §5.6 / D94 / T013 |
 
 New questions raised during implementation will be tracked as
 GitHub issues with the `design-question` label, and locked-in
