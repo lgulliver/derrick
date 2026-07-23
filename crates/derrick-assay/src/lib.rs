@@ -2258,21 +2258,23 @@ Details"#;
             .clone()
     }
 
-    fn single_reviewer_yaml(reviewer_cli: &Path, rounds: u32) -> String {
+    /// Assembles a `derrick.yaml` document from scenario-specific `models`,
+    /// `roles`, `tools.assay`, and `pipeline` fragments, sharing the
+    /// `site` / `tools.speckit` / `tools.substrate` / `tools.copilot` /
+    /// `guardrails` / `parallelism` / `state` boilerplate that every assay
+    /// test config needs but none of them vary. Each fragment must already
+    /// include its own trailing newline; `assay` and `pipeline` must be
+    /// indented to match the surrounding block (`assay` at 2 spaces under
+    /// `tools:`, `pipeline` at 2 spaces under `pipeline:`).
+    fn base_yaml(models: &str, roles: &str, assay: &str, pipeline: &str) -> String {
         format!(
             r#"version: 1
 site:
   name: test
   prefix: tst
 models:
-  shell-reviewer:
-    provider: shell
-    cli: "{cli}"
-    model: shell-reviewer
-roles:
-  proposer: shell-reviewer
-  reviewer: shell-reviewer
-tools:
+{models}roles:
+{roles}tools:
   speckit:
     enabled: true
     version: ">=0.4.0"
@@ -2282,19 +2284,8 @@ tools:
   copilot:
     enabled: false
     agent_identity: derrick-hand
-  assay:
-    enabled: true
-    role: reviewer
-    reviewers: [reviewer]
-    rounds: {rounds}
-pipeline:
-  - id: plan
-    role: proposer
-    host: claude
-  - id: assay
-    runner: derrick
-    skippable: true
-guardrails:
+{assay}pipeline:
+{pipeline}guardrails:
   constitution_path: .specify/memory/constitution.md
   forbid_paths: []
   required_labels: []
@@ -2306,10 +2297,21 @@ state:
   dir: .derrick
   log_runs: true
   worktree_root: .derrick/worktrees
-"#,
-            cli = reviewer_cli.display(),
-            rounds = rounds,
+"#
         )
+    }
+
+    fn single_reviewer_yaml(reviewer_cli: &Path, rounds: u32) -> String {
+        let models = format!(
+            "  shell-reviewer:\n    provider: shell\n    cli: \"{cli}\"\n    model: shell-reviewer\n",
+            cli = reviewer_cli.display(),
+        );
+        let roles = "  proposer: shell-reviewer\n  reviewer: shell-reviewer\n".to_owned();
+        let assay = format!(
+            "  assay:\n    enabled: true\n    role: reviewer\n    reviewers: [reviewer]\n    rounds: {rounds}\n"
+        );
+        let pipeline = "  - id: plan\n    role: proposer\n    host: claude\n  - id: assay\n    runner: derrick\n    skippable: true\n".to_owned();
+        base_yaml(&models, &roles, &assay, &pipeline)
     }
 
     /// Builds a `derrick.yaml` with one `provider: shell` reviewer role per
@@ -2330,48 +2332,12 @@ state:
             reviewer_names.push((*role).to_owned());
         }
         let first_role = reviewers[0].0;
-        format!(
-            r#"version: 1
-site:
-  name: test
-  prefix: tst
-models:
-{models}roles:
-{roles}tools:
-  speckit:
-    enabled: true
-    version: ">=0.4.0"
-  substrate:
-    backend: native
-    mode: solo
-  copilot:
-    enabled: false
-    agent_identity: derrick-hand
-  assay:
-    enabled: true
-    role: {first_role}
-    reviewers: [{reviewer_list}]
-    on_split: {on_split}
-    rounds: 1
-pipeline:
-  - id: assay
-    runner: derrick
-    skippable: true
-guardrails:
-  constitution_path: .specify/memory/constitution.md
-  forbid_paths: []
-  required_labels: []
-parallelism:
-  batch_max: 8
-  step_max: 4
-  assay_max: 2
-state:
-  dir: .derrick
-  log_runs: true
-  worktree_root: .derrick/worktrees
-"#,
-            reviewer_list = reviewer_names.join(", "),
-        )
+        let reviewer_list = reviewer_names.join(", ");
+        let assay = format!(
+            "  assay:\n    enabled: true\n    role: {first_role}\n    reviewers: [{reviewer_list}]\n    on_split: {on_split}\n    rounds: 1\n"
+        );
+        let pipeline = "  - id: assay\n    runner: derrick\n    skippable: true\n".to_owned();
+        base_yaml(&models, &roles, &assay, &pipeline)
     }
 
     /// Mock `claude` host adapter used by `replan_from_objections` (the
@@ -2605,50 +2571,13 @@ state:
         // calls the `claude` host adapter directly instead of
         // `derrick_models::resolve_role` — the model's own `cli` is never
         // invoked, so it can be a harmless placeholder.
-        let yaml = r#"version: 1
-site:
-  name: test
-  prefix: tst
-models:
-  codex:
-    provider: shell
-    cli: "true"
-    model: codex
-roles:
-  reviewer: codex
-tools:
-  speckit:
-    enabled: true
-    version: ">=0.4.0"
-  substrate:
-    backend: native
-    mode: solo
-  copilot:
-    enabled: false
-    agent_identity: derrick-hand
-  assay:
-    enabled: true
-    role: reviewer
-    reviewers: [reviewer]
-    rounds: 1
-pipeline:
-  - id: assay
-    runner: derrick
-    skippable: true
-guardrails:
-  constitution_path: .specify/memory/constitution.md
-  forbid_paths: []
-  required_labels: []
-parallelism:
-  batch_max: 8
-  step_max: 4
-  assay_max: 2
-state:
-  dir: .derrick
-  log_runs: true
-  worktree_root: .derrick/worktrees
-"#;
-        std::fs::write(tmp.path().join("derrick.yaml"), yaml).expect("write derrick.yaml");
+        let models =
+            "  codex:\n    provider: shell\n    cli: \"true\"\n    model: codex\n".to_owned();
+        let roles = "  reviewer: codex\n".to_owned();
+        let assay = "  assay:\n    enabled: true\n    role: reviewer\n    reviewers: [reviewer]\n    rounds: 1\n".to_owned();
+        let pipeline = "  - id: assay\n    runner: derrick\n    skippable: true\n".to_owned();
+        let yaml = base_yaml(&models, &roles, &assay, &pipeline);
+        std::fs::write(tmp.path().join("derrick.yaml"), &yaml).expect("write derrick.yaml");
         let config = Config::load_from_path(&tmp.path().join("derrick.yaml")).expect("load config");
 
         let mut hosts = HostRegistry::empty();

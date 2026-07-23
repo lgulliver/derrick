@@ -148,16 +148,7 @@ fn print_human(
             p.runs,
             if p.runs == 1 { "" } else { "s" }
         );
-        println!(
-            "  {:<28} {:>12}  \u{2190} measured (scrub raw vs. compressed)",
-            "scrub bytes saved",
-            fmt_tokens(p.bytes_saved)
-        );
-        println!(
-            "  {:<28} {:>12}  \u{2190} est. (compliance-gated rate formula, not measured)",
-            "roughneck tokens saved (est.)",
-            fmt_tokens(p.roughneck_tokens_saved)
-        );
+        print_compression_lines(p.bytes_saved, p.roughneck_tokens_saved);
     }
     println!();
 
@@ -503,16 +494,7 @@ fn print_run_human(run_id: &str, value: &serde_json::Value, manifest_path: &Path
     if savings.bytes_saved > 0 || savings.roughneck_tokens_saved > 0 {
         println!();
         println!("  Compression");
-        println!(
-            "  {:<28} {:>12}  \u{2190} measured (scrub raw vs. compressed)",
-            "scrub bytes saved",
-            fmt_tokens(savings.bytes_saved)
-        );
-        println!(
-            "  {:<28} {:>12}  \u{2190} est. (compliance-gated rate formula, not measured)",
-            "roughneck tokens saved (est.)",
-            fmt_tokens(savings.roughneck_tokens_saved)
-        );
+        print_compression_lines(savings.bytes_saved, savings.roughneck_tokens_saved);
     }
 
     println!("  Run manifest: {}", manifest_path.display());
@@ -588,6 +570,24 @@ fn fmt_tokens(n: u64) -> String {
 
 fn fmt_usd(amount: f64) -> String {
     format!("${amount:.4}")
+}
+
+/// Prints the paired "scrub bytes saved" / "roughneck tokens saved" lines
+/// shared by the top-level pipeline savings block and the `--run` compression
+/// block. The first line is measured (scrub raw vs. compressed); the second
+/// is an estimate (compliance-gated rate formula, not measured) — keep both
+/// labels identical wherever this is called so the distinction doesn't drift.
+fn print_compression_lines(bytes_saved: u64, roughneck_tokens_saved: u64) {
+    println!(
+        "  {:<28} {:>12}  \u{2190} measured (scrub raw vs. compressed)",
+        "scrub bytes saved",
+        fmt_tokens(bytes_saved)
+    );
+    println!(
+        "  {:<28} {:>12}  \u{2190} est. (compliance-gated rate formula, not measured)",
+        "roughneck tokens saved (est.)",
+        fmt_tokens(roughneck_tokens_saved)
+    );
 }
 
 #[cfg(test)]

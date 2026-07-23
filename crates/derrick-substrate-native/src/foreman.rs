@@ -777,14 +777,16 @@ impl Foreman {
         //     suppresses TTL abandonment when the heartbeat is merely stale
         //     (the agent is still running, just busy). Hands with no pid keep
         //     the existing heartbeat-TTL behaviour.
-        let hand_threshold = now - self.ttls.hand_ttl;
+        // Reuse the single `hand_threshold` computed for step 1a rather than
+        // recomputing it, so the two passes cannot drift.
         let all_hands = self.substrate.list_hands().await?;
         for hand in all_hands {
+            // Abandon a hand iff it is not live. Routed through the shared
+            // `hand_is_live` helper (the exact inverse) so this pass and the
+            // step 1a worktree-prune guard can never drift apart. `pid_dead` is
+            // still needed below to phrase the abandonment reason.
             let pid_dead = hand.pid.is_some_and(|pid| !process_alive(pid));
-            let live_pid = hand.pid.is_some_and(process_alive);
-            let stale_heartbeat = hand.last_seen.is_none_or(|t| t < hand_threshold);
-            let abandon = pid_dead || (stale_heartbeat && !live_pid);
-            if !abandon {
+            if hand_is_live(&hand, hand_threshold) {
                 continue;
             }
             let inflight = self
