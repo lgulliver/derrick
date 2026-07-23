@@ -1,0 +1,29 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "c9d01f3ac815",
+  "strategy": "manual-commit",
+  "branch": "fix/review-findings-batch",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".pre-commit-config.yaml",
+    "crates/derrick-assay/src/lib.rs",
+    "crates/derrick-cli/src/commands/gain.rs",
+    "crates/derrick-substrate-native/src/foreman.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c9/d01f3ac815/0/metadata.json",
+      "transcript": "/c9/d01f3ac815/0/full.jsonl",
+      "compact_transcript": "/c9/d01f3ac815/0/transcript.jsonl",
+      "content_hash": "/c9/d01f3ac815/0/content_hash.txt",
+      "prompt": "/c9/d01f3ac815/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 26281,
+    "cache_creation_tokens": 277550,
+    "cache_read_tokens": 10412419,
+    "output_tokens": 60448,
+    "api_call_count": 78
+  }
+}
