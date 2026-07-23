@@ -766,7 +766,7 @@ print('<<DERRICK-META>> {{"tokens_in": 1, "tokens_out": 1, "finish_reason": "sto
 
         // Mark tickets as `done` via the substrate API (mark_ticket_done_manually
         // works on any non-terminal ticket; they are currently `ready`).
-        use derrick_substrate::{ManualDoneAttestation, Substrate, TicketId};
+        use derrick_substrate::{ManualDoneAttestation, TicketId, TicketStore};
         let db_path = dir.path().join(".derrick/derrick.db");
         {
             let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;
@@ -1010,6 +1010,99 @@ print('<<DERRICK-META>> {{"tokens_in": 1, "tokens_out": 1, "finish_reason": "sto
             *reporter.final_status.lock().unwrap(),
             Some(RunStatus::Success),
             "pipeline_finished should carry the final status"
+        );
+        Ok(())
+    }
+
+    /// A failing step must be routed through the state machine as `Failed`
+    /// (not a bubbled `Err`), so `pipeline_finished` still fires and the
+    /// terminal cleanup block runs. Regression guard for FIX 1.
+    #[tokio::test]
+    async fn failing_step_fires_terminal_callbacks_and_finalizes_manifest() -> TestResult {
+        use crate::{ProgressReporter, RunProgress, StepProgress};
+        use std::sync::Mutex as StdMutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct CountingReporter {
+            steps_finished: AtomicUsize,
+            final_status: StdMutex<Option<RunStatus>>,
+        }
+        impl ProgressReporter for CountingReporter {
+            fn step_finished(&self, _p: StepProgress<'_>) {
+                self.steps_finished.fetch_add(1, Ordering::Relaxed);
+            }
+            fn pipeline_finished(&self, p: RunProgress<'_>) {
+                *self.final_status.lock().unwrap() = Some(p.status);
+            }
+        }
+
+        let reviewer = reviewer_script("#!/bin/sh\nprintf '## Verdict\\naccept\\n'")?;
+        // specify (ok) -> boom (bash, non-zero exit) -> after (must not run).
+        let pipe = r#"  - id: specify
+    role: drafter
+    host: claude
+    command: "/speckit.specify {{prompt}}"
+  - id: boom
+    runner: bash
+    command: "exit 3"
+  - id: after
+    runner: bash
+    command: "printf ran > after.txt"
+"#;
+        let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        let reporter = std::sync::Arc::new(CountingReporter::default());
+        let runner = runner.with_progress(reporter.clone());
+
+        // A step failure yields Ok(RunOutcome { Failed }), NOT a bubbled Err.
+        let outcome = runner
+            .run_pipeline(
+                DRILL_PIPELINE,
+                PipelineInput {
+                    prompt: Some("test".to_owned()),
+                    run_id: Some("run-fail".to_owned()),
+                    ..PipelineInput::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(outcome.status, RunStatus::Failed);
+        let boom = outcome
+            .steps
+            .iter()
+            .find(|s| s.id == "boom")
+            .ok_or("boom step should be recorded")?;
+        assert_eq!(boom.status, StepStatus::Failed);
+        // The step after the failure must not execute.
+        assert!(
+            !dir.path().join("after.txt").exists(),
+            "steps after a failure must not run"
+        );
+        // Terminal reporter callback fired despite the failure (no orphan spinner).
+        assert_eq!(
+            *reporter.final_status.lock().unwrap(),
+            Some(RunStatus::Failed),
+            "pipeline_finished must fire with Failed on a step failure"
+        );
+        // The failing step reported a finish (spinner resolved).
+        assert!(
+            reporter.steps_finished.load(Ordering::Relaxed) >= 2,
+            "step_finished should fire for the failing step"
+        );
+        // Manifest was finalized by the terminal cleanup block.
+        let manifest = crate::manifest::read_manifest(
+            &dir.path().join(".derrick/runs/run-fail/manifest.json"),
+        )?;
+        assert_eq!(manifest.status, RunStatus::Failed);
+        assert!(
+            manifest.finished_at.is_some(),
+            "terminal block must stamp finished_at"
+        );
+        // The failing step is recorded exactly once (no double push).
+        let boom_entries = manifest.steps.iter().filter(|s| s.id == "boom").count();
+        assert_eq!(
+            boom_entries, 1,
+            "failing step must be persisted exactly once"
         );
         Ok(())
     }
@@ -1335,21 +1428,35 @@ print('<<DERRICK-META>> {{"tokens_in": 1, "tokens_out": 1, "finish_reason": "sto
     #[tokio::test]
     async fn assay_unparsable_verdict_surfaces_step_failed() -> TestResult {
         let reviewer = reviewer_script("printf 'no verdict\\n'")?;
-        let (_dir, runner) =
+        let (dir, runner) =
             runner(&yaml(drill_pipeline(), &reviewer.path().join("reviewer"))).await?;
-        let error = runner
+        // A StepFailed from the assay is routed through the state machine as a
+        // Failed run outcome, not a bubbled Err (FIX 1).
+        let outcome = runner
             .run_pipeline(
                 DRILL_PIPELINE,
                 PipelineInput {
                     prompt: Some("test".to_owned()),
+                    run_id: Some("bad-verdict".to_owned()),
                     ..PipelineInput::default()
                 },
             )
-            .await
-            .err()
-            .ok_or("bad verdict should error")?;
+            .await?;
 
-        assert!(error.to_string().contains("could not parse verdict"));
+        assert_eq!(outcome.status, RunStatus::Failed);
+        let assay = outcome
+            .steps
+            .iter()
+            .find(|s| s.id == "assay")
+            .ok_or("assay step should be recorded")?;
+        assert_eq!(assay.status, StepStatus::Failed);
+        // The failure reason is preserved in the step log.
+        let log =
+            std::fs::read_to_string(dir.path().join(".derrick/runs/bad-verdict/step-assay.log"))?;
+        assert!(
+            log.contains("could not parse verdict"),
+            "step log should carry the failure reason, got: {log}"
+        );
         Ok(())
     }
 
@@ -1387,8 +1494,10 @@ print('<<DERRICK-META>> {{"tokens_in": 1, "tokens_out": 1, "finish_reason": "sto
     runner: bash
     command: "exit 7"
 "#;
-        let (_dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
-        let error = runner
+        let (dir, runner) = runner(&yaml(pipe, &reviewer.path().join("reviewer"))).await?;
+        // A non-zero bash exit is a step failure, surfaced as a Failed run
+        // outcome rather than a bubbled Err (FIX 1).
+        let outcome = runner
             .run_pipeline(
                 DRILL_PIPELINE,
                 PipelineInput {
@@ -1397,11 +1506,21 @@ print('<<DERRICK-META>> {{"tokens_in": 1, "tokens_out": 1, "finish_reason": "sto
                     ..PipelineInput::default()
                 },
             )
-            .await
-            .err()
-            .ok_or("bash failure should error")?;
+            .await?;
 
-        assert!(error.to_string().contains("bash exited"));
+        assert_eq!(outcome.status, RunStatus::Failed);
+        let shell = outcome
+            .steps
+            .iter()
+            .find(|s| s.id == "shell")
+            .ok_or("shell step should be recorded")?;
+        assert_eq!(shell.status, StepStatus::Failed);
+        let log =
+            std::fs::read_to_string(dir.path().join(".derrick/runs/bash-fail/step-shell.log"))?;
+        assert!(
+            log.contains("bash exited"),
+            "step log should carry the exit reason, got: {log}"
+        );
         Ok(())
     }
 

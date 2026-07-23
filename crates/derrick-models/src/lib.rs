@@ -47,7 +47,11 @@ pub trait Model: Send + Sync {
         let mut text = String::new();
         let mut tokens_in = 0;
         let mut tokens_out = 0;
-        let mut finish_reason = FinishReason::Stop;
+        // Default to `Error`: a stream that ends without a terminal `End` event
+        // was truncated (connection dropped, host killed mid-generation) and
+        // must not read as a clean `Stop`. The real reason is set only if an
+        // `End` event actually arrives.
+        let mut finish_reason = FinishReason::Error;
 
         while let Some(event) = stream.next().await {
             match event? {
@@ -630,6 +634,69 @@ mod tests {
             temperature: None,
             timeout: Duration::from_secs(1),
         }
+    }
+
+    /// A `Model` that yields a fixed sequence of events via the default
+    /// `complete` (which drains `stream`), used to check terminal-event
+    /// handling.
+    struct ScriptedModel {
+        events: Vec<CompletionEvent>,
+    }
+
+    #[async_trait]
+    impl Model for ScriptedModel {
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn provider(&self) -> &str {
+            "test"
+        }
+        fn cost_hint(&self) -> Option<&CostHint> {
+            None
+        }
+        async fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionStream, ModelError> {
+            let events: Vec<Result<CompletionEvent, ModelError>> =
+                self.events.iter().cloned().map(Ok).collect();
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_reports_error_when_stream_ends_without_end_event() {
+        // Mid-stream death: content arrives, then the stream ends with no
+        // terminal `End`. This must surface as `Error`, not a clean `Stop`.
+        let model = ScriptedModel {
+            events: vec![CompletionEvent::Content {
+                text: "partial".to_owned(),
+            }],
+        };
+        let response = model.complete(request()).await.unwrap();
+        assert_eq!(response.text, "partial");
+        assert_eq!(response.finish_reason, FinishReason::Error);
+    }
+
+    #[tokio::test]
+    async fn complete_propagates_terminal_end_reason() {
+        let model = ScriptedModel {
+            events: vec![
+                CompletionEvent::Content {
+                    text: "done".to_owned(),
+                },
+                CompletionEvent::End {
+                    tokens_in: 3,
+                    tokens_out: 1,
+                    finish_reason: FinishReason::Length,
+                },
+            ],
+        };
+        let response = model.complete(request()).await.unwrap();
+        assert_eq!(response.text, "done");
+        assert_eq!(response.tokens_in, 3);
+        assert_eq!(response.tokens_out, 1);
+        assert_eq!(response.finish_reason, FinishReason::Length);
     }
 
     #[tokio::test(start_paused = true)]

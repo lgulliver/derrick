@@ -6,9 +6,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use derrick_config::Config;
 use derrick_substrate::{
-    BlockReason, EventKind, EventScope, ForemanMode, Hand, HandKind, InReviewMetadata,
-    ManualDoneAttestation, NewEvent, NewTicket, Substrate, SubstrateError, TicketFilter,
-    TicketState,
+    BlockReason, EventKind, EventLog, EventScope, ForemanMode, ForemanState, Hand, HandKind,
+    HandRegistry, InReviewMetadata, ManualDoneAttestation, NewEvent, NewTicket, SubstrateError,
+    TicketFilter, TicketState, TicketStore,
 };
 use rusqlite::params;
 use tempfile::TempDir;

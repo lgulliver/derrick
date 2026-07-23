@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use derrick_config::Config;
 use derrick_substrate::{
-    BlockReason, EventKind, Hand, HandId, HandKind, InReviewMetadata, LinkKind, NewTicket,
-    Substrate, SubstrateError, Ticket, TicketId, TicketState,
+    BlockReason, EventKind, EventLog, Hand, HandId, HandKind, HandRegistry, InReviewMetadata,
+    LinkKind, NewTicket, SubstrateError, Ticket, TicketId, TicketState, TicketStore,
 };
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -575,6 +575,181 @@ async fn cleanup_prunes_abandoned_ticket_worktree_past_ttl() {
     assert_eq!(pruned, vec!["ticket:drk-1".to_owned()]);
     let remaining = substrate.list_worktrees(true).await.unwrap();
     assert!(remaining.iter().all(|w| w.run_id != "ticket:drk-1"));
+}
+
+// ---- FIX 2: worktree TTL prune must not evict a live hand's checkout ------
+
+#[tokio::test]
+async fn cleanup_preserves_live_hand_worktree_past_ttl() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+    // Fresh heartbeat (register_hand_simple stamps last_seen = now).
+    let hand = register_hand_simple(&substrate, "h1").await;
+    let ticket = new_ticket(&substrate, "drk-1").await;
+    // Non-terminal and owned by the live hand.
+    ticket_to_in_flight(&substrate, &ticket, &hand).await;
+
+    // Per-ticket hand worktree, backdated well past worktree_ttl (24h).
+    let wt_path = tempdir.path().join("host-worktrees").join("drk-1");
+    substrate
+        .register_ticket_worktree("drk-1", "derrick/ad-hoc/drk-1", &wt_path)
+        .await
+        .expect("register ticket worktree");
+    let stale_wt = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+    let conn = rusqlite::Connection::open(tempdir.path().join("derrick.db")).unwrap();
+    conn.execute(
+        "UPDATE worktrees SET created_at = ?1 WHERE run_id = ?2",
+        rusqlite::params![stale_wt, "ticket:drk-1"],
+    )
+    .unwrap();
+    drop(conn);
+
+    let foreman = build_foreman(
+        substrate.clone(),
+        Box::new(MockRepoState::new()),
+        no_op_dispatcher(substrate.clone(), hand.clone()),
+        tempdir.path().to_path_buf(),
+    );
+    let report = foreman.tick().await.expect("tick");
+
+    // A heavy ticket working past the TTL keeps its checkout.
+    assert!(
+        !report.cleanup_actions.iter().any(|a| matches!(
+            a,
+            CleanupAction::PrunedAbandonedWorktree { run_id } if run_id == "ticket:drk-1"
+        )),
+        "a live hand's worktree must not be pruned"
+    );
+    let remaining = substrate.list_worktrees(true).await.unwrap();
+    assert!(
+        remaining.iter().any(|w| w.run_id == "ticket:drk-1"),
+        "worktree row should survive"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_prunes_dead_hand_worktree_past_ttl() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+    let hand = register_hand_simple(&substrate, "h1").await;
+    let ticket = new_ticket(&substrate, "drk-1").await;
+    ticket_to_in_flight(&substrate, &ticket, &hand).await;
+
+    let wt_path = tempdir.path().join("host-worktrees").join("drk-1");
+    substrate
+        .register_ticket_worktree("drk-1", "derrick/ad-hoc/drk-1", &wt_path)
+        .await
+        .expect("register ticket worktree");
+    // Backdate the worktree past worktree_ttl AND the hand's heartbeat past
+    // hand_ttl (30m). No pid => a stale heartbeat is a dead hand.
+    let stale_wt = (Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+    let stale_hand = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let conn = rusqlite::Connection::open(tempdir.path().join("derrick.db")).unwrap();
+    conn.execute(
+        "UPDATE worktrees SET created_at = ?1 WHERE run_id = ?2",
+        rusqlite::params![stale_wt, "ticket:drk-1"],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE hands SET last_seen = ?1 WHERE id = ?2",
+        rusqlite::params![stale_hand, hand.as_str()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let foreman = build_foreman(
+        substrate.clone(),
+        Box::new(MockRepoState::new()),
+        no_op_dispatcher(substrate.clone(), hand.clone()),
+        tempdir.path().to_path_buf(),
+    );
+    let report = foreman.tick().await.expect("tick");
+
+    assert!(
+        report.cleanup_actions.iter().any(|a| matches!(
+            a,
+            CleanupAction::PrunedAbandonedWorktree { run_id } if run_id == "ticket:drk-1"
+        )),
+        "a dead hand's worktree must be pruned"
+    );
+    let remaining = substrate.list_worktrees(true).await.unwrap();
+    assert!(remaining.iter().all(|w| w.run_id != "ticket:drk-1"));
+}
+
+// ---- FIX 1: dispatch backstop on the Ready->InFlight claim ----------------
+
+/// Contract-violating dispatcher: returns `Ok` from `dispatch` WITHOUT ever
+/// calling `assign_to_hand` (and without reserving a worktree). The foreman
+/// must not treat this as a successful claim.
+#[derive(Clone)]
+struct MisbehavingDispatcher {
+    hand: HandId,
+}
+
+#[async_trait]
+impl HandDispatcher for MisbehavingDispatcher {
+    fn kind(&self) -> &'static str {
+        "human"
+    }
+
+    async fn dispatch(&self, _ctx: &DispatchContext<'_>) -> Result<DispatchResult, DispatchError> {
+        Ok(DispatchResult {
+            hand: self.hand.clone(),
+            completed_synchronously: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn dispatch_backstop_rejects_ok_without_assign() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let substrate = open_substrate(&tempdir).await;
+    let hand = register_hand_simple(&substrate, "h1").await;
+    let ticket = new_ticket(&substrate, "drk-1").await;
+
+    let dispatcher = MisbehavingDispatcher { hand: hand.clone() };
+    let foreman = build_foreman(
+        substrate.clone(),
+        Box::new(MockRepoState::new()),
+        Box::new(dispatcher),
+        tempdir.path().to_path_buf(),
+    );
+
+    let report = foreman.tick().await.expect("tick");
+
+    // Dispatcher said Ok, but the ticket never left Ready: NOT counted.
+    assert!(
+        report.dispatched.is_empty(),
+        "a dispatch that did not claim the ticket must not count as dispatched"
+    );
+    let after = substrate.get_ticket(&ticket.id).await.unwrap().unwrap();
+    assert_eq!(after.state, TicketState::Ready);
+    assert!(after.owner.is_none(), "ticket must remain unowned");
+
+    // No worktree was reserved (no duplicate worktree result).
+    let worktrees = substrate.list_worktrees(true).await.unwrap();
+    assert!(
+        worktrees.is_empty(),
+        "no worktree should have been reserved"
+    );
+
+    // The failed claim was surfaced on the activity log.
+    let events = substrate.ticket_events(&ticket.id, 10).await.unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.kind,
+            EventKind::Note { body } if body.contains("never left")
+        )),
+        "expected a surfaced Note about the failed claim"
+    );
+
+    // A second tick still refuses to count it — no duplicate assignment even
+    // though the ticket is offered to the dispatcher again.
+    let report2 = foreman.tick().await.expect("second tick");
+    assert!(report2.dispatched.is_empty());
+    let still = substrate.get_ticket(&ticket.id).await.unwrap().unwrap();
+    assert_eq!(still.state, TicketState::Ready);
+    assert!(still.owner.is_none());
 }
 
 #[tokio::test]

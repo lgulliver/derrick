@@ -2,7 +2,7 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use derrick_substrate::{EventKind, Substrate};
+use derrick_substrate::{EventKind, EventLog};
 use derrick_substrate_native::NativeSubstrate;
 use owo_colors::OwoColorize;
 use tokio::process::Command;

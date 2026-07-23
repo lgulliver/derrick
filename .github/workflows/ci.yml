@@ -59,6 +59,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features --no-fail-fast
+      # Parallelism stress pass: a second run with more test threads than the
+      # default. Tests that mutate process-global state (env vars, cwd) and
+      # aren't serialised behind a mutex tend to pass in isolation but race
+      # under higher concurrency — CI runners have more cores than most dev
+      # machines, so this is where such races are most likely to surface
+      # (see the `PATH`-mutation guard fixes in derrick-claude/derrick-tools/
+      # derrick-stack). Only run on one leg of the matrix to keep this cheap.
+      - name: Repeat test run (parallelism stress)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --all-features --no-fail-fast -- --test-threads=16
 
   coverage:
     name: coverage (>=80%)

@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1092,15 +1091,11 @@ impl Runner {
     }
 
     fn validate_config(&self) -> Result<(), RunError> {
-        let mut seen = BTreeSet::new();
+        // Duplicate-id, bash-command, and parallel_group contiguity checks now
+        // live in derrick-config's `validate_pipeline` (run at load time) so
+        // `derrick config validate` catches them too. See FIX 2.
         let mut feature_available = false;
         for step in self.config.pipeline() {
-            if !seen.insert(step.id().to_owned()) {
-                return Err(RunError::Config(format!(
-                    "pipeline.{}: duplicate step id",
-                    step.id()
-                )));
-            }
             if step.on_failure().is_some() {
                 return Err(RunError::Config(format!(
                     "pipeline.{}: on_failure is not supported in T010; copilot dispatch failure policy is deferred to T013",

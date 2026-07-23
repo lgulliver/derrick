@@ -1,6 +1,6 @@
 //! Integration test: `DataModel::refresh` counts match a seeded substrate.
 
-use derrick_substrate::{NewTicket, Substrate, TicketId};
+use derrick_substrate::{NewTicket, TicketId, TicketStore};
 use derrick_substrate_native::{NativeConfig, NativeSubstrate};
 use derrick_tui::{DataModel, StackLoadResult};
 use tempfile::TempDir;

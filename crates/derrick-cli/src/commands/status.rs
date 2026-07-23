@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crossterm::{cursor, execute, terminal};
 use derrick_config::{Config, SubstrateBackendKind};
-use derrick_substrate::{Substrate, TicketFilter, TicketState};
+use derrick_substrate::{ForemanState, TicketFilter, TicketState, TicketStore};
 use derrick_substrate_native::NativeSubstrate;
 use serde_json::json;
 

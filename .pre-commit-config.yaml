@@ -8,15 +8,19 @@ repos:
     hooks:
       - id: trailing-whitespace
         # Test corpus fixtures encode exact bytes including trailing
-        # whitespace shapes; auto-fixing them defeats the test.
+        # whitespace shapes; auto-fixing them defeats the test. The
+        # caveman skill_fixtures snapshot is a byte-for-byte vendored
+        # copy of the installed skill (parity test diffs them), so it
+        # must keep the skill's exact bytes too.
         # Mirrored Codex agent files may be read-only in some host setups;
         # don't let a generic fixer fail the whole commit on them.
-        exclude: '^(crates/[^/]+/tests/corpus/|\.codex/agents/|\.codex/instructions\.md$)'
+        exclude: '^(crates/[^/]+/tests/(corpus|skill_fixtures)/|\.codex/agents/|\.codex/instructions\.md$)'
       - id: end-of-file-fixer
-        # Same: corpus files testing no-trailing-newline behaviour
-        # must keep their exact byte shape. Mirrored Codex agent files
-        # are documentation mirrors and may be read-only.
-        exclude: '^(crates/[^/]+/tests/corpus/|\.codex/agents/|\.codex/instructions\.md$)'
+        # Same: corpus files testing no-trailing-newline behaviour and
+        # the vendored caveman skill snapshot must keep their exact byte
+        # shape. Mirrored Codex agent files are documentation mirrors and
+        # may be read-only.
+        exclude: '^(crates/[^/]+/tests/(corpus|skill_fixtures)/|\.codex/agents/|\.codex/instructions\.md$)'
       - id: check-yaml
       - id: check-toml
       - id: check-merge-conflict

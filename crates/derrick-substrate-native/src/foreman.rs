@@ -15,15 +15,15 @@ use chrono::Utc;
 use derrick_config::{Config, Stacking};
 use derrick_stack::{NoneStackBackend, RestackOutcome, RestackParams, StackBackend};
 use derrick_substrate::{
-    BlockReason, EventKind, EventScope, HandId, InReviewMetadata, Substrate, SubstrateError,
-    Ticket, TicketId,
+    BlockReason, EventKind, EventLog, EventScope, Hand, HandId, HandRegistry, InReviewMetadata,
+    SubstrateError, Ticket, TicketId, TicketState, TicketStore,
 };
 use futures::future::join_all;
 use thiserror::Error;
 use tokio::process::Command;
 use tracing::{info, warn};
 
-use crate::NativeSubstrate;
+use crate::{NativeSubstrate, WorktreeRecord};
 
 /// Returns `true` when a process with `pid` is currently alive (D75). Used by
 /// the cleanup pass to decide whether a stale-heartbeat hand is still actually
@@ -49,6 +49,22 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(not(unix))]
 fn process_alive(_pid: u32) -> bool {
     false
+}
+
+/// Whether a hand should be treated as still running. This is the exact
+/// inverse of the abandonment predicate the cleanup pass applies in step 1c:
+/// a dead pid is authoritative (never live), otherwise the hand is live if its
+/// pid is alive or its heartbeat is fresh relative to `hand_threshold`. Kept as
+/// a shared helper so the worktree-prune guard (step 1a) and the hand-release
+/// pass (step 1c) can never drift apart.
+fn hand_is_live(hand: &Hand, hand_threshold: chrono::DateTime<Utc>) -> bool {
+    let pid_dead = hand.pid.is_some_and(|pid| !process_alive(pid));
+    if pid_dead {
+        return false;
+    }
+    let live_pid = hand.pid.is_some_and(process_alive);
+    let fresh_heartbeat = hand.last_seen.is_some_and(|seen| seen >= hand_threshold);
+    live_pid || fresh_heartbeat
 }
 
 /// Lightweight cross-reference against git + GitHub PR state.
@@ -692,11 +708,31 @@ impl Foreman {
 
         // 1a: prune abandoned worktrees past TTL.
         let worktree_threshold = now - self.ttls.worktree_ttl;
+        let hand_threshold = now - self.ttls.hand_ttl;
         let stale_worktrees = self
             .substrate
             .list_stale_open_worktrees(worktree_threshold)
             .await?;
+        // Fetch hands once so the per-worktree liveness check below is a plain
+        // in-memory lookup rather than a query per row.
+        let hands_for_worktrees = self.substrate.list_hands().await?;
         for record in stale_worktrees {
+            // D32: TTL cleanup reconciles *crashed* runs — it must never evict a
+            // live one. A heavy `ticket:`-keyed checkout whose owning ticket is
+            // still non-terminal and whose owning hand is still alive (live pid
+            // or fresh heartbeat) is working past the worktree TTL, not
+            // abandoned. Leave it in place; it gets reclaimed when the ticket
+            // reaches a terminal state or the hand dies.
+            if self
+                .worktree_still_live(&record, &hands_for_worktrees, hand_threshold)
+                .await?
+            {
+                info!(
+                    run_id = %record.run_id,
+                    "skipping worktree prune: owning ticket non-terminal and hand alive"
+                );
+                continue;
+            }
             // Try to remove the on-disk worktree; swallow not-found errors
             // but propagate genuine I/O failures.
             let _ = Command::new("git")
@@ -741,14 +777,16 @@ impl Foreman {
         //     suppresses TTL abandonment when the heartbeat is merely stale
         //     (the agent is still running, just busy). Hands with no pid keep
         //     the existing heartbeat-TTL behaviour.
-        let hand_threshold = now - self.ttls.hand_ttl;
+        // Reuse the single `hand_threshold` computed for step 1a rather than
+        // recomputing it, so the two passes cannot drift.
         let all_hands = self.substrate.list_hands().await?;
         for hand in all_hands {
+            // Abandon a hand iff it is not live. Routed through the shared
+            // `hand_is_live` helper (the exact inverse) so this pass and the
+            // step 1a worktree-prune guard can never drift apart. `pid_dead` is
+            // still needed below to phrase the abandonment reason.
             let pid_dead = hand.pid.is_some_and(|pid| !process_alive(pid));
-            let live_pid = hand.pid.is_some_and(process_alive);
-            let stale_heartbeat = hand.last_seen.is_none_or(|t| t < hand_threshold);
-            let abandon = pid_dead || (stale_heartbeat && !live_pid);
-            if !abandon {
+            if hand_is_live(&hand, hand_threshold) {
                 continue;
             }
             let inflight = self
@@ -1302,7 +1340,64 @@ impl Foreman {
         Ok(())
     }
 
+    /// Re-read a ticket at the substrate boundary and report whether it has
+    /// actually left `Ready`. Used as the post-dispatch backstop so the
+    /// no-double-dispatch guarantee is owned by an observed state transition
+    /// rather than by dispatcher convention. A ticket that has vanished (was
+    /// deleted mid-tick) counts as "left Ready" — there is nothing to
+    /// re-dispatch.
+    async fn ticket_left_ready(&self, id: &TicketId) -> Result<bool, ForemanError> {
+        Ok(match self.substrate.get_ticket(id).await? {
+            Some(ticket) => ticket.state != TicketState::Ready,
+            None => true,
+        })
+    }
+
+    /// Whether a stale worktree row belongs to a still-live run and so must be
+    /// preserved rather than pruned by the TTL sweep (FIX 2 / D32).
+    ///
+    /// Only `ticket:`-keyed rows (per-ticket hand checkouts) can be live: a row
+    /// is live iff its owning ticket is non-terminal AND its owning hand is
+    /// still alive (live pid or fresh heartbeat). Run-keyed rows, orphaned rows
+    /// (ticket gone / unowned / owner no longer registered), terminal tickets,
+    /// and dead/absent hands all return `false` so the existing prune behaviour
+    /// applies.
+    async fn worktree_still_live(
+        &self,
+        record: &WorktreeRecord,
+        hands: &[Hand],
+        hand_threshold: chrono::DateTime<Utc>,
+    ) -> Result<bool, ForemanError> {
+        let Some(ticket_key) = record.run_id.strip_prefix("ticket:") else {
+            return Ok(false);
+        };
+        let Ok(ticket_id) = TicketId::new(ticket_key) else {
+            // Malformed key we would never have written; treat as prunable.
+            return Ok(false);
+        };
+        let Some(ticket) = self.substrate.get_ticket(&ticket_id).await? else {
+            return Ok(false);
+        };
+        if ticket.state.is_terminal() {
+            return Ok(false);
+        }
+        let Some(owner) = ticket.owner else {
+            return Ok(false);
+        };
+        let Some(hand) = hands.iter().find(|hand| hand.id == owner) else {
+            return Ok(false);
+        };
+        Ok(hand_is_live(hand, hand_threshold))
+    }
+
     async fn dispatch_ready(&self, report: &mut TickReport) -> Result<(), ForemanError> {
+        // D92: `batch_max` bounds ACTIVE HANDS, not total resource footprint.
+        // `count_inflight_tickets` counts only `InFlight` tickets (hands
+        // actually running); tickets in `InReview` still hold their worktree
+        // and open PR by design but are deliberately NOT counted against the
+        // cap. The budget below therefore limits concurrent active workers,
+        // not the number of non-terminal tickets holding resources. See
+        // DESIGN.md §9.C.
         let inflight = self.substrate.count_inflight_tickets().await?;
         let cap = u64::from(self.batch_max);
         if inflight >= cap {
@@ -1342,7 +1437,38 @@ impl Foreman {
         for ((ticket, _), result) in candidates.iter().zip(results) {
             match result {
                 Ok(_) => {
-                    report.dispatched.push(ticket.id.clone());
+                    // Backstop for the no-double-dispatch guarantee (D31/D32
+                    // spirit). A dispatcher returning `Ok` is NOT sufficient
+                    // evidence the ticket was claimed: the guarantee must not
+                    // rest on dispatcher convention alone. Verify at the
+                    // substrate boundary that the ticket actually left `Ready`.
+                    // If it is still `Ready`, a misbehaving (or crashed-mid-
+                    // dispatch) hand reported success without calling
+                    // `assign_to_hand`; counting it as dispatched would let the
+                    // next tick re-dispatch it, spawning duplicate
+                    // hands/worktrees and colliding branches.
+                    if self.ticket_left_ready(&ticket.id).await? {
+                        report.dispatched.push(ticket.id.clone());
+                    } else {
+                        warn!(
+                            ticket = %ticket.id,
+                            "dispatcher reported success but ticket is still Ready; \
+                             not counting as claimed (no assign_to_hand observed)"
+                        );
+                        self.substrate
+                            .record_typed_event(
+                                EventScope::Ticket(ticket.id.clone()),
+                                EventKind::Note {
+                                    body: format!(
+                                        "dispatch reported success but ticket {} never left \
+                                         Ready; not claimed (dispatcher failed to assign it to a \
+                                         hand)",
+                                        ticket.id
+                                    ),
+                                },
+                            )
+                            .await?;
+                    }
                 }
                 Err(DispatchError::NotImplemented { kind }) => {
                     self.substrate

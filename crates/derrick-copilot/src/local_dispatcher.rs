@@ -19,8 +19,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use derrick_stack::{OpenPrParams, StackBackend};
 use derrick_substrate::{
-    Complexity, EventKind, EventScope, Hand, HandExitStats, HandId, HandKind, InReviewMetadata,
-    ManualDoneAttestation, Substrate, SubstrateError, Ticket, TicketId, TicketState,
+    Complexity, EventKind, EventLog, EventScope, Hand, HandExitStats, HandId, HandKind,
+    HandRegistry, InReviewMetadata, ManualDoneAttestation, SubstrateError, Ticket, TicketId,
+    TicketState, TicketStore,
 };
 use derrick_substrate_native::NativeSubstrate;
 use derrick_substrate_native::foreman::{

@@ -11,7 +11,7 @@ use derrick_copilot::{LocalCopilotHandDispatcher, LocalCopilotHandDispatcherConf
 use derrick_flow::hand_kind_for_executor;
 use derrick_hand::{HostCliHandDispatcher, HostCliHandDispatcherConfig};
 use derrick_stack::{NativeStackBackend, NoneStackBackend, StackBackend};
-use derrick_substrate::{HandKind, Substrate};
+use derrick_substrate::{ForemanState, HandKind};
 use derrick_substrate_native::NativeSubstrate;
 #[allow(deprecated)]
 use derrick_substrate_native::foreman::CopilotStubDispatcher;

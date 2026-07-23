@@ -25,8 +25,12 @@ pub enum Intensity {
     /// Full compression: drop articles, flatten prose, and prefer
     /// short words.
     Full,
-    /// Maximum compression: abbreviate prose words, strip safe
-    /// conjunctions, and use arrows for causal phrasing.
+    /// Maximum compression: strip safe and causal conjunctions
+    /// (`because`/`therefore`) without inserting an arrow (D90; the
+    /// installed skill forbids `->`). Standard well-known acronyms
+    /// (e.g. `DB`) still apply, but invented prose abbreviations like
+    /// `req`/`res`/`fn`/`impl`/`auth` do not (D93; the installed skill
+    /// bans them as zero-token-saving and clarity-costing).
     Ultra,
 }
 
@@ -740,7 +744,14 @@ fn substitute_phrases(input: &str, intensity: Intensity) -> String {
     }
     if intensity == Intensity::Ultra {
         if let Some(regex) = causal_regex() {
-            output = regex.replace_all(&output, " -> ").into_owned();
+            // D90: the installed skill strips the causal conjunction and
+            // forbids arrows outright ("NO arrows (X -> Y) -- measured
+            // zero token saving under tokenizer, cost decode clarity").
+            // Join the two clauses with a comma rather than the word —
+            // mirrors the skill's own Ultra example, which joins clauses
+            // with commas ("Inline obj prop, new ref, re-render.")
+            // rather than inventing a connective.
+            output = regex.replace_all(&output, ", ").into_owned();
         }
     }
     output
@@ -793,6 +804,19 @@ fn rewrite_word(word: &str, intensity: Intensity) -> String {
         return word.to_owned();
     }
 
+    // D93: the installed skill bans *invented* prose abbreviations —
+    // "never invent new abbreviations (cfg/impl/req/res/fn)" (Rules) and,
+    // stronger still for Ultra, "NO prose abbreviations
+    // (cfg/impl/req/res/fn/auth) ... measured zero token saving under
+    // tokenizer, cost decode clarity" (Intensity table, Ultra row). This
+    // match must never reintroduce `req`/`res`/`fn`/`impl`/`auth` (or any
+    // other made-up truncation of the same kind) as a rewrite target —
+    // those words pass through unabbreviated below. `DB` survives because
+    // the same Rules line carves out an explicit exception: "Standard
+    // well-known tech acronyms OK (DB/API/HTTP)". `config` survives for
+    // the same reason the skill's banned list names `cfg` and not
+    // `config`: `config` is the ordinary, undegraded word — it is not a
+    // further invented truncation the way `cfg` is.
     match word.to_ascii_lowercase().as_str() {
         // Full and Ultra rewrites
         "however" => "but".to_owned(),
@@ -800,14 +824,7 @@ fn rewrite_word(word: &str, intensity: Intensity) -> String {
         "additionally" => "also".to_owned(),
         // Ultra-only rewrites
         "database" | "databases" if intensity == Intensity::Ultra => "DB".to_owned(),
-        "authentication" | "authenticate" | "authorization" if intensity == Intensity::Ultra => {
-            "auth".to_owned()
-        }
         "configuration" | "configure" if intensity == Intensity::Ultra => "config".to_owned(),
-        "request" | "requests" if intensity == Intensity::Ultra => "req".to_owned(),
-        "response" | "responses" if intensity == Intensity::Ultra => "res".to_owned(),
-        "function" | "functions" if intensity == Intensity::Ultra => "fn".to_owned(),
-        "implementation" | "implementations" if intensity == Intensity::Ultra => "impl".to_owned(),
         _ => word.to_owned(),
     }
 }
@@ -1077,8 +1094,24 @@ fn extensive_regex() -> Option<&'static Regex> {
 
 fn causal_regex() -> Option<&'static Regex> {
     static REGEX: OnceLock<Option<Regex>> = OnceLock::new();
+    // `so` is deliberately excluded: unlike `because`/`therefore` it is
+    // overwhelmingly used as a bare intensifier ("so effective", "so good",
+    // "so far", "not so much") rather than a causal conjunction, and a
+    // conjunction-only regex cannot tell the two apart without full parsing.
+    // Converting intensifier `so` to an arrow inverts meaning (D-fix: caveman
+    // ultra corrupted "so effective" into "-> effective"). Dropping the
+    // alternative entirely is the conservative fix; see the
+    // non_causal_so_* corpus cases in tests/corpus/ultra/.
+    //
+    // D90: `because`/`therefore` themselves no longer become an arrow either.
+    // The installed skill's Ultra row strips the causal conjunction outright
+    // and explicitly forbids arrows ("NO arrows (X -> Y) -- measured zero
+    // token saving under tokenizer, cost decode clarity"). The matched
+    // conjunction (with its surrounding whitespace) is replaced with a
+    // comma-space join in `substitute_phrases` below — see the
+    // ultra/*causal*/*conjunction* corpus cases for the resulting output.
     REGEX
-        .get_or_init(|| Regex::new(r"(?i)\s+(?:because|therefore|so)\s+").ok())
+        .get_or_init(|| Regex::new(r"(?i)\s+(?:because|therefore)\s+").ok())
         .as_ref()
 }
 

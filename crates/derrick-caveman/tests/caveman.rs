@@ -1,9 +1,11 @@
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use derrick_caveman::{CompressOutput, Compressor, Intensity, compress};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
+
+mod support;
+use support::{BANNED_INVENTED_ABBREVIATIONS, contains_banned_word, corpus_inputs, intensity_dirs};
 
 #[test]
 fn intensity_serde_round_trip_serializes_lowercase() -> Result<(), TestSerdeError> {
@@ -62,6 +64,131 @@ fn protected_span_count_is_accurate() {
     assert!(output.text.contains("`write_str`"));
     assert!(output.text.contains("https://example.com/docs"));
     assert!(output.text.contains("src/lib.rs:42:7"));
+}
+
+// ── FIX 2: ultra causal-arrow substitution must not corrupt intensifier `so` ──
+//
+// `causal_regex` used to match bare `so` alongside `because`/`therefore` and
+// rewrite it to an arrow at Ultra intensity. `so` is overwhelmingly used as an
+// intensifier ("so effective", "so good", "so far", "not so much"), not a
+// causal conjunction, so that substitution inverted meaning: "so effective"
+// became "-> effective" (a causal claim, not an intensifier). The installed
+// caveman skill (SKILL.md, Ultra row) does not perform arrow substitution for
+// `so` at all — confirmed by reading skills/caveman/SKILL.md, which
+// explicitly states Ultra uses "NO arrows (X -> Y) -- measured zero token
+// saving under tokenizer, cost decode clarity" and lists arrow use only for
+// unambiguous cause-then-effect conjunction stripping, never for bare `so`.
+// Per D7 (byte-identical to the skill), the regex was fixed by dropping the
+// `so` alternative rather than diverging further from the skill.
+//
+// ── D90: `because`/`therefore` no longer produce an arrow either ──
+//
+// The above fix stopped short of the full skill rule: SKILL.md's Ultra row
+// says the conjunction itself is stripped ("Strip conjunctions when
+// cause-then-effect stay unambiguous") and arrows are forbidden outright
+// ("NO arrows (X -> Y)"), with no carve-out for `because`/`therefore`. The
+// crate previously still converted those two into " -> ", which is exactly
+// the arrow the skill forbids — a D7 violation. `causal_regex` now strips
+// the matched conjunction and joins the two clauses with a comma instead
+// (mirrors the skill's own Ultra worked example, which joins clauses with
+// commas rather than an invented connective). See the causal_because_no_arrow
+// and causal_therefore_no_arrow corpus cases.
+
+#[test]
+fn ultra_does_not_corrupt_intensifier_so() {
+    let output = compress("This fix is so effective.", Intensity::Ultra);
+    assert_eq!(output.text, "This fix is so effective.");
+    assert!(
+        !output.text.contains("->"),
+        "bare `so` must not become an arrow"
+    );
+}
+
+#[test]
+fn ultra_does_not_corrupt_so_far() {
+    let output = compress("The tests pass so far.", Intensity::Ultra);
+    assert_eq!(output.text, "tests pass so far.");
+    assert!(!output.text.contains("->"));
+}
+
+#[test]
+fn ultra_does_not_corrupt_not_so_much() {
+    let output = compress("Not so much changed.", Intensity::Ultra);
+    assert_eq!(output.text, "Not so much changed.");
+    assert!(!output.text.contains("->"));
+}
+
+#[test]
+fn ultra_strips_causal_because_without_arrow() {
+    // D90: the conjunction is stripped and clauses are comma-joined — no
+    // arrow, matching the installed skill's Ultra row exactly.
+    //
+    // D93: `response`/`authentication`/`request` are no longer abbreviated
+    // to `res`/`auth`/`req` — the skill bans those invented abbreviations
+    // outright. `database` -> `DB` still applies: the skill's Rules line
+    // carves out standard well-known tech acronyms as an explicit
+    // exception ("Standard well-known tech acronyms OK (DB/API/HTTP)").
+    let output = compress(
+        "The database response changed because the authentication request failed.",
+        Intensity::Ultra,
+    );
+    assert_eq!(
+        output.text,
+        "DB response changed, authentication request failed."
+    );
+    assert!(
+        !output.text.contains("->"),
+        "because must not become an arrow (D90)"
+    );
+}
+
+#[test]
+fn ultra_does_not_invent_prose_abbreviations() {
+    // D93: the installed skill explicitly bans invented prose
+    // abbreviations at Ultra — "NO prose abbreviations
+    // (cfg/impl/req/res/fn/auth) ... measured zero token saving under
+    // tokenizer, cost decode clarity". These words must survive Ultra
+    // compression in full (modulo unrelated article/filler drop), never
+    // truncated to `req`/`res`/`fn`/`impl`/`auth`.
+    let cases = [
+        ("The request failed.", "request failed."),
+        ("The response arrived.", "response arrived."),
+        ("The function returned.", "function returned."),
+        ("The implementation works.", "implementation works."),
+        ("The authentication succeeded.", "authentication succeeded."),
+        ("The authorization failed.", "authorization failed."),
+    ];
+
+    for (input, expected) in cases {
+        let output = compress(input, Intensity::Ultra);
+        assert_eq!(
+            output.text, expected,
+            "D93: caveman must not invent an abbreviation for {input:?}"
+        );
+        for banned in BANNED_INVENTED_ABBREVIATIONS {
+            assert!(
+                !contains_banned_word(&output.text, banned),
+                "D93: output {:?} for input {:?} must not contain the banned \
+                 invented abbreviation {:?}",
+                output.text,
+                input,
+                banned
+            );
+        }
+    }
+}
+
+#[test]
+fn ultra_strips_causal_therefore_without_arrow() {
+    let output = compress(
+        "The build failed therefore the deploy stopped.",
+        Intensity::Ultra,
+    );
+    assert_eq!(output.text, "build failed, deploy stopped.");
+    assert!(
+        !output.text.contains("->"),
+        "therefore must not become an arrow (D90)"
+    );
 }
 
 #[test]
@@ -139,33 +266,6 @@ fn next_chunk_end(input: &str, start: usize, chunk_size: usize) -> usize {
         end = end.saturating_add(1);
     }
     end
-}
-
-fn intensity_dirs() -> [(Intensity, &'static str); 3] {
-    [
-        (Intensity::Lite, "lite"),
-        (Intensity::Full, "full"),
-        (Intensity::Ultra, "ultra"),
-    ]
-}
-
-fn corpus_inputs(dir: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("corpus")
-        .join(dir);
-    let mut inputs = Vec::new();
-
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "in") {
-            inputs.push(path);
-        }
-    }
-
-    inputs.sort();
-    Ok(inputs)
 }
 
 #[derive(Debug)]

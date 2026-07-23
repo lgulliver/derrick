@@ -11,8 +11,8 @@ use derrick_stack::{
     upsert_nav_section,
 };
 use derrick_substrate::{
-    BatchName, BlockReason, EventKind, EventScope, Substrate, Ticket, TicketFilter, TicketId,
-    TicketState,
+    BatchName, BlockReason, EventKind, EventLog, EventScope, Ticket, TicketFilter, TicketId,
+    TicketState, TicketStore,
 };
 use derrick_substrate_native::NativeSubstrate;
 
@@ -601,7 +601,9 @@ state:
 
     // ---- engine-level integration tests -------------------------------------
 
-    use derrick_substrate::{Hand, HandId, HandKind, InReviewMetadata, LinkKind, NewTicket};
+    use derrick_substrate::{
+        Hand, HandId, HandKind, HandRegistry, InReviewMetadata, LinkKind, NewTicket,
+    };
 
     /// A recording `gh` stub on PATH. `gh pr create` prints a unique URL;
     /// `gh pr view --json body` prints the empty string; everything else

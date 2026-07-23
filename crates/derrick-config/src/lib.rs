@@ -12,7 +12,7 @@
 //! values, and references between sections. Host/provider compatibility is
 //! checked by downstream model tooling.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fmt;
 use std::fs;
@@ -150,8 +150,8 @@ impl Config {
     /// Loads a `derrick.yaml` from `path` and validates the resulting config.
     pub fn load_from_path(path: &Path) -> Result<Self, ConfigError> {
         let layer = read_layer(path)?;
-        let config = layer.finalize()?;
-        config.validate()?;
+        let config = layer.finalize().map_err(|e| attach_config_path(e, path))?;
+        config.validate().map_err(|e| attach_config_path(e, path))?;
         Ok(config)
     }
 
@@ -230,8 +230,20 @@ impl Config {
             layer.merge(read_layer(&repo_path)?);
         }
 
-        let config = layer.finalize()?;
-        config.validate()?;
+        // Attribute a bare validation error to the most specific source on disk:
+        // the repo config if present, else the user config.
+        let source = if repo_path.exists() {
+            Some(repo_path.clone())
+        } else {
+            user_config_path().filter(|p| p.exists())
+        };
+        let annotate = |error: ConfigError| match &source {
+            Some(file) => attach_config_path(error, file),
+            None => error,
+        };
+
+        let config = layer.finalize().map_err(annotate)?;
+        config.validate().map_err(annotate)?;
         Ok(config)
     }
 
@@ -349,9 +361,12 @@ impl Config {
             .get(name)
             .or_else(|| builtin.get(name))
             .ok_or_else(|| {
-                ConfigError::Validation(format!(
-                    "profile {name:?} is not defined; run `derrick profile list` to see available profiles"
-                ))
+                ConfigError::Validation {
+                    message: format!(
+                        "profile {name:?} is not defined; run `derrick profile list` to see available profiles"
+                    ),
+                    path: None,
+                }
             })?;
 
         let mut config = self.clone();
@@ -426,8 +441,18 @@ pub enum ConfigError {
     },
 
     /// A structurally valid YAML document violates derrick config rules.
-    #[error("Validation failed: {0}")]
-    Validation(String),
+    #[error(
+        "Validation failed{}: {message}",
+        .path.as_ref().map(|p| format!(" in {}", p.display())).unwrap_or_default()
+    )]
+    Validation {
+        /// The offending field path and human-readable rule violation.
+        message: String,
+        /// The config file the error originated from, when known. Attached by
+        /// the loader (`load_from_path` / `load_layered`); inner helpers leave
+        /// it `None`.
+        path: Option<PathBuf>,
+    },
 }
 
 /// Site identity used by the substrate and ticket names.
@@ -1961,11 +1986,45 @@ fn user_config_path() -> Option<PathBuf> {
 }
 
 fn validation<T>(message: String) -> Result<T, ConfigError> {
-    Err(ConfigError::Validation(message))
+    Err(ConfigError::Validation {
+        message,
+        path: None,
+    })
 }
 
 fn required<T>(value: Option<T>, path: &str) -> Result<T, ConfigError> {
-    value.ok_or_else(|| ConfigError::Validation(format!("{path}: missing required field")))
+    value.ok_or_else(|| ConfigError::Validation {
+        message: format!("{path}: missing required field"),
+        path: None,
+    })
+}
+
+/// Attaches the source file to a bare [`ConfigError::Validation`] so error
+/// output points at the offending `derrick.yaml`. Non-validation errors and
+/// errors that already carry a path pass through unchanged.
+fn attach_config_path(error: ConfigError, file: &Path) -> ConfigError {
+    match error {
+        ConfigError::Validation {
+            message,
+            path: None,
+        } => ConfigError::Validation {
+            message,
+            path: Some(file.to_path_buf()),
+        },
+        other => other,
+    }
+}
+
+/// Substitutes the concrete model alias for the `models.*` placeholder emitted
+/// by [`ModelDefLayer::finalize`], which has no access to its own key.
+fn substitute_model_alias(error: ConfigError, alias: &str) -> ConfigError {
+    match error {
+        ConfigError::Validation { message, path } => ConfigError::Validation {
+            message: message.replace("models.*", &format!("models.{alias}")),
+            path,
+        },
+        other => other,
+    }
 }
 
 fn validate_roles(roles: &RoleBindings, models: &ModelRegistry) -> Result<(), ConfigError> {
@@ -1992,7 +2051,33 @@ fn is_bare_spec_step(step: &PipelineStep) -> bool {
 }
 
 fn validate_pipeline(steps: &[PipelineStep], roles: &RoleBindings) -> Result<(), ConfigError> {
+    // Duplicate step ids break resume-from (the manifest keys steps by id) and
+    // silently shadow one another, so reject them at load time.
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    // A `parallel_group` name must label a single *contiguous* block of steps —
+    // the runner groups only adjacent steps that share a name, so a name that
+    // reappears after its block closes would silently split into two groups.
+    let mut opened_groups: BTreeSet<&str> = BTreeSet::new();
+    let mut prev_group: Option<&str> = None;
+
     for step in steps {
+        if !seen.insert(step.id.as_str()) {
+            return validation(format!("pipeline.{}: duplicate step id", step.id));
+        }
+
+        match step.parallel_group.as_deref() {
+            Some(group) => {
+                if prev_group != Some(group) && !opened_groups.insert(group) {
+                    return validation(format!(
+                        "pipeline.{}.parallel_group: group {group:?} is not contiguous; all steps in a parallel group must be adjacent",
+                        step.id
+                    ));
+                }
+                prev_group = Some(group);
+            }
+            None => prev_group = None,
+        }
+
         match (&step.role, step.runner) {
             (Some(_), Some(_)) => {
                 return validation(format!(
@@ -2021,6 +2106,12 @@ fn validate_pipeline(steps: &[PipelineStep], roles: &RoleBindings) -> Result<(),
             (None, Some(Runner::Human)) if step.prompt.is_none() => {
                 return validation(format!(
                     "pipeline.{}.prompt: runner human steps require prompt",
+                    step.id
+                ));
+            }
+            (None, Some(Runner::Bash)) if step.command.is_none() => {
+                return validation(format!(
+                    "pipeline.{}.command: runner bash steps require command",
                     step.id
                 ));
             }
@@ -2092,6 +2183,9 @@ fn validate_parallelism(parallelism: &Parallelism) -> Result<(), ConfigError> {
     }
     if !(1..=64).contains(&parallelism.step_max) {
         return validation("parallelism.step_max: must be >= 1 and <= 64".to_owned());
+    }
+    if !(1..=64).contains(&parallelism.assay_max) {
+        return validation("parallelism.assay_max: must be >= 1 and <= 64".to_owned());
     }
     Ok(())
 }
@@ -2339,7 +2433,15 @@ impl ConfigLayer {
         let models = ModelRegistry(
             required(self.models, "models")?
                 .into_iter()
-                .map(|(name, model)| Ok((name, model.finalize()?)))
+                .map(|(name, model)| {
+                    // `finalize` emits `models.*` placeholders (it has no access
+                    // to its own key); substitute the real alias so the error
+                    // names the offending model.
+                    let finalized = model
+                        .finalize()
+                        .map_err(|e| substitute_model_alias(e, &name))?;
+                    Ok((name, finalized))
+                })
                 .collect::<Result<HashMap<_, _>, ConfigError>>()?,
         );
 
@@ -2381,11 +2483,14 @@ impl ConfigLayer {
                 .map(|b| -> Result<BudgetConfig, ConfigError> {
                     fn vb(b: BudgetLayer, scope: &'static str) -> Result<Budget, ConfigError> {
                         if !b.max_cost.is_finite() || b.max_cost < 0.0 {
-                            return Err(ConfigError::Validation(format!(
-                                "budgets.{scope}.max_cost must be a finite non-negative number \
-                                 (got {})",
-                                b.max_cost
-                            )));
+                            return Err(ConfigError::Validation {
+                                message: format!(
+                                    "budgets.{scope}.max_cost must be a finite non-negative number \
+                                     (got {})",
+                                    b.max_cost
+                                ),
+                                path: None,
+                            });
                         }
                         Ok(Budget {
                             max_cost: b.max_cost,
@@ -4016,9 +4121,97 @@ state:
         assert_eq!(caps.context_window, Some(200_000));
     }
 
+    #[test]
+    fn model_error_names_offending_alias_not_placeholder() {
+        // A model missing both `runtime` and `provider` must name its alias.
+        let yaml = assemble("models:\n  my-fast:\n    model: foo\nroles:\n  drafter: my-fast");
+        match load_yaml(&yaml) {
+            Err(ConfigError::Validation { message, .. }) => {
+                assert!(
+                    message.contains("models.my-fast"),
+                    "expected alias in message, got {message:?}"
+                );
+                assert!(
+                    !message.contains("models.*"),
+                    "placeholder leaked into message: {message:?}"
+                );
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validation_error_carries_source_file_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("derrick.yaml");
+        // Invalid site prefix (uppercase + too long) trips validate_site_prefix.
+        let yaml = minimal_yaml().replace("prefix: tst", "prefix: TOOLONG");
+        write_file(&path, &yaml);
+        match Config::load_from_path(&path) {
+            Err(ConfigError::Validation {
+                message,
+                path: Some(p),
+            }) => {
+                assert_eq!(p, path, "validation error should carry the source file");
+                assert!(
+                    message.contains("site.prefix"),
+                    "expected field path in message, got {message:?}"
+                );
+            }
+            other => panic!("expected validation error with path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assay_max_out_of_range_is_rejected() {
+        let yaml = minimal_yaml().replace("assay_max: 2", "assay_max: 0");
+        assert_validation(&yaml, "parallelism.assay_max");
+        let yaml = minimal_yaml().replace("assay_max: 2", "assay_max: 999");
+        assert_validation(&yaml, "parallelism.assay_max");
+    }
+
+    #[test]
+    fn bash_runner_without_command_is_rejected() {
+        let yaml =
+            minimal_yaml().replace("pipeline: []", "pipeline:\n  - id: build\n    runner: bash");
+        assert_validation(&yaml, "runner bash steps require command");
+    }
+
+    #[test]
+    fn duplicate_step_id_is_rejected() {
+        let yaml = minimal_yaml().replace(
+            "pipeline: []",
+            "pipeline:\n  - id: dup\n    runner: bash\n    command: \"echo a\"\n  - id: dup\n    runner: bash\n    command: \"echo b\"",
+        );
+        assert_validation(&yaml, "duplicate step id");
+    }
+
+    #[test]
+    fn noncontiguous_parallel_group_is_rejected() {
+        let yaml = minimal_yaml().replace(
+            "pipeline: []",
+            "pipeline:\n\
+             \x20 - id: a\n    runner: bash\n    command: \"echo a\"\n    parallel_group: g\n\
+             \x20 - id: b\n    runner: bash\n    command: \"echo b\"\n\
+             \x20 - id: c\n    runner: bash\n    command: \"echo c\"\n    parallel_group: g",
+        );
+        assert_validation(&yaml, "not contiguous");
+    }
+
+    #[test]
+    fn contiguous_parallel_group_is_accepted() {
+        let yaml = minimal_yaml().replace(
+            "pipeline: []",
+            "pipeline:\n\
+             \x20 - id: a\n    runner: bash\n    command: \"echo a\"\n    parallel_group: g\n\
+             \x20 - id: b\n    runner: bash\n    command: \"echo b\"\n    parallel_group: g",
+        );
+        load_yaml(&yaml).expect("adjacent parallel-group steps should validate");
+    }
+
     fn assert_validation(contents: &str, expected: &str) {
         match load_yaml(contents) {
-            Err(ConfigError::Validation(message)) => assert!(
+            Err(ConfigError::Validation { message, .. }) => assert!(
                 message.contains(expected),
                 "expected {message:?} to contain {expected:?}",
             ),
@@ -4939,7 +5132,7 @@ state:
             "  speckit:\n    enabled: true\n    version: \">=0.4.0\"\n  specify:\n    provider: bogus\n",
         );
         match load_yaml(&yaml) {
-            Err(ConfigError::Validation(message)) => {
+            Err(ConfigError::Validation { message, .. }) => {
                 assert!(
                     message.contains("tools.specify.provider")
                         && message.contains("speckit | native | import"),
@@ -4958,7 +5151,7 @@ state:
              specify:\n    provider: import\n    import:\n      plan: nonsense\n",
         );
         match load_yaml(&yaml) {
-            Err(ConfigError::Validation(message)) => {
+            Err(ConfigError::Validation { message, .. }) => {
                 assert!(
                     message.contains("tools.specify.import.plan")
                         && message.contains("native | speckit | import"),

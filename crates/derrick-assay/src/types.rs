@@ -66,6 +66,23 @@ impl StepExecution {
         }
     }
 
+    /// A step-level failure. Routed through the pipeline state machine as
+    /// `StepStatus::Failed` (not an `Err`) so terminal reporter callbacks and
+    /// worktree-preserve cleanup still run. Reserve runner `Err` for genuinely
+    /// unrecoverable orchestration errors.
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            status: StepStatus::Failed,
+            artifacts: Vec::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            message: message.into(),
+            bytes_raw: 0,
+            bytes_saved: 0,
+            roughneck_tokens_saved: 0,
+        }
+    }
+
     pub fn with_tokens(mut self, tokens_in: u32, tokens_out: u32) -> Self {
         self.tokens_in = tokens_in;
         self.tokens_out = tokens_out;
