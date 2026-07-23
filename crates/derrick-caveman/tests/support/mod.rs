@@ -39,3 +39,26 @@ pub fn corpus_inputs(dir: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Erro
     inputs.sort();
     Ok(inputs)
 }
+
+/// D93: invented prose abbreviations the installed caveman skill bans
+/// outright — "never invent new abbreviations (cfg/impl/req/res/fn)"
+/// (Rules), sharpened at Ultra to "NO prose abbreviations
+/// (cfg/impl/req/res/fn/auth) ... measured zero token saving under
+/// tokenizer, cost decode clarity" (Intensity table). `rewrite_word` in
+/// `src/lib.rs` must never map any word onto one of these. Kept as a
+/// single shared list so both the fixture-level tests
+/// (`tests/caveman.rs`) and the D91 parity harness
+/// (`tests/skill_parity.rs`) enforce the same class instead of each
+/// hand-maintaining a copy that could drift out of sync.
+pub const BANNED_INVENTED_ABBREVIATIONS: [&str; 6] = ["cfg", "impl", "req", "res", "fn", "auth"];
+
+/// True if `output` contains `banned` as a standalone, punctuation-trimmed
+/// word (case-insensitive) — i.e. some shaping rule emitted the banned
+/// abbreviation as its own token, not merely as a substring of a longer,
+/// legitimate word (e.g. this must not flag `configuration`).
+pub fn contains_banned_word(output: &str, banned: &str) -> bool {
+    output.split_whitespace().any(|word| {
+        word.trim_matches(|ch: char| !ch.is_alphanumeric())
+            .eq_ignore_ascii_case(banned)
+    })
+}

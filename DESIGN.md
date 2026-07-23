@@ -2032,7 +2032,10 @@ compound) and **output** (when an agent quotes CLI output back).
 **9.B.3 Caveman (derrick-native, §3.1).** Pure-Rust text compressor
 with three intensity levels (`lite | full | ultra`). Identifiers,
 paths, error messages preserved verbatim. Byte-identical to the
-caveman skill at matched intensities.
+caveman skill at matched intensities — including the skill's own
+ban on invented abbreviations (`cfg`/`impl`/`req`/`res`/`fn`/`auth`
+and the like). `rewrite_word` does not introduce shorthand the
+skill itself doesn't use; see D7, D90, D93.
 
 **Where caveman fires (D29):** every model boundary that carries
 prose. Same three classes as scrub:
@@ -2464,6 +2467,7 @@ links back to the section where it lives.
 | D90 | **Caveman ultra conforms to the skill: no arrows.** Caveman ultra converted causal conjunctions (`because`/`therefore`, previously also `so`) into `->` arrows, but the installed caveman `SKILL.md` strips the conjunction outright and explicitly forbids arrows ("NO arrows — measured zero token saving under tokenizer") — a direct violation of D7's byte-identical-to-the-skill rule. Decision: caveman ultra now strips the causal conjunction and emits no arrow, matching the skill exactly. Corpus tests that locked the old arrow behaviour are updated to match the corrected output. | §9.B.3 / D7 |
 | D91 | **Automated skill-parity harness enforcing D7.** D7 ("caveman byte-identical to the skill at matched intensities") had no automated enforcement — `skill_parity` was a 9-line ignored placeholder test — which is exactly how the D90 drift (arrows vs. no arrows) shipped unnoticed. Decision: build a real parity harness that runs the installed caveman skill and the crate's `compress()` over the shared corpus and diffs the two outputs, wired into CI so any future D7 drift fails the build instead of silently diverging. Depends on D90 landing first — building the harness against the old arrow behaviour would lock in the wrong output. | §9.B.3 / D7 / D90 |
 | D92 | **`batch_max` bounds active hands, not total in-flight footprint.** Confirmed intent: the foreman's `parallelism.batch_max` caps only tickets in `InFlight` — tickets in `InReview` (worktree still held, PR open, awaiting merge) are not counted against it. This is deliberate, not an oversight: the cap bounds concurrent *active workers* (hands actually running), not the total resource footprint held across every non-terminal ticket state. No behaviour change from this decision; §9.C now documents the semantics explicitly so the cap isn't mistaken for a footprint limit. | §9.C |
+| D93 | **Caveman must not emit invented prose abbreviations.** The installed caveman `SKILL.md` explicitly bans invented abbreviations (`cfg`/`impl`/`req`/`res`/`fn`/`auth`), citing zero token saving under the tokenizer and a clarity cost — but `rewrite_word` (`crates/derrick-caveman/src/lib.rs`, ultra intensity) produced exactly those substitutions, a D7 byte-parity violation of the same class as D90. Decision: drop the invented-abbreviation substitutions from `rewrite_word`; those words now pass through in full. The D91 parity harness is extended to catch this whole class of drift, not just the D90 arrow rule. | §9.B.3 / D7 / D90 / D91 |
 
 ### Remaining open questions
 

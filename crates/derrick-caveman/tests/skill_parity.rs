@@ -44,10 +44,10 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use derrick_caveman::compress;
+use derrick_caveman::{Intensity, compress};
 
 mod support;
-use support::{corpus_inputs, intensity_dirs};
+use support::{BANNED_INVENTED_ABBREVIATIONS, contains_banned_word, corpus_inputs, intensity_dirs};
 
 /// Part 1: always-on, CI-enforced regression gate. See module docs.
 #[test]
@@ -97,6 +97,75 @@ fn vendored_snapshot_still_bans_arrows() -> Result<(), Box<dyn std::error::Error
     );
 
     Ok(())
+}
+
+/// D93 content anchor: ties `rewrite_word`'s no-invented-abbreviations
+/// behaviour to the installed skill's own wording, the same pattern
+/// [`vendored_snapshot_still_bans_arrows`] uses for D90. Always runs, no
+/// external dependency. If the skill's wording ever changes here, this
+/// fails and tells a human to re-audit `rewrite_word` before touching the
+/// vendored snapshot.
+#[test]
+fn vendored_snapshot_still_bans_invented_abbreviations() -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot = fs::read_to_string(vendored_snapshot_path())?;
+
+    assert!(
+        snapshot.contains("never invent new abbreviations (cfg/impl/req/res/fn)"),
+        "vendored SKILL.snapshot.md no longer states the Rules-level ban on \
+         invented abbreviations that D93 depends on — re-read the installed \
+         skill, re-audit rewrite_word in src/lib.rs, and re-vendor the \
+         snapshot before changing this fixture"
+    );
+    assert!(
+        snapshot.contains("NO prose abbreviations (cfg/impl/req/res/fn/auth)"),
+        "vendored SKILL.snapshot.md no longer states the Ultra-row ban on \
+         cfg/impl/req/res/fn/auth that D93 depends on — re-read the \
+         installed skill, re-audit rewrite_word in src/lib.rs, and \
+         re-vendor the snapshot before changing this fixture"
+    );
+
+    Ok(())
+}
+
+/// D93 class-level regression guard: fails if `rewrite_word` (or any
+/// future shaping rule) ever reintroduces a skill-forbidden invented
+/// abbreviation for *any* of the words the skill's own banned list names
+/// (`cfg`/`impl`/`req`/`res`/`fn`/`auth`) — not just the individual cases
+/// that happened to be caught in this D93 pass. Unlike the corpus-fixture
+/// assertions above, this does not depend on a hand-maintained expected
+/// string per input: it asserts the *class* property (no banned token in
+/// the output) directly against `compress()`, so it keeps failing even if
+/// someone "fixes" a corpus `.out` fixture to match a reintroduced
+/// abbreviation instead of fixing the code.
+#[test]
+fn ultra_never_reintroduces_banned_invented_abbreviations() {
+    let inputs = [
+        "The request failed.",
+        "The response arrived.",
+        "The function returned early.",
+        "The implementation changed.",
+        "The authentication succeeded.",
+        "The authorization failed.",
+        "Update the configuration file.",
+        "Requests and responses both failed.",
+        "Functions and implementations differ.",
+    ];
+
+    for input in inputs {
+        for intensity in [Intensity::Lite, Intensity::Full, Intensity::Ultra] {
+            let output = compress(input, intensity);
+            for banned in BANNED_INVENTED_ABBREVIATIONS {
+                assert!(
+                    !contains_banned_word(&output.text, banned),
+                    "D93/D91 class regression: compress({input:?}, {intensity:?}) \
+                     produced {:?}, which contains the skill-forbidden invented \
+                     abbreviation {banned:?} — rewrite_word must not map any \
+                     word onto this token",
+                    output.text,
+                );
+            }
+        }
+    }
 }
 
 /// Part 2: live-skill drift guard. Skips gracefully when the installed

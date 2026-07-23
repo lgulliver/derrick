@@ -5,7 +5,7 @@ use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 
 mod support;
-use support::{corpus_inputs, intensity_dirs};
+use support::{BANNED_INVENTED_ABBREVIATIONS, contains_banned_word, corpus_inputs, intensity_dirs};
 
 #[test]
 fn intensity_serde_round_trip_serializes_lowercase() -> Result<(), TestSerdeError> {
@@ -122,15 +122,60 @@ fn ultra_does_not_corrupt_not_so_much() {
 fn ultra_strips_causal_because_without_arrow() {
     // D90: the conjunction is stripped and clauses are comma-joined — no
     // arrow, matching the installed skill's Ultra row exactly.
+    //
+    // D93: `response`/`authentication`/`request` are no longer abbreviated
+    // to `res`/`auth`/`req` — the skill bans those invented abbreviations
+    // outright. `database` -> `DB` still applies: the skill's Rules line
+    // carves out standard well-known tech acronyms as an explicit
+    // exception ("Standard well-known tech acronyms OK (DB/API/HTTP)").
     let output = compress(
         "The database response changed because the authentication request failed.",
         Intensity::Ultra,
     );
-    assert_eq!(output.text, "DB res changed, auth req failed.");
+    assert_eq!(
+        output.text,
+        "DB response changed, authentication request failed."
+    );
     assert!(
         !output.text.contains("->"),
         "because must not become an arrow (D90)"
     );
+}
+
+#[test]
+fn ultra_does_not_invent_prose_abbreviations() {
+    // D93: the installed skill explicitly bans invented prose
+    // abbreviations at Ultra — "NO prose abbreviations
+    // (cfg/impl/req/res/fn/auth) ... measured zero token saving under
+    // tokenizer, cost decode clarity". These words must survive Ultra
+    // compression in full (modulo unrelated article/filler drop), never
+    // truncated to `req`/`res`/`fn`/`impl`/`auth`.
+    let cases = [
+        ("The request failed.", "request failed."),
+        ("The response arrived.", "response arrived."),
+        ("The function returned.", "function returned."),
+        ("The implementation works.", "implementation works."),
+        ("The authentication succeeded.", "authentication succeeded."),
+        ("The authorization failed.", "authorization failed."),
+    ];
+
+    for (input, expected) in cases {
+        let output = compress(input, Intensity::Ultra);
+        assert_eq!(
+            output.text, expected,
+            "D93: caveman must not invent an abbreviation for {input:?}"
+        );
+        for banned in BANNED_INVENTED_ABBREVIATIONS {
+            assert!(
+                !contains_banned_word(&output.text, banned),
+                "D93: output {:?} for input {:?} must not contain the banned \
+                 invented abbreviation {:?}",
+                output.text,
+                input,
+                banned
+            );
+        }
+    }
 }
 
 #[test]

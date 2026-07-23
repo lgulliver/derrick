@@ -25,9 +25,12 @@ pub enum Intensity {
     /// Full compression: drop articles, flatten prose, and prefer
     /// short words.
     Full,
-    /// Maximum compression: abbreviate prose words and strip safe
-    /// and causal conjunctions (`because`/`therefore`) without
-    /// inserting an arrow (D90; the installed skill forbids `->`).
+    /// Maximum compression: strip safe and causal conjunctions
+    /// (`because`/`therefore`) without inserting an arrow (D90; the
+    /// installed skill forbids `->`). Standard well-known acronyms
+    /// (e.g. `DB`) still apply, but invented prose abbreviations like
+    /// `req`/`res`/`fn`/`impl`/`auth` do not (D93; the installed skill
+    /// bans them as zero-token-saving and clarity-costing).
     Ultra,
 }
 
@@ -801,6 +804,19 @@ fn rewrite_word(word: &str, intensity: Intensity) -> String {
         return word.to_owned();
     }
 
+    // D93: the installed skill bans *invented* prose abbreviations —
+    // "never invent new abbreviations (cfg/impl/req/res/fn)" (Rules) and,
+    // stronger still for Ultra, "NO prose abbreviations
+    // (cfg/impl/req/res/fn/auth) ... measured zero token saving under
+    // tokenizer, cost decode clarity" (Intensity table, Ultra row). This
+    // match must never reintroduce `req`/`res`/`fn`/`impl`/`auth` (or any
+    // other made-up truncation of the same kind) as a rewrite target —
+    // those words pass through unabbreviated below. `DB` survives because
+    // the same Rules line carves out an explicit exception: "Standard
+    // well-known tech acronyms OK (DB/API/HTTP)". `config` survives for
+    // the same reason the skill's banned list names `cfg` and not
+    // `config`: `config` is the ordinary, undegraded word — it is not a
+    // further invented truncation the way `cfg` is.
     match word.to_ascii_lowercase().as_str() {
         // Full and Ultra rewrites
         "however" => "but".to_owned(),
@@ -808,14 +824,7 @@ fn rewrite_word(word: &str, intensity: Intensity) -> String {
         "additionally" => "also".to_owned(),
         // Ultra-only rewrites
         "database" | "databases" if intensity == Intensity::Ultra => "DB".to_owned(),
-        "authentication" | "authenticate" | "authorization" if intensity == Intensity::Ultra => {
-            "auth".to_owned()
-        }
         "configuration" | "configure" if intensity == Intensity::Ultra => "config".to_owned(),
-        "request" | "requests" if intensity == Intensity::Ultra => "req".to_owned(),
-        "response" | "responses" if intensity == Intensity::Ultra => "res".to_owned(),
-        "function" | "functions" if intensity == Intensity::Ultra => "fn".to_owned(),
-        "implementation" | "implementations" if intensity == Intensity::Ultra => "impl".to_owned(),
         _ => word.to_owned(),
     }
 }
