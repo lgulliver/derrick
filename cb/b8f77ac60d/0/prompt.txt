@@ -249,3 +249,30 @@ open the pr, then do 2 as a stacked pr
 **OQ6:** resolved by this ticket — the detect→merge revalidation pass now exists. You can route the DESIGN.md §5.6 / §12 OQ6 update through `design-keeper`; I did not touch DESIGN.md. No schema/pipeline-step-shape changes were needed, so no `design-keeper` escalation was required for the implementation itself.</result>
 <usage><subagent_tokens>106681</subagent_tokens><tool_uses>18</tool_uses><duration_ms>403193</duration_ms></usage>
 </task-notification>
+
+---
+
+<task-notification>
+<task-id>a896bb0c8c4c7543b</task-id>
+<tool-use-id>toolu_01B5YL5FLXmC9joxvyMmFzCG</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a896bb0c8c4c7543b.output</output-file>
+<status>completed</status>
+<summary>Agent "Mark OQ6 resolved in DESIGN" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Done. Diff not committed — you said report only.
+
+DESIGN.md UPDATE — CAVEMAN STYLE:
+
+OQ6 ROW (§12) — OLD TEXT STRIKETHROUGH, NOT DELETE. NEW: "RESOLVED BY D94". LEANING COL SAY "RESOLVED — SEE D94." RELATED COL NOW §5.6 / D94 / T013. MATCH SAME PATTERN AS OQ2-OQ5 (D81-D84 STYLE).
+
+NEW DECISION D94 ADDED AFTER D93 IN TABLE. TITLE: "derrick-adopt closes detect→apply TOCTOU by aborting, not re-merging." BODY SAY: SourceGuard RECORDED AT DETECT/PROPOSE TIME (SNAPSHOT OF FILE CONTENT EACH Append/MergeJson MERGED AGAINST). AT APPLY TIME revalidate_sources RE-READ EACH GUARDED FILE BEFORE PROMOTION. ANY DRIFT (EDIT/CREATE/DELETE) -&gt; ABORT WHOLE APPLY WITH AdoptError::StaleDetection, MSG "FILES CHANGED SINCE DETECTION; RE-RUN derrick init". RE-MERGE REJECTED, TOO RISKY (APPLY TIME NO CONTEXT FOR CORRECT 3-WAY MERGE). ALSO CLEANS STALE .derrick/.adopt-stage-* DIRS. SECTION REF: §5.6 / OQ6 / T013.
+
+§5.6 "KNOWN GAP (OQ6)" PARAGRAPH REWRITTEN TO "TOCTOU GAP CLOSED (OQ6, RESOLVED BY D94, T013)" — SAME MECHANISM DESCRIBED, POINTS TO §12 D94 INSTEAD OF "NOT YET BUILT. SEE §12 OQ6."
+
+NO OTHER D ENTRY TOUCHED. D1-D93 UNTOUCHED. NO OTHER OQ ROW TOUCHED.
+
+FILE: /Users/lgulliver/repos/derrick/DESIGN.md, LINES ~750-765 (§5.6 PROSE), LINE 2479 (NEW D94 ROW), LINE 2490 (OQ6 ROW UPDATE).
+
+CHANGE NOT COMMITTED — WORKING TREE ONLY. YOU DIDN'T ASK FOR COMMIT SO NONE MADE.</result>
+<usage><subagent_tokens>51731</subagent_tokens><tool_uses>11</tool_uses><duration_ms>72174</duration_ms></usage>
+</task-notification>
