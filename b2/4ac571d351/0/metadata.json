@@ -1,0 +1,187 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "b24ac571d351",
+  "session_id": "eede6f22-e3de-4aac-bdbb-ff7ea081603f",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-23T18:01:51.37629Z",
+  "branch": "fix/review-findings-batch",
+  "checkpoints_count": 14,
+  "save_step_count": 5,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    "Cargo.lock",
+    "crates/derrick-assay/Cargo.toml",
+    "crates/derrick-assay/src/lib.rs",
+    "crates/derrick-assay/src/types.rs",
+    "crates/derrick-caveman/src/lib.rs",
+    "crates/derrick-caveman/tests/caveman.rs",
+    "crates/derrick-claude/src/dispatcher.rs",
+    "crates/derrick-cli/src/commands/gain.rs",
+    "crates/derrick-config/src/lib.rs",
+    "crates/derrick-flow/src/lib.rs",
+    "crates/derrick-flow/src/runner.rs",
+    "crates/derrick-flow/src/steps.rs",
+    "crates/derrick-models/src/lib.rs",
+    "crates/derrick-models/src/providers/api.rs",
+    "crates/derrick-models/src/providers/shell.rs",
+    "crates/derrick-roughneck/src/lib.rs",
+    "crates/derrick-substrate-native/src/foreman.rs",
+    "crates/derrick-substrate-native/src/foreman/tests.rs",
+    "crates/derrick-tools/src/hosts/copilot.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "18e598be32ca",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 22505,
+    "cache_creation_tokens": 203413,
+    "cache_read_tokens": 2044592,
+    "output_tokens": 22109,
+    "api_call_count": 25
+  },
+  "session_metrics": {
+    "turn_count": 14
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-23T18:01:51.2944Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 967,
+    "human_modified": 87,
+    "human_removed": 0,
+    "total_committed": 982,
+    "total_lines_changed": 1054,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 1166,
+      "user_lines_removed": 48,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "crates/derrick-assay/src/types.rs": 17,
+        "crates/derrick-caveman/src/lib.rs": 9,
+        "crates/derrick-cli/src/commands/gain.rs": 289,
+        "crates/derrick-config/src/lib.rs": 32,
+        "crates/derrick-flow/src/runner.rs": 3,
+        "crates/derrick-flow/src/steps.rs": 52,
+        "crates/derrick-models/src/lib.rs": 68,
+        "crates/derrick-models/src/providers/api.rs": 264,
+        "crates/derrick-models/src/providers/shell.rs": 60,
+        "crates/derrick-substrate-native/src/foreman.rs": 121,
+        "crates/derrick-substrate-native/src/foreman/tests.rs": 172,
+        "crates/derrick-tools/src/hosts/copilot.rs": 79
+      },
+      "user_removed_per_file": {
+        "crates/derrick-caveman/src/lib.rs": 1,
+        "crates/derrick-cli/src/commands/gain.rs": 4,
+        "crates/derrick-flow/src/runner.rs": 8,
+        "crates/derrick-flow/src/steps.rs": 5,
+        "crates/derrick-models/src/lib.rs": 1,
+        "crates/derrick-models/src/providers/api.rs": 11,
+        "crates/derrick-substrate-native/src/foreman.rs": 4,
+        "crates/derrick-tools/src/hosts/copilot.rs": 14
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 193,
+      "user_lines_removed": 24,
+      "agent_lines_added": 1167,
+      "agent_lines_removed": 49,
+      "user_added_per_file": {
+        "crates/derrick-caveman/tests/caveman.rs": 47,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.out": 1,
+        "crates/derrick-claude/src/dispatcher.rs": 19,
+        "crates/derrick-config/src/lib.rs": 93,
+        "crates/derrick-roughneck/src/lib.rs": 28
+      },
+      "user_removed_per_file": {
+        "crates/derrick-claude/src/dispatcher.rs": 4,
+        "crates/derrick-config/src/lib.rs": 20
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 236,
+      "user_lines_removed": 15,
+      "agent_lines_added": 1354,
+      "agent_lines_removed": 73,
+      "user_added_per_file": {
+        "Cargo.lock": 1,
+        "crates/derrick-assay/Cargo.toml": 1,
+        "crates/derrick-caveman/tests/caveman.rs": 4,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.out": 1,
+        "crates/derrick-cli/src/commands/gain.rs": 9,
+        "crates/derrick-config/src/lib.rs": 90,
+        "crates/derrick-flow/src/lib.rs": 125
+      },
+      "user_removed_per_file": {
+        "crates/derrick-caveman/tests/caveman.rs": 1,
+        "crates/derrick-cli/src/commands/gain.rs": 2,
+        "crates/derrick-flow/src/lib.rs": 12
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 6,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1581,
+      "agent_lines_removed": 85,
+      "user_added_per_file": {
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.out": 1
+      }
+    },
+    {
+      "checkpoint_number": 5,
+      "user_lines_added": 613,
+      "user_lines_removed": 0,
+      "agent_lines_added": 1581,
+      "agent_lines_removed": 85,
+      "user_added_per_file": {
+        ".github/workflows/ci.yml": 10,
+        "crates/derrick-assay/src/lib.rs": 597,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.out": 1
+      }
+    },
+    {
+      "checkpoint_number": 6,
+      "user_lines_added": 6,
+      "user_lines_removed": 0,
+      "agent_lines_added": 2205,
+      "agent_lines_removed": 85,
+      "user_added_per_file": {
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.out": 1
+      }
+    }
+  ]
+}

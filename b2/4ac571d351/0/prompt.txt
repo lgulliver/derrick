@@ -1,0 +1,506 @@
+generate a flow diagram of how this application works
+
+---
+
+using a group of appropriate agents, explore this codebase and tell me where its strengths are and what you'd improve
+
+---
+
+<task-notification>
+<task-id>a6862065e89800955</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a6862065e89800955.output</output-file>
+<status>completed</status>
+<summary>Agent "Assess Rust workspace architecture" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Assessment complete. Compact report below.
+
+---
+
+# derrick workspace — cross-crate architecture assessment
+
+Read-only. 22 crates, clean layered DAG (substrate → config only; native → substrate+stack+config; no cycles). Evidence is `file:line`.
+
+## Strengths
+
+1. **Layered, composable error model.** Per-crate typed `thiserror` enums fold into a single boundary error via `#[from]`: `RunError` absorbs `SubstrateError`/`HostError`/`ModelError` (`derrick-assay/src/types.rs:189-228`). Public error enums are `#[non_exhaustive]`; the substrate leaks nothing concrete — backend faults are boxed at the seam (`SubstrateError::Backend(Box&lt;dyn Error + Send + Sync&gt;)`, `derrick-substrate/src/types.rs:49-52`). Textbook "typed inside, boxed at boundaries."
+
+2. **`Substrate` as an event-sourced state machine, not a CRUD bag.** Generic `set_ticket_state` is deliberately narrowed to the no-op idempotency path, with every real transition getting a dedicated typed method that refuses illegal moves (`assign_to_hand`, `transition_to_in_review`, `verify_ticket_merged`, `block_ticket`, …) — `derrick-substrate/src/lib.rs:46-160`. The doc comments encode the state graph and TOCTOU handling (`unblock_ticket` re-verifies inside the txn). Invariants enforced at the API surface.
+
+3. **`StackBackend` extension-seam discipline.** New capabilities ship as default methods returning `StackError::NotSupported` so the trait stays stable and existing backends keep compiling (`derrick-stack/src/lib.rs`, `retarget_pr`/`set_pr_body`/`pr_body`). Doc comment names both implementors and the §8.6 rationale. This is the working-agreement pattern done right.
+
+4. **`Model` trait is genuinely narrow.** `stream` is the one primitive; `complete` is a provided default that drains it (`derrick-models/src/lib.rs:22-75`). Small surface, `#[non_exhaustive]` event/finish enums, cost accounting isolated behind `CostHint`.
+
+5. **Strict, enforced workspace hygiene.** `unsafe_code = "forbid"`, clippy `all=deny`/`pedantic=warn`, `unwrap/expect/panic/print_* = deny`, edition 2024, tuned release profile (`Cargo.toml`). The few production `expect`s carry invariant-documenting messages ("built-in symbols query must compile", `derrick-survey/src/parse/mod.rs:46`) — deviations are justified, not accidental.
+
+## Improvements (prioritised)
+
+1. **[HIGH] The `Substrate` trait is largely vestigial — the real seam is the concrete `NativeSubstrate`.** Executor and UI crates hold `Arc&lt;NativeSubstrate&gt;`, not `Arc&lt;dyn Substrate&gt;` or a generic `S: Substrate`: 43 concrete uses vs 6 `dyn Substrate` workspace-wide. The foreman itself is concrete (`substrate: Arc&lt;NativeSubstrate&gt;`, `derrick-substrate-native/src/foreman.rs:565`), as are every dispatcher (`derrick-hand/src/lib.rs:155`, `derrick-claude/src/dispatcher.rs:86`, `derrick-copilot/src/local_dispatcher.rs`). Consequences: (a) the abstraction can't be substituted exactly where it would help — tests and alternative backends; (b) `derrick-hand/claude/copilot/tui/observe` all hard-depend on `derrick-substrate-native`, so the trait buys no decoupling. Decision for `design-keeper`/`substrate-engineer`: either route callers through `Arc&lt;dyn Substrate&gt;` and make the trait load-bearing, or accept there is one backend and retire the 47-method trait rather than maintain a fiction. Right now you pay the trait's cost without its benefit.
+
+2. **[HIGH→MED] `Substrate` is a god-trait — 47 async methods** spanning tickets, batches, links, hands, events, foreman lifecycle, and worktree reservations (`derrick-substrate/src/lib.rs`). This violates the "narrow traits, one or two methods" agreement and inflates every implementor and mock. Split into role traits (e.g. `TicketStore`, `EventLog`, `HandRegistry`, `ForemanState`, `WorktreeReservations`); callers then depend only on the slice they touch, which also makes the `dyn` migration in #1 far cheaper.
+
+3. **[MED] Dead-weight deprecated methods still on the public trait.** Four `#[deprecated]` methods (`record_event`, `tail_events`, `record_foreman_start`, `record_foreman_stop`) carry "will be removed after T012" notes while the surrounding docs already speak of T012 in the past tense (`derrick-substrate/src/lib.rs:227-305`). Every backend and test double must still implement them. Schedule the removal cut.
+
+4. **[MED] `Model::complete` default masks stream-truncation.** If a stream ends without an `End` event, the default drains to `FinishReason::Stop` with `tokens_in/out = 0` rather than surfacing the defined `FinishReason::Error` (`derrick-models/src/lib.rs:48-75`). A provider that dies mid-stream reads as a clean empty completion — a silent correctness gap in the shared default that all providers inherit.
+
+5. **[LOW] Observability surface reaches into the concrete backend.** `derrick-observe` and `derrick-tui` (read-only views) depend on `derrick-substrate-native`. Same root cause as #1; resolving #1 removes this coupling for free.
+
+## Notable-but-fine
+
+- `HandDispatcher` trait lives in `derrick-substrate-native/src/foreman.rs:236` (foreman owns dispatch), taken as `Box&lt;dyn HandDispatcher&gt;` and `StackBackend` as `Arc&lt;dyn StackBackend&gt;` in `Foreman` — those two seams *are* polymorphic and correct. It's specifically the substrate handle that's concrete, which is the one that matters most.
+
+Key files: `/Users/lgulliver/repos/derrick/Cargo.toml`, `/Users/lgulliver/repos/derrick/crates/derrick-substrate/src/lib.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-substrate/src/types.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-stack/src/lib.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-models/src/lib.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-assay/src/types.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/foreman.rs`.</result>
+<usage><subagent_tokens>58761</subagent_tokens><tool_uses>14</tool_uses><duration_ms>155467</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>aad17258ff192b537</task-id>
+<tool-use-id>toolu_01YNZaYP5SYgAvCo1NccKGkX</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/aad17258ff192b537.output</output-file>
+<status>completed</status>
+<summary>Agent "Assess substrate and foreman" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Assessment complete. Compact report below.
+
+---
+
+## Substrate assessment: `derrick-substrate` + `derrick-substrate-native`
+
+### Strengths
+
+**1. D31/D33 merge-observation is enforced at the storage boundary — no optimistic close exists.**
+Crew-mode `Done` is reachable only through `verify_ticket_merged` (requires `InReview`, stores `merge_sha`; `lib.rs:966-1017`) or `reconcile_ticket_done_from_git` (requires `Ready` *and* a prior `TicketTransitionedToInReview` event; `lib.rs:1222-1284`, evidence check `ticket_has_in_review_event` at `2354-2367`). The verifier confirms with `git merge-base --is-ancestor` (`foreman.rs:115-132`) and, on the squash path, re-checks that the gh-reported merge SHA actually lands on target before closing (`foreman.rs:929-951`). If gh says merged but the SHA is not on target it escalates and leaves the ticket `InReview` (`foreman.rs:955-966`). This is exactly the D31 anti-goal guard.
+
+**2. Cross-process lost-update protection via conditional UPDATE.**
+`assign_to_hand` does not trust its own `SELECT`: it gates the write on `WHERE id=? AND state='ready'` and treats a 0-row result as a `Conflict`, aborting the whole transaction so no assignment events get written on a lost race (`lib.rs:828-846`). The comment correctly notes the tokio writer mutex does not span processes (daemon + CLI). Same pattern used for batch/worktree closes.
+
+**3. kind/body event consistency + ticket-as-projection.**
+Every event flows through one writer (`insert_typed_event_with_kind`, `lib.rs:2546-2581`) that serializes the discriminator column and the full tagged-JSON body together, so they cannot diverge. Each state transition writes its domain event *and* a `TicketStateChanged` in the same transaction (e.g. `transition_to_in_review` `lib.rs:934-958`), so the ticket row is a rebuildable projection of the log. Legacy-row decode fallback is handled defensively (`decode_event_body`, `lib.rs:2788-2844`).
+
+**4. Migration discipline is genuinely migration-safe.**
+Table-rebuild migrations (0002, 0003) toggle `foreign_keys=OFF` *outside* the transaction (SQLite ignores it inside), run `PRAGMA foreign_key_check` inside, and re-enable FKs in a finally-style block even on failure (`lib.rs:2142-2223`). `user_version` gating plus a "newer than supported" refusal (`lib.rs:2080-2087`). CHECK constraints keep DB enums in lockstep with Rust `FromStr` (migrations 0003/0004). Additive migrations are documented as rebuild-free.
+
+**5. Liveness = pid + heartbeat, with correct precedence (D75).**
+Cleanup treats a dead pid as authoritative (abandon even if heartbeat is fresh), lets a live pid suppress stale-heartbeat abandonment, and falls back to pure TTL for no-pid hands (`foreman.rs:744-784`). `kill(pid,0)` implemented inline to avoid a libc/nix dep. Every long-lived state has a reconciliation pass (worktrees, adopt-stage dirs, abandoned hands, stale `InReview`, `Ready`-with-history) — satisfies D32.
+
+### Improvements (prioritised)
+
+**1. [HIGH] The foreman provides no backstop for the `Ready→InFlight` transition — it fully trusts each dispatcher to assign.**
+`dispatch_ready` (`foreman.rs:1305-1368`) computes `budget = batch_max - inflight`, lists `Ready` tickets, dispatches, and in phase 3 only inspects the `Result` variant. It never uses `DispatchResult.hand` and never verifies the ticket actually left `Ready`. If any `HandDispatcher` returns `Ok` without calling `assign_to_hand` (a bug, a partial failure after spawn-but-before-assign, or a future adapter), the ticket stays `Ready` and is re-dispatched every tick — duplicate hands, duplicate worktrees, and branch-name collisions for one ticket. The whole no-double-dispatch guarantee currently lives in convention inside each dispatcher (confirmed: test dispatchers all call `assign_to_hand` and swallow the `Conflict`, `foreman/tests.rs:205-218`). Fix: have the foreman assert the ticket is no longer `Ready` after a successful dispatch, or move the `assign_to_hand(ticket, result.hand)` call into the foreman itself so the substrate boundary — not the adapter — owns the claim.
+
+**2. [MED-HIGH] Worktree TTL prune can yank the checkout out from under a live, long-running hand.**
+`list_stale_open_worktrees` filters only on `closed_at IS NULL AND created_at &lt; threshold` (`lib.rs:371-392`); cleanup step 1a then runs `git worktree remove --force` on it (`foreman.rs:694-732`). It does not check whether the owning ticket is still `InFlight` or whether the hand's pid is alive. `created_at` is only refreshed on (re-)reservation, not on heartbeat, so a legitimately heavy ticket whose hand works past `worktree_ttl` (default 24h) loses its worktree mid-run. Fix: exclude `ticket:`-keyed worktrees whose ticket is non-terminal and whose hand is still alive, or refresh `created_at`/gate on hand liveness rather than raw age.
+
+**3. [MED] Every mutation opens a brand-new SQLite connection.**
+`run_write` calls `open_writer_connection(&amp;db_path)` on each call (`lib.rs:620-634`), paying connection open + three `pragma_update` round-trips (`configure_common_pragmas`, `2063-2074`) per write. Under the foreman's poll loop (which emits many events per tick) this is avoidable churn and also means the writer never benefits from a warm page cache or prepared-statement reuse. Since the tokio writer mutex already serializes writes, hold one persistent writer `Connection` behind the mutex instead of reopening.
+
+**4. [LOW-MED] Abandoned hands are never deregistered; hand rows and dead pids accumulate.**
+Cleanup 1c releases an abandoned hand's tickets (`foreman.rs:754-783`) but leaves the hand row with its stale heartbeat and dead pid. `list_hands` (rescanned every tick) grows unbounded over a long-lived site, and a dead-pid hand is re-evaluated forever. Consider clearing the pid on abandonment and/or a retention pass for hands with no owned tickets past a TTL.
+
+**5. [LOW] `batch_max` bounds only `InFlight`, not `InFlight + InReview`.**
+`dispatch_ready` caps on `count_inflight_tickets` alone (`foreman.rs:1306`, `lib.rs:461-473`). Tickets in `InReview` still hold a worktree and an open PR but do not count against the cap, so the number of concurrently-open worktrees/PRs can exceed `batch_max`. If the cap is meant to bound "active hands" this is correct; if it is meant to bound resource footprint (worktrees/PRs), it under-counts. Worth confirming intent against §9.C and documenting. Related minor: event ordering leans on RFC3339 *text* comparison in `tail_typed_events` (`lib.rs:1806-1839`) — safe today because all timestamps are UTC and `rowid` is the tiebreaker, but `to_rfc3339()`'s variable fractional-second precision makes pure `at` ordering fragile; the order-critical reads correctly use `rowid` (`most_recent_in_review_metadata`, `lib.rs:557`), so keep it that way.
+
+Key files: `/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/foreman.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/lib.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-substrate/src/lib.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/migrations/`.</result>
+<usage><subagent_tokens>119871</subagent_tokens><tool_uses>8</tool_uses><duration_ms>162849</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a02c073befd108d75</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a02c073befd108d75.output</output-file>
+<status>completed</status>
+<summary>Agent "Assess token tooling" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Assessment: derrick-scrub / derrick-caveman / derrick-roughneck / derrick-memory / derrick-survey / derrick-survey-hub
+
+Read-only review. No code changed.
+
+### STRENGTHS
+
+1. **Scrub engine is byte-preserving and well-guarded against corruption.** Non-UTF8 lines, CRLF, missing trailing newline, and chunk-boundary splits all pass through unchanged with dedicated regression tests (`crates/derrick-scrub/src/lib.rs:298-370`, tests at `:592-643`). `Action::Replace` chains don't short-circuit (`:687-706`), so multi-rule pipelines compose correctly.
+
+2. **Roughneck's compliance gating is honest in spirit** — `estimate_savings` checks four independent signals (preamble, filler density, sentence length, fragment fraction) before attributing *any* saving, and yields 0 when the model ignored the instruction (`crates/derrick-roughneck/src/lib.rs:183-202`, `252-269`). Good defensive design against over-counting compliance.
+
+3. **Memory namespace isolation is solid and tested.** `unmemoize` only ever touches `derrick/&lt;site&gt;/` (`crates/derrick-memory/src/lib.rs:173-183`), multi-site non-collision is verified (`:1213-1255`), atomic writes survive simulated mid-write kill via a panic-injection test (`:1257-1281`), and the D9 lesson quality gate rejects untagged lessons with the offending body echoed for debuggability (`:445-460`, `:1167-1183`).
+
+4. **Survey MCP surface is transport-agnostic and freshness-aware by design.** Query logic lives once in `answer_*` (`crates/derrick-survey/src/tools.rs:42-91`) and is shared by both the stdio server and the HTTP hub; the staleness banner correctly distinguishes tree-backed vs. pushed indices (`BannerMode`, `:24-35`, `:96-133`) with tests for both branches. Tool descriptions are honest about limitations — e.g. `derrick_survey_impact`'s doc explicitly warns "matching is by name ... may include unrelated symbols" (`crates/derrick-survey/src/mcp.rs:93-95`).
+
+5. **Caveman's protected-span lexer is thorough**: fenced/inline code, rustc/Node/Python diagnostic blocks, markdown links, autolinks, CLI flags, file:line refs, and identifiers are all preserved verbatim, backed by a 150+ file corpus at three intensities (`crates/derrick-caveman/tests/corpus/{lite,full,ultra}/`, exercised by `corpus_cases_match_expected_outputs` in `tests/caveman.rs`).
+
+### IMPROVEMENTS (prioritised)
+
+1. **`derrick gain` silently drops the two savings figures the pipeline already measured — the single biggest accounting-honesty gap.** `ManifestStep`/`StepRecord` carry `bytes_raw`, `bytes_saved` (scrub) and `roughneck_tokens_saved` per step (`crates/derrick-flow/src/manifest.rs:124-136`, populated at `crates/derrick-flow/src/steps.rs:342,385`), but `derrick gain --run &lt;id&gt;`'s `step_rows()` only extracts `tokens_in`/`tokens_out`/`status`/timestamps and never reads `bytes_saved` or `roughneck_tokens_saved` (`crates/derrick-cli/src/commands/gain.rs:282-320`). The default (non-`--run`) view is worse: it just prints `"scrub: active"` / `"caveman: active"` with zero numbers (`gain.rs:131-139`, `:172-176`). Two of the three pillars this role owns are invisible in the one command whose job is to report them. Fix: surface `bytes_saved`/`roughneck_tokens_saved` sums in both `print_run_human`/`print_run_json`, and aggregate them into the top-level `derrick gain` view.
+
+2. **Roughneck's `tokens_saved` is a formula applied on a pass/fail gate, not a measured counterfactual — the number can read as far more rigorous than it is.** `compute_tokens_saved` (`crates/derrick-roughneck/src/lib.rs:480-497`) always uses the fixed configured rate (30/65/75%) once compliance clears the threshold; there's no baseline (what the model would have said uncompressed) ever measured. A response that barely clears "Full" compliance gets credited the same 65%/75% rate as one that's maximally terse. This should be labelled clearly as an estimate wherever it surfaces (it already is in doc comments, `:41-45`, but not at the `derrick gain` UI, per #1) — and ideally compliance score itself (not just the tri-state bucket) should scale the rate.
+
+3. **Ultra-intensity causal-arrow substitution risks corrupting meaning, not just compressing it.** `causal_regex` at `crates/derrick-caveman/src/lib.rs:1078-1082` matches bare `so` (along with `because`/`therefore`) and replaces the whole `\s+so\s+` span with `" -&gt; "` in Ultra mode (`substitute_phrases`, `:741-746`). `so` is at least as often an intensifier ("so good", "so far", "not so much") as a causal connector; e.g. "the fix was so effective" → "the fix was -&gt; effective" silently inverts an intensifier into a causal claim. No corpus case in `tests/corpus/ultra/` exercises non-causal "so" — this gap should be closed with a lookahead/lookbehind restricting the match to clause-initial causal use, or the "so" alternative should be dropped from the regex entirely.
+
+4. **`bd list row` scrub rule unconditionally discards the ticket status column.** `crates/derrick-scrub/src/rules/bd.rs:15-20` replaces `ID Title Status` rows with `"$1: $2"`, dropping capture group 3 (status) every time — confirmed intentional via the test name `bd_list_row_folds_to_identifier_and_title` (`tests/scrub.rs:113-116`), but worth re-litigating: status (open/blocked/done) is often exactly what a triage query needs, and this rule destroys it for every row with no opt-out. Also flag `crates/derrick-scrub/src/rules/opencode.rs:16-21` — the banner-drop pattern `^[█▀▄▐▌⠀\s]*$` matches a fully empty line (zero-width `\s*` satisfies it), so every blank line in OpenCode's stdout is dropped, which can merge paragraph breaks in the model's actual final answer, not just the ASCII-art banner it was intended for.
+
+5. **The D7 byte-parity guarantee ("byte-identical to the caveman skill") has no automated enforcement against the actual installed skill.** `crates/derrick-caveman/tests/skill_parity.rs` is a 9-line placeholder — an `#[ignore]`d empty test with a comment saying manual verification is "intentional" (`:1-9`). The corpus in `tests/corpus/` only checks the Rust `compress()` function against its own recorded expected outputs, so it locks in *internal* consistency but nothing re-verifies those recordings against the live skill when either drifts. Given D7 is called out as a hard requirement in this role's charter, this is the most direct violation of a stated contract in the codebase.
+
+Minor: `ScrubStats::savings_pct()` clamps to 0.0 whenever `bytes_out &gt;= bytes_in` (`crates/derrick-scrub/src/lib.rs:210-217`) — reasonable for display, but it means a rule that *expands* output (e.g. a bad `Replace` template) is invisible in telemetry rather than surfaced as a negative number worth investigating.</result>
+<usage><subagent_tokens>162843</subagent_tokens><tool_uses>34</tool_uses><duration_ms>176108</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ac8f95565ad77a8b4</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/ac8f95565ad77a8b4.output</output-file>
+<status>completed</status>
+<summary>Agent "Assess host adapters and assay" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Analysis complete. Compact report below.
+
+## derrick-tools / -models / -copilot / -claude / -hand / -assay — read-only assessment
+
+### Strengths
+
+1. **Secret-redaction discipline is consistent and matches the working agreement.** `Secret` never `Debug`-prints (`derrick-models/src/lib.rs:261-281`); `HostRequest` has a hand-written `Debug` that redacts the prompt and prints only an env-var count (`derrick-tools/src/lib.rs:175-191`); `HttpApiModel` deliberately derives no `Debug` and the key is only ever attached as a header, never serialised into body/error/log (`derrick-models/src/providers/api.rs:141-148`).
+
+2. **Subprocess mechanics in `process.rs` are correct where it's easy to get wrong.** stdout+stderr are pumped on separate tasks to avoid the pipe-buffer deadlock, with `kill_on_drop`, a wall-clock timeout, `NotFound` classification, and byte-identical capture alongside live line-streaming (`derrick-tools/src/process.rs:62-114`). The no-pre-check rationale is documented (`:22-26`).
+
+3. **Retry/fatal classification is principled and typed end-to-end.** `ModelError::is_retryable` (`derrick-models/src/lib.rs:324-336`); spawn-vs-transient `io_kind_is_retryable` so `PermissionDenied`/`NotFound` don't burn retries (`host_delegated.rs:100-144`); HTTP 429+5xx only (`api.rs:557-560`); and overflow-safe, 30s-capped backoff (`lib.rs:551-555`). `#[non_exhaustive]` fall-through handled (`host_delegated.rs:137-143`).
+
+4. **Assay is genuinely fail-closed.** Multi-reviewer quorum requires every configured reviewer to produce a parseable verdict; partial skip = quorum failure, reviewer error halts immediately (`derrick-assay/src/lib.rs:247-304`), and `reconcile_verdicts` refuses an empty outcome set (`:914-920`). `parse_verdict` is strict — standalone-declaration only, rejects substring-in-prose and fails closed on two distinct verdict words (`:1041-1106`).
+
+5. **The API streaming parser is robust to real wire messiness.** SSE frames split mid-chunk are reassembled, a dangling frame with no terminating blank line is flushed at EOF, `[DONE]`/keepalive/unparsable frames are tolerated with a warn, three dialects share one decoder (`api.rs:288-461`), all covered by focused tests.
+
+6. **Catalogue tier fallback never silently escalates** above Standard, with an explicit regression test for the old `tiers.last()` bug (`derrick-tools/src/catalogue.rs:62-77`, test `:428-442`).
+
+### Improvements (prioritised)
+
+1. **API provider never emits `FinishReason::Length` — truncated responses look like clean stops (medium-high).** `stream()` hardcodes `finish_reason: FinishReason::Stop` at end-of-stream (`api.rs:645-649`), and `interpret_openai`/`interpret_anthropic`/`interpret_ollama` decode only `Delta` + `Usage`, never the provider's `stop_reason`/`finish_reason`/`done_reason` (`api.rs:464-531`). A response cut off by `max_tokens` is indistinguishable from a natural completion for any caller inspecting `finish_reason` (only the `shell` provider ever reports `Length`). Map the dialect stop-reason into the terminal `End`.
+
+2. **`headless` is silently ignored by the copilot (and codex) adapters, breaking the documented contract (medium).** `HostRequest::headless` is documented to map to a no-interactive flag "for other hosts" (`tools/lib.rs:135-143`), but `copilot.rs:50-70` never reads it — it relies solely on the orthogonal `copilot_tools` knob, forcing every caller to special-case `if host_name == "copilot" { copilot_tools = AllowAll }` (`flow/src/steps.rs:281-283`). The generic `HostCliHandDispatcher` sets `headless = true` but never touches `copilot_tools` (`hand/src/lib.rs:476`), so routing copilot through it would hang on tool-approval prompts. Currently latent only because `host_name_for_kind` excludes copilot (`cli/commands/foreman.rs:289-296`). Either honour `headless` inside the copilot adapter or drop it from the trait contract for that host.
+
+3. **`shell` provider can convert a valid completion into an error (medium).** After a valid `&lt;&lt;DERRICK-META&gt;&gt;` line it emits the `End` event and `break`s (`shell.rs:199-204`), then unconditionally re-waits the child and, on any nonzero exit, pushes a `Provider` error too (`shell.rs:222-244`). A script that prints correct content+meta but exits nonzero (e.g. a cleanup failure) yields both `End` and `Err`; `consume_stream` surfaces the `Err` and discards the good response. Suppress the exit-code error once `saw_end` is set, or reconcile the two paths.
+
+4. **`openai-compatible`/`ollama` treat auth as optional, so a mistyped `auth_env` fails opaquely (low-medium).** `requires_auth()` is false for these dialects (`api.rs:69-71`), so a missing/typo'd `auth_env` attaches no header and no error — the request goes out unauthenticated and returns a bare `HTTP 401` instead of the clear "missing API key" message the openai/anthropic path produces (`api.rs:260-264`). Consider warning when `auth_env` is configured but resolves to nothing.
+
+5. **Reconciliation collapses `revise`→accept under every policy, including `OnSplit::Reject` (low, design).** `reconcile_verdicts` only ever halts on an explicit `reject`; all-`revise` accepts even under the strictest policy, and `OnSplit::Human` degrades to "any reject → reject" — strictly more lenient than `Majority` (`lib.rs:933-958`). This is documented as intentional autonomous behaviour, but the effective gate is weaker than the policy names imply; worth confirming against D5/D6 intent (not a code fix).
+
+Minor: on timeout, `process.rs` leaves the two pump tasks unjoined (self-terminating at EOF, so harmless but untidy, `:80-90`); `run_reviewer_rounds` re-reads the whole process env via `AuthStore::from_env()` on every reviewer round (`assay/lib.rs:503`); the catalogue is dated "May 2026" (`catalogue.rs:192`) and will need refresh cadence.
+
+Key files: `/Users/lgulliver/repos/derrick/crates/derrick-models/src/providers/api.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-tools/src/hosts/copilot.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-models/src/providers/shell.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-assay/src/lib.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-hand/src/lib.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-flow/src/steps.rs`.</result>
+<usage><subagent_tokens>146945</subagent_tokens><tool_uses>27</tool_uses><duration_ms>219245</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a5dc11188df16de00</task-id>
+<tool-use-id>toolu_01XjJ7pviyiqV5vuiCdwozKx</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a5dc11188df16de00.output</output-file>
+<status>completed</status>
+<summary>Agent "Assess test strategy and coverage" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Excellent scrubber corpus — that's a genuine strength. That settles the report.
+
+## Test Strategy Assessment: derrick workspace
+
+### STRENGTHS
+
+1. **Real-SQLite discipline is airtight, workspace-wide.** No mocked DB found anywhere. `crates/derrick-substrate-native/src/foreman/tests.rs:32-46` (`native_config`/`open_substrate` via `TempDir`) and `crates/derrick-cli/tests/ticket_foreman.rs:22-56` both open a genuine `NativeSubstrate` against a temp SQLite file, including through the CLI E2E layer. House rule 5 is honored, not just nominally.
+
+2. **Foreman/state-machine coverage is deep and scenario-named, not line-padding.** `crates/derrick-substrate-native/src/foreman/tests.rs` has 61 tests, `crates/derrick-substrate-native/src/tests.rs` has 73 — covering merge detection (`verifier_marks_merged_via_target_contains_sha:250`, `verifier_handles_squash_merge:301`), true concurrency races (`assign_to_hand_rejects_cross_instance_double_claim:501`, `parallel_ticks_serialise_through_writer_mutex:1086`, `dispatch_ready_fans_out_concurrently:1481`, `concurrent_terminal_writes_emit_one_batch_closed_event:1892`), and DB migration crash-safety (`migration_0002_rolls_back_on_mid_rebuild_crash:1348`). This is the strongest area of the suite by far.
+
+3. **E2E harness genuinely drives the real binary end-to-end.** `crates/derrick-cli/tests/cli.rs:811` `run_drill_smoke_writes_real_artifacts` runs `derrick run drill` via `assert_cmd::Command::cargo_bin`, through a mocked host CLI on `PATH`, and asserts real files land on disk (`spec.md`, `plan.md`, `tasks.md`, `assay/verdict.md`, `manifest.json`). `crates/derrick-cli/tests/ticket_foreman.rs` does the same for ticket/foreman subcommands.
+
+4. **Global-state test isolation is mostly disciplined via named mutex guards**, matching the working-agreement rule: `crates/derrick-config/src/lib.rs:3766` `HOME_LOCK`, `crates/derrick-stack/tests/fake_gh.rs:106` `GUARD`, `crates/derrick-cli/src/commands/stack.rs:680` `PATH_GUARD`, `crates/derrick-tools/tests/hosts.rs:16` `PROCESS_LOCK`.
+
+5. **Scrubber has a real input/output corpus**, not just unit assertions: `crates/derrick-scrub/tests/corpus/{gh,gt,bd,copilot,cargo,claude,codex,git}/*.{in,out}` — paired fixture files per host CLI noise pattern, exactly the "test corpora" pattern the role calls for.
+
+6. **Resume has targeted regression tests**, not just happy-path: `crates/derrick-flow/src/lib.rs:1461` `resume_from_step_skips_earlier_steps`, `:1520` `resume_refuses_when_config_hash_mismatches` (drift protection), `:910` `legacy_add_feature_manifest_still_resumes` (back-compat), plus pure `resume_step_index_*` tests in `manifest.rs:58` covering retry-vs-skip-vs-empty semantics.
+
+### IMPROVEMENTS (priority order)
+
+1. **HIGH — Assay's actual async orchestration has zero direct tests.** Every test in `crates/derrick-assay/src/lib.rs` is `#[test]` on pure helpers (`parse_verdict`, `reconcile_verdicts:908`, `same_family_warning:807`) — there is no `#[tokio::test]` anywhere in the file. `execute_assay_core:99`, `run_reviewer_rounds:366`, `replan_from_objections:865`, and `detect_codex_fallback:850` — the multi-round debate loop, the load-bearing "assay" path — are exercised only indirectly by one E2E smoke test (`cli.rs:811`) whose mock `claude` binary accepts on the first round. A reject→replan→re-review cycle, a split-verdict-under-real-dispatch case, or a broken codex-fallback wire would not be caught. Needs a mock multi-reviewer `HostRegistry` returning REJECT-then-ACCEPT, exercised directly against `run_reviewer_rounds`.
+
+2. **HIGH (flakiness risk) — an ungated global env mutation breaks the guard-mutex pattern used everywhere else.** `crates/derrick-claude/src/dispatcher.rs:744-780` (`auto_dispatch_with_missing_binary_releases_hand`) sets `PATH=""` process-wide, guarded only by a comment ("tokio::test uses a current-thread runtime... fine") — no `Mutex&lt;()&gt;`. `cargo test` runs `#[tokio::test]` fns on separate OS threads concurrently by default, so this races against any other test in the same binary that shells out or reads `PATH` during that window. Every analogous case elsewhere (`derrick-tools/tests/hosts.rs:16`, `derrick-stack/tests/fake_gh.rs:106`, `derrick-cli/src/commands/stack.rs:680`) has a named lock; this one doesn't.
+
+3. **MEDIUM — CI never stress-runs for parallelism**, contradicting the stated "run 3× before declaring green" agreement. `.github/workflows/ci.yml` `test` job runs `cargo test --workspace --all-features --no-fail-fast` exactly once per OS with default settings — no repeat pass, no `--test-threads` variation. The race in item 2 (and any future one like it) won't reliably surface locally or in CI before landing on `main`.
+
+4. **MEDIUM — the 80%-floor coverage exclusion list masks real behavioral gaps, not just untestable surfaces.** `.github/workflows/ci.yml`'s `EXCLUDE` regex drops `commands/{doctor,ticket,foreman,stack}.rs` and `derrick-observe/src/stack.rs` with the comment "shells out to git/gh (no tests)". Unlike the TUI/live-terminal exclusions (genuinely untestable headlessly), gh/git-shelling code *is* testable the way `derrick-stack/tests/fake_gh.rs` and `derrick-tools/tests/hosts.rs` already prove (fake-binary-on-PATH pattern). `doctor.rs` and `ticket.rs` in particular sit on the observability/decision path a human reads before acting — worth bringing into the same fake-CLI pattern rather than permanently excluding.
+
+5. **LOW (hygiene) — stale exclusion-comment risk.** The CI comment claims `derrick-caveman/src ... 0 tests currently`, but `crates/derrick-caveman/tests/caveman.rs` (8 tests) and `savings_targets.rs` (2 tests) already call `compress()` directly and would show up in coverage if un-excluded. Worth re-running coverage without that exclusion and pruning the list — a stale "no tests" comment sitting next to a genuinely untested path (item 1) makes the exclusion list less trustworthy as a signal.
+
+**Files referenced:** `/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/foreman/tests.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/tests.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-assay/src/lib.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-claude/src/dispatcher.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-cli/tests/cli.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-cli/tests/ticket_foreman.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-flow/src/lib.rs`, `/Users/lgulliver/repos/derrick/crates/derrick-flow/src/manifest.rs`, `/Users/lgulliver/repos/derrick/.github/workflows/ci.yml`, `/Users/lgulliver/repos/derrick/crates/derrick-scrub/tests/corpus/`, `/Users/lgulliver/repos/derrick/crates/derrick-caveman/tests/`.</result>
+<usage><subagent_tokens>91625</subagent_tokens><tool_uses>35</tool_uses><duration_ms>221203</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a151b5d23b4ab1ce7</task-id>
+<tool-use-id>toolu_01NrYv6dNukss2WvixT2ukRR</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a151b5d23b4ab1ce7.output</output-file>
+<status>completed</status>
+<summary>Agent "Assess pipeline flow engine" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Assessment complete. Findings below, evidence-backed with file:line.
+
+---
+
+# derrick-flow + derrick-adopt + derrick-config — Assessment
+
+## Strengths
+
+**S1. Crash-safe manifest writes → reliable resume.** `write_manifest` stages to a same-dir temp file, `write_all` + `flush` + `sync_all`, then atomic `rename`, removing the temp on any error (`derrick-flow/src/manifest.rs:206-261`). The manifest is rewritten between every step (`runner.rs:295,417,946`), so a mid-run crash never poisons resume with truncated JSON.
+
+**S2. Hardened resume/idempotency spine.** `validate_run_id` is a universal chokepoint against path traversal/separators, applied to every run fresh or resumed before any FS path is built (`runner.rs:46-72,218`). Resume refuses if `config_hash` drifted (`runner.rs:171-176`), and `resume_step_index` correctly retries a Failed/Halted last step vs advancing past a Success/Skipped one (`manifest.rs:58-67`). Legacy `add-feature` pipeline_id is dual-accepted (`runner.rs:1085-1092`).
+
+**S3. Ticket-collision-proof re-runs.** `prompt_key` (normalised SHA256 prefix, `manifest.rs:41-50`) drives auto-resume matching in `drill.rs:119-189` so re-invoking the same feature resumes instead of colliding ticket IDs. The bridge itself is idempotent/auto-remediating: terminal tickets deleted+recreated, active ones skipped-with-warning, existing batch reused (`steps.rs:533-632`).
+
+**S4. Adopt is genuinely brownfield-safe.** Pure propose vs gated apply: `apply` refuses if any blocker exists, stages everything under `.derrick/.adopt-stage-&lt;uuid&gt;/`, validates by loading the staged yaml, then promotes via rename (`adopt/src/lib.rs:292-357`). Existing `derrick.yaml`/colliding commands/constitution docs are blockers unless `--force` (`254-261`); hook merges into `.claude/settings.json` are additive and idempotent, refuse on corrupt/wrong-typed files, and even under `--force` prepend rather than delete the user's entry (`1284-1300,1334-1372`).
+
+**S5. Config rejects typos at parse time + best-in-class messages.** `deny_unknown_fields` on nearly every layer struct plus closed enums for `Runner`/`Host`/`OnReject`/`OnFailure` (`config/src/lib.rs:1743-1796,3563`) make typo'd keys/values fail loudly. Layered merge is clean with null-as-omitted semantics (`2274-2302,3735-3739`). The good errors name the field path, list valid values, and cite the DESIGN decision + fix (`241-244,2072-2076,2146-2154`).
+
+## Improvements (prioritised by impact)
+
+**I1 [High] — Failure is a dead/dual code path that leaves the front-end dangling.** `StepExecution` has `success`/`skipped`/`halted` constructors but no `failed` (`derrick-assay/src/types.rs:29-58`); every real failure returns `Err(RunError::StepFailed)` (`steps.rs:154-188`). Because `execute_step` is called with `?` (`runner.rs:351`, parallel `914`), on failure the code returns *before* `reporter.step_finished` (`runner.rs:352`) and never reaches `reporter.pipeline_finished` (`971`) — a live spinner is orphaned and the post-loop worktree-preserve/lesson paths are skipped. Meanwhile the `Ok(StepStatus::Failed)` arms in the state machine (`runner.rs:761-764,924-937`) are effectively unreachable. Fix: emit a terminal reporter callback on the error path (or route failures as `Ok(Failed)` uniformly).
+
+**I2 [High] — Pipeline structural validation is thin and split across two crates.** In `derrick-config`, `validate_pipeline` (`lib.rs:1994-2040`) never validates `parallel_group` (free-form `Option&lt;String&gt;`, `1657/1737`), doesn't require `command` for `runner: bash`, and `validate_parallelism` range-checks `batch_max`/`step_max` but leaves `assay_max` unbounded (`2089-2097`). Duplicate-`id`, `on_failure`/`poll_interval` rejection, and template validation live instead in `Runner::validate_config` (`derrick-flow/src/runner.rs:1097-1144`), so a config-only path (e.g. `derrick config validate`) misses them. Consolidate pipeline validation into the config crate.
+
+**I3 [Med] — Validation errors violate the "point at the line, suggest the fix" agreement.** `ConfigError::Validation` is a bare `String` with no file/line, unlike `Syntax` which carries both (`config/src/lib.rs:429-430` vs `418-426`) — in the 3-layer merge the user can't tell which file broke. Worse, model errors emit the literal placeholder `models.*` instead of the offending alias (`2826,2846`) even though the finalize loop holds the key (`2341-2343`).
+
+**I4 [Med] — ~400 lines of terminal UI embedded in the orchestrator.** `run_pipeline_from` inlines `eprintln!`/`stdin` gates for specify/plan/tasks/assay/foreman (`runner.rs:361-786`). This couples presentation to the state machine, is untestable, and is silently bypassed on the I1 failure path. The `ProgressReporter` abstraction already exists to own this — move gates behind it or into a dedicated module.
+
+**I5 [Med] — Adopt merges a detect-time snapshot (TOCTOU).** The adopt path merges hooks/`.mcp.json` against content captured at detect time (`adopt/src/lib.rs:1274-1283`), whereas the greenfield twin re-reads at write time (`1523`). Any external edit to `settings.json`/`.mcp.json` between detect and apply is silently lost. Add a fresh re-read or content-hash check before promotion. Related: stale `.adopt-stage-*` dirs aren't cleaned on partial failure (TODO at `304`).
+
+**Minor.** `resume()` hardcodes `no_github_issues: false` and `FlagsManifest` never persists it (`runner.rs:181-188`, `manifest.rs:99-104`), so a resumed run can silently change that flag (note: `--profile`+resume is correctly *rejected*, `cli/.../run.rs:45-52`). Parallel-group steps each get a cloned `state` whose `feature_dir`/artifact mutations are discarded — `manifest.feature_dir` after the group reads the original untouched `state` (`runner.rs:857,915`); harmless for today's bash-only groups but a latent footgun.
+
+### Files reviewed
+- `/Users/lgulliver/repos/derrick/crates/derrick-flow/src/runner.rs`, `steps.rs`, `manifest.rs`, `lib.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-cli/src/commands/drill.rs`, `run.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-adopt/src/lib.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-config/src/lib.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-assay/src/types.rs`</result>
+<usage><subagent_tokens>125037</subagent_tokens><tool_uses>17</tool_uses><duration_ms>253502</duration_ms></usage>
+</task-notification>
+
+---
+
+fix issues found
+
+---
+
+<task-notification>
+<task-id>adc0e386a6ad92716</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/adc0e386a6ad92716.output</output-file>
+<status>completed</status>
+<summary>Agent "Fix foreman dispatch + worktree prune" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All three new tests pass, clippy and build are clean. Here is the summary.
+
+## Summary
+
+Two correctness fixes in `derrick-substrate-native`. No trait-signature changes were needed (both fixes reuse existing `Substrate` reads: `get_ticket`, `list_hands`). No other crates touched.
+
+### Files changed
+
+`/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/foreman.rs`
+- **Imports**: added `Hand`, `TicketState` from `derrick_substrate`; added `WorktreeRecord` from `crate`.
+- **FIX 1 (dispatch backstop)** — `dispatch_ready` Phase 3, `Ok(_)` arm no longer counts a dispatch as claimed on the Result variant alone. It now re-reads the ticket at the substrate boundary via new helper `ticket_left_ready`. If the ticket is still `Ready`, the dispatcher lied (returned `Ok` without `assign_to_hand`): the foreman logs a `warn!`, records a `Note` event to surface it, and does **not** push it to `report.dispatched`. A vanished ticket counts as "left Ready" (nothing to re-dispatch). This moves the no-double-dispatch guarantee off dispatcher convention and onto an observed state transition.
+- **FIX 2 (worktree TTL prune)** — `cleanup_pass` step 1a now fetches hands once and, for each stale worktree, calls new method `worktree_still_live` before pruning. A `ticket:`-keyed row is preserved iff its owning ticket is non-terminal AND its owning hand is alive (via new free fn `hand_is_live`, which is the exact inverse of the step-1c abandonment predicate — a dead pid is authoritative-dead, otherwise live-pid-or-fresh-heartbeat). Run-keyed rows, orphaned/unowned rows, terminal tickets, and dead/absent hands all fall through to the existing prune path, so the prior behaviour (including the existing "ticket gone → prune" test) is unchanged.
+
+`/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/foreman/tests.rs`
+- `dispatch_backstop_rejects_ok_without_assign` — `MisbehavingDispatcher` returns `Ok` without assigning; asserts `dispatched` empty, ticket stays `Ready`/unowned, no worktree row created, a `Note` is surfaced, and a second tick still refuses to count it (no duplicate assignment).
+- `cleanup_preserves_live_hand_worktree_past_ttl` — non-terminal ticket + fresh-heartbeat hand, worktree backdated 48h: **not** pruned.
+- `cleanup_prunes_dead_hand_worktree_past_ttl` — same but hand heartbeat backdated past `hand_ttl`: **pruned**.
+
+### Test results
+`cargo test -p derrick-substrate-native`: **137 passed** (was 134 + 3 new). Build and `cargo clippy` clean.
+
+Note: one Edit collision mid-work briefly mangled the `dispatch_ready` region; I caught it on the first `cargo build` and repaired it before running tests — the committed state is clean.</result>
+<usage><subagent_tokens>98064</subagent_tokens><tool_uses>49</tool_uses><duration_ms>468385</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a74dab073b8a22104</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a74dab073b8a22104.output</output-file>
+<status>completed</status>
+<summary>Agent "Fix model finish reasons + copilot headless" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All green again — 155 tests pass across the three crates (the `derrick-config` sibling edit had settled by this run; the earlier clippy failures were that concurrent refactor mid-write, none in my files).
+
+## Summary
+
+All three fixes implemented in my scope crates. `cargo test -p derrick-models -p derrick-tools -p derrick-copilot`: **155 passed, 0 failed** (17+36+30+26+46 across suites).
+
+### FIX 1 — truncation/error no longer reads as clean Stop
+
+**(a)** `/Users/lgulliver/repos/derrick/crates/derrick-models/src/lib.rs` — `Model::complete` default now initialises `finish_reason = FinishReason::Error` and only overwrites it when a terminal `End` event actually arrives. A stream that ends without `End` (mid-generation death) now surfaces `Error` instead of `Stop` with zeroed tokens.
+
+**(b)** `/Users/lgulliver/repos/derrick/crates/derrick-models/src/providers/api.rs` — added `StreamPiece::Finish(FinishReason)` and a `StreamParser.finish: Option&lt;FinishReason&gt;` field. Each dialect decoder now reads its stop field: `interpret_openai` reads `choices[0].finish_reason` (via `map_openai_finish`: length→Length, stop/tool_calls→Stop, content_filter/other→Error); `interpret_anthropic` reads `delta.stop_reason` on `message_delta` (`map_anthropic_finish`: max_tokens→Length, end_turn/stop_sequence/tool_use/pause_turn→Stop, else→Error); `interpret_ollama` reads `done_reason` (`map_ollama_finish`: length→Length, else→Stop). The EOF path now emits `state.parser.finish_reason()` instead of the hardcoded `FinishReason::Stop`; a truncated stream that never reported a stop field defaults to `Error`.
+
+**(c)** `/Users/lgulliver/repos/derrick/crates/derrick-models/src/providers/shell.rs` — `stream_output` now returns early (`if saw_end { return; }`) before the post-loop exit-code check. Once a valid `&lt;&lt;DERRICK-META&gt;&gt;` line has produced the terminal `End`, a nonzero child exit can no longer push a `Provider` error that `consume_stream` would surface as `Err`, discarding the good response. The no-meta path still surfaces the nonzero exit.
+
+### FIX 2 — copilot adapter honours `headless`
+
+`/Users/lgulliver/repos/derrick/crates/derrick-tools/src/hosts/copilot.rs` — extracted a testable `build_args(&amp;HostRequest)`. It now emits `--allow-all-tools` when `request.headless || request.copilot_tools == AllowAll`. Copilot has no separate no-interactive flag; `--allow-all-tools` is what suppresses its approval prompts, so headless runs (including the generic `HostCliHandDispatcher` that sets `headless=true` but not `copilot_tools`) no longer hang. The `||` guarantees a single flag when both are set, so the existing `flow/steps.rs` caller special-case keeps working. I did **not** need to touch any derrick-cli file.
+
+### FIX 3 — warn on misconfigured `auth_env`
+
+`/Users/lgulliver/repos/derrick/crates/derrick-models/src/providers/api.rs` — added `KeyResolution` enum and pure `classify_api_key` helper. `build()` now warns (via `tracing`, logging only the env-var name + provider, never the value) when `auth_env` is configured but the env var is missing or resolves to empty — instead of silently attaching no header and failing later as an opaque 401.
+
+### Tests added (10)
+- lib.rs: `complete_reports_error_when_stream_ends_without_end_event`, `complete_propagates_terminal_end_reason` (scripted mock model).
+- api.rs: `openai_length_stop_maps_to_length`, `openai_clean_stop_maps_to_stop`, `openai_content_filter_maps_to_error`, `truncated_stream_with_no_terminal_reason_is_error`, `anthropic_max_tokens_maps_to_length`, `anthropic_end_turn_maps_to_stop`, `ollama_done_reason_length_maps_to_length`, `ollama_done_without_reason_maps_to_stop`, `classify_api_key_variants`.
+- shell.rs (gated `not(windows)`): `valid_meta_then_nonzero_exit_preserves_response`, `nonzero_exit_without_meta_is_an_error`.
+- copilot.rs: `headless_produces_non_interactive_invocation` (plus interactive-default, explicit-allow-all, and single-flag dedup).
+
+Note: a whole-workspace `cargo clippy --all-targets` currently fails inside `derrick-config` (a sibling agent is mid-refactor of `ConfigError::Validation` tuple→struct variant). That is external to my four files and unrelated to these fixes.</result>
+<usage><subagent_tokens>104439</subagent_tokens><tool_uses>53</tool_uses><duration_ms>542980</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ab725c9921310a1b0</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/ab725c9921310a1b0.output</output-file>
+<status>completed</status>
+<summary>Agent "Fix gain accounting + caveman ultra" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All three fixes are implemented, tested, and passing. Note: the repo has substantial unrelated in-flight changes in other crates (derrick-flow, derrick-assay, derrick-models, derrick-config, derrick-claude, derrick-substrate-native, derrick-tools) that I did not touch and did not cause — they were already present when I started and appear to be concurrent work by other agents/sessions in this shared checkout. I left them alone per the "do not touch other crates" instruction.
+
+## Summary
+
+**FIX 1 (bytes_saved / roughneck_tokens_saved dropped) — `crates/derrick-cli/src/commands/gain.rs`**
+- `StepRow` now carries `bytes_raw`/`bytes_saved`/`roughneck_tokens_saved`; `step_rows()` parses them from the manifest JSON (previously silently discarded).
+- New `run_savings()` sums those fields across a run's steps; new `PipelineSavings`/`aggregate_pipeline_savings()` walk every `&lt;state_dir&gt;/runs/*/manifest.json` for the repo and aggregate totals for the **top-level** (non-`--run`) view.
+- `print_run_human`/`print_run_json` (the `--run &lt;id&gt;` view) now print/emit real `bytes_saved` and `roughneck_tokens_saved` numbers instead of nothing.
+- The default `derrick gain` view's previously-static `scrub: active` / `caveman: active` lines now grow a "Pipeline savings (N runs)" section with real numbers when manifests exist; JSON gets `scrub.bytes_saved`, `roughneck.tokens_saved_estimate`, `pipeline_runs_observed` (all `null`, not `0`, when no manifests are found — a measured zero and "no data" are kept distinct).
+- Tests added: `step_rows_extracts_compression_fields`, `step_rows_defaults_compression_fields_to_zero_when_absent`, `run_savings_sums_across_steps`, `run_json_shape_surfaces_bytes_saved_and_roughneck_estimate`, `pipeline_savings_none_when_no_run_manifests_found`, `pipeline_savings_aggregates_across_multiple_run_manifests` (uses real tempfile-backed manifests, per house rules).
+
+**FIX 2 (ultra causal-arrow corrupts intensifier "so") — `crates/derrick-caveman/src/lib.rs`**
+- **Path taken: the skill does NOT do this substitution.** I read the installed skill at `/Users/lgulliver/.claude/plugins/marketplaces/caveman/skills/caveman/SKILL.md` — its Ultra row explicitly states: *"NO arrows (X → Y) — measured zero token saving under tokenizer, cost decode clarity."* So per D7, I fixed the regex rather than preserving the divergence.
+- `causal_regex()` alternation changed from `because|therefore|so` to `because|therefore` — dropped the `so` alternative entirely (the conservative option offered), since `so` is overwhelmingly an intensifier ("so good", "so far", "not so much") and can't be reliably disambiguated from clause-initial causal `so` with a regex.
+- **Broader finding worth flagging separately**: the skill doesn't do arrow substitution for `because`/`therefore` either — the whole "convert cause→effect conjunctions to `-&gt;`" mechanism in ultra is itself a pre-existing divergence from the skill (which says to *strip* the conjunction, not replace it with an arrow). That's bigger than this ticket's ask and already has corpus tests locked to the arrow behavior (`abbreviation_and_arrows.*`, `one_very_long_paragraph.*`), so I left it untouched and am reporting it here as a candidate `design-question`/decision-log item rather than fixing it unbidden.
+- Added corpus cases `non_causal_so_intensifier`, `non_causal_so_far`, `non_causal_so_much` (all pass through unchanged) plus 4 unit tests in `tests/caveman.rs`, including a regression guard that `because`/`therefore` → arrow conversion still works.
+
+**FIX 3 (roughneck tokens_saved needs "(est.)" label) — `crates/derrick-cli/src/commands/gain.rs` + `crates/derrick-roughneck/src/lib.rs`**
+- No formula change. `gain.rs` labels every roughneck-savings line/field as "(est.)" or `_estimate` (human: `"roughneck tokens saved (est.)"` with a `&lt;- est. (compliance-gated rate formula, not measured)` annotation; JSON: `roughneck_tokens_saved_estimate`), while the scrub `bytes_saved` figure (genuinely measured) carries no such caveat — mirrors the existing `survey_tokens_saved` labeling convention already in this file.
+- `derrick-roughneck`: added `pub const TOKENS_SAVED_LABEL: &amp;str = "roughneck tokens saved (est.)"` plus strengthened doc comments on `RoughneckSavings::tokens_saved` and the crate-level docs, so any future consumer has a single documented, "est."-bearing label to reuse. Added `tokens_saved_label_marks_the_figure_as_an_estimate` test.
+
+**Test results** — `cargo test -p derrick-cli -p derrick-caveman -p derrick-roughneck`: all green (128 + 28 + 8 in derrick-cli, 12 + 2 in derrick-caveman + 1 ignored manual check, 21 in derrick-roughneck, 1 doctest). `cargo clippy --tests` and `cargo fmt --check` clean on all three crates.
+
+Files touched (all absolute paths):
+- `/Users/lgulliver/repos/derrick/crates/derrick-cli/src/commands/gain.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-caveman/src/lib.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-caveman/tests/caveman.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-caveman/tests/corpus/ultra/non_causal_so_intensifier.{in,out}`
+- `/Users/lgulliver/repos/derrick/crates/derrick-caveman/tests/corpus/ultra/non_causal_so_far.{in,out}`
+- `/Users/lgulliver/repos/derrick/crates/derrick-caveman/tests/corpus/ultra/non_causal_so_much.{in,out}`
+- `/Users/lgulliver/repos/derrick/crates/derrick-roughneck/src/lib.rs`
+
+No secrets, tokens, or customer/production data were touched or logged in this change. Nothing here has been committed — let me know if you'd like me to stage/commit just these files (explicitly excluding the unrelated in-flight changes in other crates).</result>
+<usage><subagent_tokens>155683</subagent_tokens><tool_uses>66</tool_uses><duration_ms>670178</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a0c1be4c34a8202c1</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a0c1be4c34a8202c1.output</output-file>
+<status>completed</status>
+<summary>Agent "Fix flow failure path + validation" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Done. All three fixes implemented, tests added, `cargo test -p derrick-flow -p derrick-config` green (174 passed), workspace builds, clippy clean.
+
+## Report
+
+### FIX 1 [HIGH] — failure now one path, not dead/dual
+Root cause confirmed: step failures returned `Err(RunError::StepFailed)` from `execute_step`, so the caller's `?` (runner.rs seq + parallel) bailed out of `run` *before* `step_finished`, the `Failed` match arms, and the terminal block (`pipeline_finished` + worktree-preserve). Those `Failed` arms were unreachable.
+
+Fix, all in code I own:
+- `crates/derrick-assay/src/types.rs` — added `StepExecution::failed(message)` constructor.
+- `crates/derrick-flow/src/steps.rs` `execute_step` — split the `Err` arm. `RunError::StepFailed` now becomes `Ok(StepRecord { status: Failed })` (logs reason + records the "failed" event, does **not** push to manifest — caller owns that, so no double-count). Only genuinely unrecoverable errors (Config/Io/Substrate/Host/Model) still bubble `Err`, and those finalize the manifest themselves before propagating. Also made the halted-log label status-aware (`step failed:` vs `step halted:`).
+- `execute_bash_step` — non-zero exit now returns `Ok(StepExecution::failed(...).with_compression(...))` (exercises the new constructor, preserves compression stats on failure).
+- Net effect: the seq `Failed` arm (routes to `outcome_status = Failed; break`) and the parallel `failed = true` arm are now live; `step_finished` + `pipeline_finished` always fire; on failure the worktree-preserve branch runs. Lesson recording stays Success-only (unchanged D9 semantics) — noted, not altered.
+
+Test: `failing_step_fires_terminal_callbacks_and_finalizes_manifest` (mock reporter asserts `pipeline_finished` fires with `Failed`, `step_finished` fired for the failing step, next step did not run, manifest finalized once). Two pre-existing tests (`bash_runner_nonzero_exit_fails_step`, `assay_unparsable_verdict_surfaces_step_failed`) encoded the old `Err` path — rewritten to assert `Ok(Failed)` + step log carries the reason. `derrick-assay/src/lib.rs` left untouched; its `StepFailed` for verdict-parse now flows through the new routing.
+
+### FIX 2 [MED] — pipeline validation consolidated into derrick-config
+`crates/derrick-config/src/lib.rs`:
+- `validate_pipeline` now: rejects duplicate step ids (moved in from the runner); requires `command` for `runner: bash`; validates `parallel_group` contiguity (a group name that reappears after its block closes errors, since the runner only groups adjacent steps).
+- `validate_parallelism` now bounds `assay_max` to `1..=64` (matches `batch_max`/`step_max`).
+- `crates/derrick-flow/src/runner.rs` `validate_config` — dropped its now-redundant duplicate-id check (and the unused `BTreeSet` import). Kept the flow-specific `on_failure`/`poll_interval`/runner-kind/template-with-`feature_available` checks there.
+
+Tests: `duplicate_step_id_is_rejected`, `bash_runner_without_command_is_rejected`, `noncontiguous_parallel_group_is_rejected`, `contiguous_parallel_group_is_accepted`, `assay_max_out_of_range_is_rejected`.
+
+### FIX 3 [MED] — Validation carries file/path; model errors name the alias
+`crates/derrick-config/src/lib.rs`:
+- `ConfigError::Validation` changed from tuple `(String)` to `{ message, path: Option&lt;PathBuf&gt; }`; Display prints `Validation failed in &lt;path&gt;: &lt;message&gt;` when path is known. No external crate destructures this variant (only `Io`), so blast radius contained.
+- `validation()`/`required()` set `path: None`; two direct construction sites (`with_profile`, budgets) updated. Added `attach_config_path` (loader stamps the source file onto bare validation errors) wired into `load_from_path` and `load_layered` (repo config first, else user config). Added `substitute_model_alias`, applied in the models finalize loop so `ModelDefLayer::finalize`'s `models.*` placeholders (`models.*.model`, `models.*: requires runtime or provider`) become `models.&lt;alias&gt;...`.
+- Test helpers `assert_validation` + two spec-provider tests updated to the struct variant.
+
+Tests: `model_error_names_offending_alias_not_placeholder`, `validation_error_carries_source_file_path`.
+
+### Still open (deferred, not touched)
+Adopt detect-time TOCTOU: the brownfield adopt pass snapshots detected files, then merges into the proposed `derrick.yaml` without re-checking that the on-disk files haven't changed between detect and merge. Race window remains — a file edited/created after the snapshot is either missed or merged stale. Needs a detect→merge revalidation (or single-snapshot-then-lock) pass. Left for a follow-up in `derrick-adopt`.
+
+Relevant files:
+- `/Users/lgulliver/repos/derrick/crates/derrick-assay/src/types.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-flow/src/steps.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-flow/src/runner.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-flow/src/lib.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-config/src/lib.rs`</result>
+<usage><subagent_tokens>140073</subagent_tokens><tool_uses>73</tool_uses><duration_ms>773433</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a6a788c708d63a79e</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a6a788c708d63a79e.output</output-file>
+<status>completed</status>
+<summary>Agent "Add assay tests + fix flaky test" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>## Summary
+
+Note on environment: other agents were concurrently editing `derrick-config`, `derrick-models`, `derrick-flow`, `derrick-substrate-native`, and `derrick-assay/src/types.rs` in the shared working tree, and `derrick-config` was mid-refactor (didn't compile) for part of this session. To verify my changes without being blocked by their WIP, I created a throwaway `git worktree --detach` at HEAD (840184e), copied only my edited files into it, ran `cargo test`/`clippy`/`fmt` there, then copied verified results back and removed the worktree. All findings below are from real, isolated builds — not guesses.
+
+**FIX 1 — `derrick-assay/src/lib.rs`** (append-only, no production code touched): added 7 `#[tokio::test]`s to the existing `mod tests` block, driving the real async round loop with no network/host CLI:
+- `execute_assay_single_reviewer_reject_then_accept_replans_and_succeeds` — drives `execute_assay` → `run_reviewer_rounds` → reject round 1 (with `## Suggested revisions`) → `replan_from_objections` (mocked `claude` `HostAdapter`) → accept round 2. Asserts the replanned delta lands in `plan.md`, the debate transcript has both rounds + a Rebuttal entry.
+- `execute_assay_multi_reviewer_split_verdict_on_split_reject_halts` — 2 reviewers (accept/reject) via `provider: shell` mock scripts, `on_split: reject` → halts. Exercises the semaphore-gated concurrent `tokio::spawn` fan-out in `execute_assay_core` that nothing previously drove as async.
+- `execute_assay_multi_reviewer_majority_accepts_despite_one_reject` — 3 reviewers (2 accept, 1 reject), `on_split: majority` → succeeds.
+- `run_reviewer_rounds_codex_fallback_uses_claude_host_and_propagates_tokens` — role bound to a model named `codex`, mocked `claude` `HostAdapter` — verifies `detect_codex_fallback` routes through the host adapter and token counts propagate.
+- 3 direct unit tests of `detect_codex_fallback` (true/false/unbound-role fail-closed).
+
+Reviewer "models" use the real `provider: shell` adapter pointed at tiny mock shell scripts — the same pattern `derrick-flow`'s own `/drill` E2E test uses — so nothing hits the network. Added `async-trait = { workspace = true }` to `derrick-assay`'s `[dev-dependencies]` to implement the mock `HostAdapter`s.
+
+**FIX 2 — `derrick-claude/src/dispatcher.rs`**: added `static PATH_MUTATION_LOCK: tokio::sync::Mutex&lt;()&gt;` (matching `derrick-tools/tests/hosts.rs`'s `PROCESS_LOCK` pattern) and acquired it at the top of `auto_dispatch_with_missing_binary_releases_hand`, held for the whole async test body. Also corrected the now-stale "SAFETY: tests run single-threaded" comment, which was the actual bug the mutex fixes.
+
+**FIX 3 — `.github/workflows/ci.yml`**: added a second `cargo test --workspace --all-features --no-fail-fast -- --test-threads=16` step, gated to the `ubuntu-latest` matrix leg only (`if: matrix.os == 'ubuntu-latest'`) to keep it cheap — one extra full pass rather than doubling both OS legs.
+
+**Test results** (isolated worktree, verified 3-5x each per house rule 6):
+- `cargo test -p derrick-assay --lib`: 57 passed, stable across 5 consecutive runs.
+- `cargo test -p derrick-claude --lib dispatcher::`: 6 passed, stable across 3 runs.
+- `cargo test -p derrick-claude -p derrick-assay -p derrick-flow`: 173 passed (checks `derrick-flow`, which depends on `derrick-assay`, still builds/passes).
+- `cargo clippy -p derrick-claude -p derrick-assay -p derrick-flow --all-targets --all-features -- -D warnings`: clean.
+- `cargo fmt -p derrick-assay`: applied, clean.
+- CI YAML: parsed successfully (validated via Ruby's YAML parser, since PyYAML/actionlint weren't installed).
+
+Files touched (all absolute paths):
+- `/Users/lgulliver/repos/derrick/crates/derrick-assay/src/lib.rs`
+- `/Users/lgulliver/repos/derrick/crates/derrick-assay/Cargo.toml`
+- `/Users/lgulliver/repos/derrick/crates/derrick-claude/src/dispatcher.rs`
+- `/Users/lgulliver/repos/derrick/.github/workflows/ci.yml`
+
+No production (non-test) code was modified — only test modules, a test-only dev-dependency, and the CI workflow.</result>
+<usage><subagent_tokens>204983</subagent_tokens><tool_uses>81</tool_uses><duration_ms>1138703</duration_ms></usage>
+</task-notification>
