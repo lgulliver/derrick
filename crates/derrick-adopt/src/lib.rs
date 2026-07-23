@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use derrick_config::{Config, InitTemplateVars, SubstrateMode, render_init_template};
@@ -60,6 +60,14 @@ const CODEX_SETTINGS_TEMPLATE: &str = include_str!(concat!(
 /// worktrees, queues, logs, or local state. Shared by `derrick init` and the
 /// adoption pass to keep the two codegen sites identical.
 pub const DERRICK_GITIGNORE: &str = "runs/\nstate.json\nforeman.log\nderrick.db*\nindex.db*\nworktrees/\ncopilot-queue/\ncopilot-worktrees/\n.adopt-stage-*/\n";
+
+/// Minimum age a `.adopt-stage-*` directory must reach before pruning will
+/// remove it. A concurrent `apply` creates its stage dir seconds before use,
+/// so anything younger than this could belong to a live run and must be left
+/// alone; anything older is debris from a crashed or interrupted run and is
+/// safe to reclaim. One hour is far longer than any real apply runs, yet short
+/// enough that leftovers are cleaned up on the next apply.
+const STAGE_DIR_PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 
 const DERRICK_BLOCK_START: &str = "<!-- derrick:start -->";
 const DERRICK_BLOCK_END: &str = "<!-- derrick:end -->";
@@ -433,10 +441,19 @@ impl Adopter {
     /// Best-effort removal of leftover `.derrick/.adopt-stage-*` directories from
     /// prior runs. Failures are ignored so a stray locked directory never blocks
     /// an otherwise-valid apply.
+    ///
+    /// Only directories older than [`STAGE_DIR_PRUNE_GRACE`] are removed. A
+    /// second `apply` running concurrently against the same repo will have just
+    /// created its own stage dir; pruning that mid-flight would corrupt the
+    /// live run. The age gate leaves any freshly-created dir untouched while
+    /// still reclaiming genuinely stale debris from crashed runs. The current
+    /// apply creates its own stage dir *after* this runs, so it is never at
+    /// risk from itself.
     fn prune_stale_stage_dirs(&self, state_dir: &Path) {
         let Ok(entries) = fs::read_dir(state_dir) else {
             return;
         };
+        let now = SystemTime::now();
         for entry in entries.flatten() {
             // Use the entry's own metadata (does not traverse symlinks) so a
             // symlink is never treated as, traversed into, or removed as a real
@@ -453,7 +470,19 @@ impl Adopter {
             // prefix is pure ASCII, so a lossy conversion is byte-accurate over
             // the matched region.
             let name = entry.file_name();
-            if name.to_string_lossy().starts_with(".adopt-stage-") {
+            if !name.to_string_lossy().starts_with(".adopt-stage-") {
+                continue;
+            }
+            // Only reclaim dirs old enough that no live apply could still own
+            // them. A missing/unreadable mtime, or a future mtime (clock skew),
+            // yields no measurable age and is treated conservatively as
+            // too-fresh-to-prune so a concurrent run is never nuked.
+            let old_enough = metadata
+                .modified()
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .is_some_and(|age| age >= STAGE_DIR_PRUNE_GRACE);
+            if old_enough {
                 let _ = fs::remove_dir_all(entry.path());
             }
         }
@@ -2135,6 +2164,14 @@ mod tests {
         fs::write(path, contents).unwrap_or_else(|error| panic!("write failed: {error}"));
     }
 
+    /// Backdates a path's mtime well past [`STAGE_DIR_PRUNE_GRACE`] so the prune
+    /// age gate treats it as stale debris rather than a live concurrent run.
+    fn age_past_prune_grace(path: &Path) {
+        let old = SystemTime::now() - STAGE_DIR_PRUNE_GRACE - Duration::from_secs(60);
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old))
+            .unwrap_or_else(|error| panic!("set mtime failed: {error}"));
+    }
+
     #[test]
     fn gitignore_covers_foreman_runtime_artifacts() {
         let entries: Vec<&str> = DERRICK_GITIGNORE.lines().collect();
@@ -2812,6 +2849,8 @@ mod tests {
         fs::create_dir_all(&stale).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
         fs::write(stale.join("leftover.txt"), "old")
             .unwrap_or_else(|error| panic!("write failed: {error}"));
+        // Age it past the grace window so the prune gate treats it as debris.
+        age_past_prune_grace(&stale);
 
         let adopter = Adopter::new(dir.path());
         let report = adopter
@@ -2831,6 +2870,38 @@ mod tests {
             "stale .adopt-stage-* dir should be pruned at apply start"
         );
         assert!(dir.path().join("derrick.yaml").is_file());
+    }
+
+    // COMMENT 1 (prune concurrency race): pruning must respect an age grace
+    // window. A freshly-created stage dir — as a concurrent `apply` would leave
+    // mid-flight — must survive; only a dir older than the grace threshold (a
+    // crashed run's leftover) may be removed.
+    #[test]
+    fn prune_stale_stage_dirs_respects_grace_window() {
+        let dir = git_repo();
+        let state_dir = dir.path().join(".derrick");
+        fs::create_dir_all(&state_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+
+        // A fresh dir standing in for a concurrent apply's in-progress stage.
+        let fresh = state_dir.join(".adopt-stage-fresh");
+        fs::create_dir_all(&fresh).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+
+        // An old leftover from a crashed run: backdate past the grace window.
+        let old = state_dir.join(".adopt-stage-old");
+        fs::create_dir_all(&old).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        age_past_prune_grace(&old);
+
+        let adopter = Adopter::new(dir.path());
+        adopter.prune_stale_stage_dirs(&state_dir);
+
+        assert!(
+            fresh.exists(),
+            "a freshly-created stage dir (possible concurrent apply) must NOT be pruned"
+        );
+        assert!(
+            !old.exists(),
+            "a stage dir older than the grace window must be pruned"
+        );
     }
 
     // COMMENT 1 (residual TOCTOU): drift that lands during the staging window —
@@ -2911,7 +2982,11 @@ mod tests {
     // COMMENT 2: a stale stage dir with a non-UTF8 name must still be pruned.
     // `OsStr::to_str()` would return `None` and skip it; matching on the lossy
     // (byte-accurate over the ASCII prefix) name prunes it.
-    #[cfg(unix)]
+    // Gated to non-macOS unix: APFS enforces UTF-8 filenames and rejects the
+    // non-UTF8 name outright, so the scenario cannot exist there. The skip is
+    // platform-deterministic, so it is a compile-time gate rather than a
+    // runtime check. Linux (ext4/tmpfs, where CI runs) exercises the real path.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[tokio::test]
     async fn apply_prunes_non_utf8_stale_stage_dir() {
         use std::os::unix::ffi::OsStrExt;
@@ -2923,15 +2998,11 @@ mod tests {
         let mut raw = b".adopt-stage-".to_vec();
         raw.extend_from_slice(&[0x66, 0x80, 0x81]);
         let stale = state_dir.join(OsStr::from_bytes(&raw));
-        // Some filesystems (APFS/macOS) enforce UTF-8 filenames and reject the
-        // create outright. The scenario cannot exist there, so skip rather than
-        // fail; on Linux (ext4/tmpfs, where CI runs) it exercises the real path.
-        if fs::create_dir_all(&stale).is_err() {
-            eprintln!("skipping: filesystem rejects non-UTF8 names");
-            return;
-        }
+        fs::create_dir_all(&stale).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
         fs::write(stale.join("leftover.txt"), "old")
             .unwrap_or_else(|error| panic!("write failed: {error}"));
+        // Age it past the grace window so the prune gate treats it as debris.
+        age_past_prune_grace(&stale);
 
         let adopter = Adopter::new(dir.path());
         let report = adopter
