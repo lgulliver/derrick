@@ -1,0 +1,448 @@
+I'll take your recommendations
+
+---
+
+<task-notification>
+<task-id>a2432c667fcbb03ae</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a2432c667fcbb03ae.output</output-file>
+<status>completed</status>
+<summary>Agent "Record decisions in DESIGN.md" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All four decisions and the open question are recorded in DESIGN.md. Summary:
+
+**D89 — Split `Substrate` into focused role traits** (§3.1 / §8.1 / §8.6 / D11). Splits the 47-method god-trait into `TicketStore`, `EventLog`, `HandRegistry`, `ForemanState`, `WorktreeReservations`; refines D11's scope-discipline principle; routed through rust-architect for shape.
+
+**D90 — Caveman ultra conforms to the skill, drops arrows** (§9.B.3 / D7). Strips `because`/`therefore` instead of converting to `-&gt;`, matching the installed SKILL.md; fixes the D7 violation; corpus tests to be updated.
+
+**D91 — Automated skill-parity harness enforcing D7** (§9.B.3 / D7 / D90). Real CI-wired harness diffing skill output vs. `compress()` over the corpus, replacing the 9-line ignored placeholder; depends on D90 landing first.
+
+**D92 — `batch_max` bounds active hands, not footprint** (§9.C). Documents (no behaviour change) that the cap counts only `InFlight` tickets, not `InReview`.
+
+**OQ6 — `derrick-adopt` detect→apply TOCTOU** (§5.6). Leaning: build a detect→merge revalidation pass that re-reads disk before promotion.
+
+Prose sections updated to match: the crate table (line ~133), §8.1 "The model", §8.6 "Extension point", §9.C.1 (new clarifying paragraph after the `batch_max` config block), and §5.6 (new "Known gap (OQ6)" note after the Detect/Classify/Propose steps).
+
+File: `/Users/lgulliver/repos/derrick/DESIGN.md`
+
+Two things worth flagging to the implementing specialists directly, since they sit right at this Design Keeper's scope boundary:
+
+- D89 is a cross-crate trait-signature change — per CLAUDE.md/AGENTS.md orchestration rules this should go through **rust-architect** for the technical shape before any code lands, not straight to an implementing agent.
+- D91 depends on D90 landing first — sequence the two accordingly (don't build the parity harness against the old arrow output).
+
+No existing D entry was edited — D7 and D11 are referenced, not altered, consistent with the immutability rule.</result>
+<usage><subagent_tokens>99140</subagent_tokens><tool_uses>26</tool_uses><duration_ms>215314</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>ac7e2d0f2922de667</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/ac7e2d0f2922de667.output</output-file>
+<status>completed</status>
+<summary>Agent "Caveman skill conform + parity harness" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>D90 and D91 are implemented, scoped entirely to `derrick-caveman` — no other crate touched (the `derrick-substrate*` diffs in `git status` are pre-existing, from the other in-progress agent, not from this work).
+
+## D90 — Ultra strips causal conjunctions, no arrow
+
+**Skill rule mirrored** (from `/Users/lgulliver/.claude/plugins/marketplaces/caveman/skills/caveman/SKILL.md`, Ultra row):
+&gt; "Strip conjunctions when cause-then-effect stay unambiguous. ... NO arrows (X → Y) — measured zero token saving under tokenizer, cost decode clarity."
+
+The skill's own Ultra worked example joins independent clauses with commas rather than inventing a connective ("Inline obj prop, new ref, re-render."), so `causal_regex`'s replacement in `/Users/lgulliver/repos/derrick/crates/derrick-caveman/src/lib.rs` changed from `" -&gt; "` to `", "` — the conjunction (`because`/`therefore`) is deleted and the clauses are comma-joined, never arrow-joined.
+
+Files changed:
+- `crates/derrick-caveman/src/lib.rs` — `substitute_phrases`, `causal_regex` doc comment, `Intensity::Ultra` doc comment.
+- `crates/derrick-caveman/tests/corpus/ultra/abbreviation_and_arrows.out` → `DB res changed, auth req failed.`
+- `crates/derrick-caveman/tests/corpus/ultra/one_very_long_paragraph.out` → `This req is small paragraph, res has enough words.`
+- New corpus pairs: `crates/derrick-caveman/tests/corpus/ultra/causal_because_no_arrow.{in,out}` and `causal_therefore_no_arrow.{in,out}`.
+- `crates/derrick-caveman/tests/caveman.rs` — replaced `ultra_still_converts_causal_because_and_therefore` (which asserted the arrow) with `ultra_strips_causal_because_without_arrow` / `ultra_strips_causal_therefore_without_arrow`, each with an explicit `!output.text.contains("-&gt;")` guard.
+
+## D91 — real skill-parity harness
+
+Replaced the 9-line `#[ignore]` placeholder at `crates/derrick-caveman/tests/skill_parity.rs` with three enforced tests:
+
+1. `vendored_corpus_matches_compress_output` — always-on, no external dependency: reruns `compress()` against the checked-in `tests/corpus/**` fixtures. This is the CI-enforced regression gate.
+2. `vendored_snapshot_still_bans_arrows` — asserts the vendored snapshot still contains the literal "NO arrows" and "Strip conjunctions when cause-then-effect stay unambiguous" wording, anchoring the D90 rule independent of whether the live skill is reachable.
+3. `installed_skill_matches_vendored_snapshot` — locates the real installed skill (`CAVEMAN_SKILL_PATH` env override, else `$HOME/.claude/plugins/marketplaces/caveman/skills/caveman/SKILL.md`); byte-diffs it against a checked-in vendored copy at `crates/derrick-caveman/tests/skill_fixtures/SKILL.snapshot.md` (verified identical via `sha256`); **skips with a clear `eprintln!` message and passes trivially** when the skill isn't found (the expected CI case), and fails loudly on divergence otherwise. Verified both branches manually (found path exercises the byte-compare; `CAVEMAN_SKILL_PATH=/nonexistent` exercises the skip message).
+
+Shared corpus-loading helpers were factored into `crates/derrick-caveman/tests/support/mod.rs` (used by both `caveman.rs` and `skill_parity.rs`, not a separate test binary).
+
+**CI wiring**: none needed. `.github/workflows/ci.yml`'s `test` job already runs `cargo test --workspace --all-features --no-fail-fast`, which auto-discovers every `tests/*.rs` binary; the old placeholder only appeared not to run because it was `#[ignore]`d. The new tests carry no `#[ignore]`, so they now execute in CI automatically — confirmed no `ci.yml` change was required.
+
+**Test results**: `cargo test -p derrick-caveman` — 18 passed, 0 ignored (13 + 2 + 3 across `caveman.rs`, `savings_targets.rs`, `skill_parity.rs`). `cargo clippy -p derrick-caveman --all-targets -- -D warnings` — clean. `cargo fmt -p derrick-caveman -- --check` — clean.
+
+Note out of scope, flagged not fixed: while auditing SKILL.md I noticed the Ultra row explicitly forbids `req/res/fn/impl/auth` as "invented abbreviations" ("NO prose abbreviations (cfg/impl/req/res/fn/auth)"), yet `rewrite_word` in `src/lib.rs` currently produces exactly those. D90 as recorded in DESIGN.md scopes only the arrow behavior, so I left this alone — worth a separate decision-log entry if the team wants it addressed.</result>
+<usage><subagent_tokens>129556</subagent_tokens><tool_uses>46</tool_uses><duration_ms>505376</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a4ab423d532824355</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a4ab423d532824355.output</output-file>
+<status>completed</status>
+<summary>Agent "Split Substrate into role traits (retry)" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Everything is in place and green. Here is the summary.
+
+## D89 — `Substrate` god-trait split (done)
+
+The 47-method `Substrate` trait is now five focused role traits plus a union supertrait with a blanket impl. Every existing `Arc&lt;dyn Substrate&gt;` / `S: Substrate` caller compiles unchanged; only concrete-`NativeSubstrate` callers needed a one-line import widening (the unavoidable Rust ISP tax — a trait object resolves supertrait methods through its vtable, but a concrete type needs the defining trait in scope).
+
+### Method → role-trait partition
+
+- **`TicketStore`** (29): `site`, `create_ticket`, `get_ticket`, `list_tickets`, `delete_ticket`, `set_ticket_state`, `assign_to_hand`, `release_from_hand`, `transition_to_in_review`, `verify_ticket_merged`, `verify_ticket_unmerged`, `block_ticket`, `unblock_ticket`, `human_reopen_blocked`, `reconcile_ticket_done_from_git`, `mark_ticket_done_manually`, `reject_ticket`, `assign_ticket`, `add_label`, `remove_label`, `link`, `unlink`, `outgoing_links`, `incoming_links`, `create_batch`, `get_batch`, `list_batches`, `close_batch`, `tickets_in_batch`
+- **`HandRegistry`** (5): `register_hand`, `register_hand_with_pid` (default method), `list_hands`, `heartbeat`, `hand_heartbeat`
+- **`EventLog`** (5): `record_event` *(deprecated)*, `tail_events` *(deprecated)*, `record_typed_event`, `tail_typed_events`, `ticket_events`
+- **`ForemanState`** (6): `foreman_status`, `record_foreman_start` *(deprecated)*, `record_foreman_attached`, `record_foreman_detached`, `record_foreman_stop` *(deprecated)*, `record_foreman_stopped`
+- **`WorktreeReservations`** (2): `reserve_worktree`, `close_worktree`
+
+`Substrate: TicketStore + EventLog + HandRegistry + ForemanState + WorktreeReservations {}` with `impl&lt;T&gt; Substrate for T where T: &lt;all five&gt; {}`. The blanket impl deliberately keeps the default `Sized` bound so it can't overlap the built-in `dyn Substrate` trait-object impl. Implementors now write only the per-role `impl` blocks, never `impl Substrate`. No test double implements `Substrate` (only `NativeSubstrate` does), so the blanket impl covers all of them for free. `#[deprecated]` attributes and doc intra-links were preserved (links retargeted to the owning role trait). No `#[non_exhaustive]` lives on the trait itself (it's on the payload enums in `types.rs`, untouched). Seam shown by three internal call sites converted to role-qualified UFCS (`HandRegistry::heartbeat`, `ForemanState::record_foreman_detached`, `ForemanState::record_foreman_stopped`).
+
+## D92 — dispatch-cap doc (done)
+
+Added a doc comment at `dispatch_ready` in `crates/derrick-substrate-native/src/foreman.rs` (the `count_inflight_tickets` / `batch_max` budget calc) recording that the cap bounds active hands (`InFlight` only), not total footprint — `InReview` tickets still hold worktree+PR by design. References D92 / DESIGN.md §9.C.
+
+## Files touched
+
+Contract + backend:
+- `/Users/lgulliver/repos/derrick/crates/derrick-substrate/src/lib.rs` — five role traits + `Substrate` supertrait + blanket impl
+- `/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/lib.rs` — single `impl Substrate` split into five per-role impl blocks (pure re-partition, behaviour byte-identical)
+- `/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/foreman.rs` — D92 doc + role-trait imports
+
+Import updates (concrete-`NativeSubstrate` callers, role trait added to bring the method into scope):
+- `crates/derrick-substrate-native/src/{tests.rs, foreman/tests.rs}`
+- `crates/derrick-claude/src/dispatcher.rs`
+- `crates/derrick-copilot/src/{dispatcher.rs, local_dispatcher.rs}`
+- `crates/derrick-hand/src/lib.rs`
+- `crates/derrick-cli/src/commands/{foreman.rs, stack.rs, status.rs, ticket.rs, undo.rs}`, `crates/derrick-cli/tests/ticket_foreman.rs`
+- `crates/derrick-flow/src/lib.rs` (two test modules)
+- `crates/derrick-observe/tests/data_model.rs`
+
+`dyn Substrate` callers (flow/runner.rs, flow/steps.rs, tui/data.rs, tui/event_loop.rs, observe/lib.rs) were left unchanged — they resolve role methods through the trait object.
+
+DESIGN.md needed no edits: §3.1, §8.1, §9.C and the D89/D92 §12 entries already describe the split as implemented (they match the trait names and partition exactly).
+
+## Results
+
+```
+BUILD   cargo build --workspace --all-features            → Finished (10 crates compiled)
+CLIPPY  cargo clippy --workspace --all-targets --all-features -- -D warnings → No issues found
+TEST    cargo test --workspace --no-fail-fast             → 1152 passed (64 suites, 17.90s)
+FMT     cargo fmt --check                                 → exit 0 (clean)
+```</result>
+<usage><subagent_tokens>151712</subagent_tokens><tool_uses>91</tool_uses><duration_ms>1260109</duration_ms></usage>
+</task-notification>
+
+---
+
+A
+
+---
+
+<task-notification>
+<task-id>a7d45851091e88c2d</task-id>
+<tool-use-id>toolu_01DD9xU1DBY4Qw3ySMxSxb2U</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a7d45851091e88c2d.output</output-file>
+<status>completed</status>
+<summary>Agent "Record D93 caveman abbreviations" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Done. D93 assigned.
+
+D93 caveman ban match skill: rewrite_word give req/res/fn/impl/auth, skill say NO. cut them, words go full. D91 harness now catch whole class, not just arrow.
+
+Files touched:
+- `/Users/lgulliver/repos/derrick/DESIGN.md` — new D93 row (§12, after D92), §9.B.3 prose updated to note the skill's abbreviation ban and cross-reference D7/D90/D93.
+
+Note: this is the doc entry only — `crates/derrick-caveman/src/lib.rs` still contains the banned substitutions (lines ~810–819). That code change is out of scope for design-keeper; it belongs to whoever implements this against the new D93 entry (likely `token-economist`).</result>
+<usage><subagent_tokens>53998</subagent_tokens><tool_uses>12</tool_uses><duration_ms>70584</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a450ca9fb78374ca6</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a450ca9fb78374ca6.output</output-file>
+<status>completed</status>
+<summary>Agent "Drop caveman invented abbreviations" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>This is exactly the intended fix. Everything is confined to `crates/derrick-caveman/`; the `DESIGN.md` D93 entry visible in `git status` was already staged by a parallel process before I started (it matches exactly what I implemented) — I did not touch it.
+
+## Summary
+
+**Mappings removed from `rewrite_word`** (`/Users/lgulliver/repos/derrick/crates/derrick-caveman/src/lib.rs`), each an Ultra-only match arm:
+
+| Removed | Justification (SKILL.md quote) |
+|---|---|
+| `authentication`/`authenticate`/`authorization` → `auth` | Ultra row: *"NO prose abbreviations (cfg/impl/req/res/fn/**auth**)"* |
+| `request`/`requests` → `req` | Rules: *"never invent new abbreviations (cfg/impl/**req**/res/fn)"*; Ultra row repeats `req` |
+| `response`/`responses` → `res` | Rules + Ultra row both name `**res**` |
+| `function`/`functions` → `fn` | Rules + Ultra row both name `**fn**` |
+| `implementation`/`implementations` → `impl` | Rules + Ultra row both name `**impl**` |
+
+**Kept, deliberately:**
+- `database`/`databases` → `DB` — Rules line's explicit carve-out: *"Standard well-known tech acronyms OK (**DB**/API/HTTP)"*.
+- `configuration`/`configure` → `config` — the skill's banned list names `cfg`, never `config`; `config` is the plain word, not a further invented truncation the way `cfg` is.
+- `however`→`but`, `nevertheless`/`nonetheless`→`still`, `additionally`→`also` — these are the "short synonym" class the Rules line permits (*"big not extensive, fix not..."*), not truncations.
+
+**Corpus fixtures updated** (all under `tests/corpus/ultra/`, verified byte-for-byte against `compress()` output, not hand-typed):
+- `abbreviation_and_arrows.out` → `DB response changed, authentication request failed.`
+- `conjunction_stripping.out` → `function implementation are big simple.`
+- `crlf_input.out` → `request is fine.\nNext response.\n`
+- `one_very_long_paragraph.out` → `This request is small paragraph, response has enough words.`
+- `no_trailing_newline.out` → `request is fine.` (no trailing newline)
+
+**`tests/caveman.rs`**: updated `ultra_strips_causal_because_without_arrow`'s expected string, and added `ultra_does_not_invent_prose_abbreviations` (6 word-cases: request/response/function/implementation/authentication/authorization survive Ultra uncompressed).
+
+**D91 harness extension** (`tests/skill_parity.rs`):
+- `vendored_snapshot_still_bans_invented_abbreviations` — content anchor pinning the vendored snapshot to the exact skill wording banning these abbreviations (mirrors the existing D90 arrow anchor).
+- `ultra_never_reintroduces_banned_invented_abbreviations` — class-level regression guard: runs 9 representative sentences through `compress()` at all three intensities and asserts none of `cfg/impl/req/res/fn/auth` ever appear as a standalone output token. This is independent of any hand-maintained fixture string, so it can't be silently defeated by editing a `.out` file.
+- Shared `BANNED_INVENTED_ABBREVIATIONS` list and `contains_banned_word` helper added to `tests/support/mod.rs`, used by both `caveman.rs` and `skill_parity.rs` so the two test files can't drift out of sync on what "banned" means.
+
+**Verification** (`crates/derrick-caveman`):
+- `cargo test -p derrick-caveman` — 21 passed, 0 failed (14 in `caveman.rs`, 2 in `savings_targets.rs`, 5 in `skill_parity.rs`).
+- `cargo clippy -p derrick-caveman --all-targets -- -D warnings` — clean.
+- `cargo fmt -p derrick-caveman -- --check` — clean.
+
+Files touched: `crates/derrick-caveman/src/lib.rs`, `crates/derrick-caveman/tests/caveman.rs`, `crates/derrick-caveman/tests/skill_parity.rs`, `crates/derrick-caveman/tests/support/mod.rs`, and the five `tests/corpus/ultra/*.out` fixtures listed above. No other crate was touched.</result>
+<usage><subagent_tokens>116292</subagent_tokens><tool_uses>54</tool_uses><duration_ms>418986</duration_ms></usage>
+</task-notification>
+
+---
+
+open the pr, then do 2 as a stacked pr
+
+---
+
+<task-notification>
+<task-id>a6cde8c90e49a7379</task-id>
+<tool-use-id>toolu_01UppeQNmqKHHZYY86Qt6eN2</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a6cde8c90e49a7379.output</output-file>
+<status>completed</status>
+<summary>Agent "Implement T013 adopt TOCTOU fix" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All four checks green. Done.
+
+## Report (caveman prose, normal code)
+
+**Approach chosen: abort-with-clear-message.** Re-merge rejected as risky: `apply` only gets `&amp;AdoptionPlan` — it does not hold the `AdoptOptions`, `DetectionReport`, or drafted-constitution needed to recompute a merge, so re-merging would mean re-running the whole detect→propose pipeline inside `apply`. Abort is cleaner, safe, matches the greenfield "don't clobber" spirit, and is exactly what OQ6's leaning fix describes.
+
+**How guard works.** `propose` now records, for every merge write (`Append`/`MergeJson` mode only — `Create` writes replace wholesale and are already gated by blockers), the file content it merged against at detect time. Stored on `AdoptionPlan.source_guards: Vec&lt;SourceGuard&gt;` where `expected: Option&lt;String&gt;` — `Some(content)` means "must match", `None` means "was absent, must stay absent". `apply` calls `revalidate_sources` right after the blockers/preflight checks and before any staging: it re-reads each guarded file and, on any divergence (edited, created, or deleted), returns `AdoptError::StaleDetection` with the message `files changed since detection (&lt;paths&gt;); re-run \`derrick init\``. No promotion happens, so external edits are never clobbered. Guards derived from actual plan writes, so no false-positive aborts on files that don't feed a write (README/CONTRIBUTING/ADRs read only for constitution drafting are not guarded).
+
+**Stale stage-dir cleanup (old TODO at :304).** Two changes: `prune_stale_stage_dirs` runs at `apply` start and best-effort removes any leftover `.derrick/.adopt-stage-*` dirs from prior interrupted/failed runs; and staging is now factored into `stage_writes`, so a staging-phase error tears down the half-built stage dir before propagating instead of leaking it. The old `TODO(T012)` comment deferring this to the foreman is removed.
+
+**Greenfield untouched.** All changes live in `Adopter::propose`/`apply` and adopt-only helpers. The greenfield twins (`write_mcp_json`, `write_claude_settings`, etc.) already re-read at write time and were not modified.
+
+**Files touched**
+- `/Users/lgulliver/repos/derrick/crates/derrick-adopt/src/lib.rs` — added `SourceGuard` struct + `AdoptionPlan.source_guards` field (sorted in `sort()`), `source_guards()` builder, `AdoptError::StaleDetection` variant, `revalidate_sources`/`prune_stale_stage_dirs`/`stage_writes` methods, rewired `apply`, removed the stale TODO, and added two `tokio::test`s: `apply_aborts_when_snapshotted_file_changed_after_detect` (edits `.mcp.json` between detect and apply, asserts abort + external content preserved + nothing promoted) and `apply_prunes_stale_adopt_stage_dirs` (seeds a stale stage dir, asserts it's gone after apply). Real filesystem via `tempfile`, no mocks.
+
+**Results**
+- `cargo test -p derrick-adopt` — 31 passed (2 suites)
+- `cargo clippy -p derrick-adopt --all-targets --all-features -- -D warnings` — no issues
+- `cargo fmt -p derrick-adopt -- --check` — clean (applied one reflow)
+- `cargo build --workspace` — finished, no breakage
+
+**OQ6:** resolved by this ticket — the detect→merge revalidation pass now exists. You can route the DESIGN.md §5.6 / §12 OQ6 update through `design-keeper`; I did not touch DESIGN.md. No schema/pipeline-step-shape changes were needed, so no `design-keeper` escalation was required for the implementation itself.</result>
+<usage><subagent_tokens>106681</subagent_tokens><tool_uses>18</tool_uses><duration_ms>403193</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a896bb0c8c4c7543b</task-id>
+<tool-use-id>toolu_01B5YL5FLXmC9joxvyMmFzCG</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a896bb0c8c4c7543b.output</output-file>
+<status>completed</status>
+<summary>Agent "Mark OQ6 resolved in DESIGN" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Done. Diff not committed — you said report only.
+
+DESIGN.md UPDATE — CAVEMAN STYLE:
+
+OQ6 ROW (§12) — OLD TEXT STRIKETHROUGH, NOT DELETE. NEW: "RESOLVED BY D94". LEANING COL SAY "RESOLVED — SEE D94." RELATED COL NOW §5.6 / D94 / T013. MATCH SAME PATTERN AS OQ2-OQ5 (D81-D84 STYLE).
+
+NEW DECISION D94 ADDED AFTER D93 IN TABLE. TITLE: "derrick-adopt closes detect→apply TOCTOU by aborting, not re-merging." BODY SAY: SourceGuard RECORDED AT DETECT/PROPOSE TIME (SNAPSHOT OF FILE CONTENT EACH Append/MergeJson MERGED AGAINST). AT APPLY TIME revalidate_sources RE-READ EACH GUARDED FILE BEFORE PROMOTION. ANY DRIFT (EDIT/CREATE/DELETE) -&gt; ABORT WHOLE APPLY WITH AdoptError::StaleDetection, MSG "FILES CHANGED SINCE DETECTION; RE-RUN derrick init". RE-MERGE REJECTED, TOO RISKY (APPLY TIME NO CONTEXT FOR CORRECT 3-WAY MERGE). ALSO CLEANS STALE .derrick/.adopt-stage-* DIRS. SECTION REF: §5.6 / OQ6 / T013.
+
+§5.6 "KNOWN GAP (OQ6)" PARAGRAPH REWRITTEN TO "TOCTOU GAP CLOSED (OQ6, RESOLVED BY D94, T013)" — SAME MECHANISM DESCRIBED, POINTS TO §12 D94 INSTEAD OF "NOT YET BUILT. SEE §12 OQ6."
+
+NO OTHER D ENTRY TOUCHED. D1-D93 UNTOUCHED. NO OTHER OQ ROW TOUCHED.
+
+FILE: /Users/lgulliver/repos/derrick/DESIGN.md, LINES ~750-765 (§5.6 PROSE), LINE 2479 (NEW D94 ROW), LINE 2490 (OQ6 ROW UPDATE).
+
+CHANGE NOT COMMITTED — WORKING TREE ONLY. YOU DIDN'T ASK FOR COMMIT SO NONE MADE.</result>
+<usage><subagent_tokens>51731</subagent_tokens><tool_uses>11</tool_uses><duration_ms>72174</duration_ms></usage>
+</task-notification>
+
+---
+
+ci failures and comments to address on both
+
+---
+
+<task-notification>
+<task-id>aa9d9088f11eacbec</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/aa9d9088f11eacbec.output</output-file>
+<status>completed</status>
+<summary>Agent "Dedup gain compression formatting" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>All checks pass clean. All 164 derrick-cli tests pass, clippy is clean, fmt check produced no diff.
+
+**What I did**
+
+In `crates/derrick-cli/src/commands/gain.rs`, extracted the duplicated "measured / est." compression-line pair into a new private helper:
+
+```rust
+/// Prints the paired "scrub bytes saved" / "roughneck tokens saved" lines
+/// shared by the top-level pipeline savings block and the `--run` compression
+/// block. The first line is measured (scrub raw vs. compressed); the second
+/// is an estimate (compliance-gated rate formula, not measured) — keep both
+/// labels identical wherever this is called so the distinction doesn't drift.
+fn print_compression_lines(bytes_saved: u64, roughneck_tokens_saved: u64) {
+    println!(
+        "  {:&lt;28} {:&gt;12}  ← measured (scrub raw vs. compressed)",
+        "scrub bytes saved",
+        fmt_tokens(bytes_saved)
+    );
+    println!(
+        "  {:&lt;28} {:&gt;12}  ← est. (compliance-gated rate formula, not measured)",
+        "roughneck tokens saved (est.)",
+        fmt_tokens(roughneck_tokens_saved)
+    );
+}
+```
+
+Both call sites (`print_human`'s "Pipeline savings" block and `print_run_human`'s "Compression" block) already write directly via `println!` with no writer/buffer parameter to thread through, so the helper follows the same style — plain `fn(u64, u64)` calling `println!` — and is called as:
+
+- `print_compression_lines(p.bytes_saved, p.roughneck_tokens_saved)` in `print_human`
+- `print_compression_lines(savings.bytes_saved, savings.roughneck_tokens_saved)` in `print_run_human`
+
+No output text changed — this is pure dedup, placed next to `fmt_tokens`/`fmt_usd`.
+
+**Verification**
+- `cargo test -p derrick-cli` — 164 passed (including the gain-specific bytes_saved/roughneck estimate tests)
+- `cargo clippy -p derrick-cli --all-targets -- -D warnings` — no issues
+- `cargo fmt -p derrick-cli -- --check` — clean, no diff</result>
+<usage><subagent_tokens>53098</subagent_tokens><tool_uses>6</tool_uses><duration_ms>65133</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a9988a9671880144f</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a9988a9671880144f.output</output-file>
+<status>completed</status>
+<summary>Agent "Foreman step 1c use hand_is_live" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Done. Pure refactor, behaviour identical, all checks green.
+
+## Predicates matched exactly?
+
+Yes. Verified algebraically before touching anything:
+
+- `hand_is_live(h, t)` = `!pid_dead &amp;&amp; (live_pid || fresh_heartbeat)`, so `!hand_is_live` = `pid_dead || (!live_pid &amp;&amp; !fresh_heartbeat)`.
+- The inline `!fresh_heartbeat` (`!last_seen.is_some_and(|s| s &gt;= t)`) is exactly the inline `stale_heartbeat` (`last_seen.is_none_or(|s| s &lt; t)`) — both mean "no heartbeat, or heartbeat older than `t`".
+- Therefore `!hand_is_live` == `pid_dead || (stale_heartbeat &amp;&amp; !live_pid)` == the old inline `abandon`. Identical, no behaviour change, so no STOP.
+
+## What changed (foreman.rs step 1c only)
+
+- Dropped the recomputed `let hand_threshold = now - self.ttls.hand_ttl;` at old line 780; step 1c now reuses the single `hand_threshold` already computed for step 1a (line 711). Same value (`now` is captured once at the top of `cleanup_pass`), so identical.
+- Replaced the inline `live_pid` / `stale_heartbeat` / `abandon` trio with `if hand_is_live(&amp;hand, hand_threshold) { continue; }` — the helper is now the single source of the liveness predicate, closing the manual-review drift gap the doc comment promised.
+- Kept `let pid_dead = ...` because it is still needed downstream to phrase the abandonment reason (the `match (pid_dead, hand.pid)` at line 795). Refreshed the surrounding comments to explain the reuse and the helper routing.
+
+No other lines touched. `hand_is_live`, step 1a, and the reason-message logic are unchanged.
+
+## Verification
+
+- `cargo test -p derrick-substrate-native` — 137 passed (2 suites), including the hand-liveness / worktree-prune cleanup tests.
+- `cargo clippy -p derrick-substrate-native --all-targets -- -D warnings` — clean.
+- `cargo fmt -p derrick-substrate-native -- --check` — clean.
+
+File touched: `/Users/lgulliver/repos/derrick/crates/derrick-substrate-native/src/foreman.rs`</result>
+<usage><subagent_tokens>38763</subagent_tokens><tool_uses>7</tool_uses><duration_ms>77837</duration_ms></usage>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>a9291985d4bb77611</task-id>
+<tool-use-id>toolu_011aYqfZHfyFpqGKmeZavaeq</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a9291985d4bb77611.output</output-file>
+<status>completed</status>
+<summary>Agent "Dedup assay test YAML boilerplate" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Diff is clean, net -71 lines. Done. Report.
+
+Extracted a shared `base_yaml(models, roles, assay, pipeline)` helper in `/Users/lgulliver/repos/derrick/crates/derrick-assay/src/lib.rs` (around line 2261) that holds the common `version` / `site` / `tools.speckit` / `tools.substrate` / `tools.copilot` / `guardrails` / `parallelism` / `state` boilerplate. Each caller now just builds its own `models`, `roles`, `tools.assay`, and `pipeline` fragments and passes them in:
+
+- `single_reviewer_yaml` — builds the single-reviewer `models`/`roles`/`assay`/`pipeline` fragments, calls `base_yaml`.
+- `multi_reviewer_yaml` — same loop-built `models`/`roles` as before, plus its `on_split`-bearing `assay` fragment, calls `base_yaml`.
+- `run_reviewer_rounds_codex_fallback_uses_claude_host_and_propagates_tokens` — replaced its inline `r#"..."#` literal with the same fragment-composition call.
+
+Net diff: `crates/derrick-assay/src/lib.rs` 40 insertions / 111 deletions, about 71 lines saved.
+
+Verification:
+- `cargo build -p derrick-assay --tests` — compiles clean.
+- `cargo test -p derrick-assay` run 3× consecutively — 57 passed each time (includes reject-then-accept replan, split-verdict-halt, majority-accept, and codex-fallback tests).
+- `cargo clippy -p derrick-assay --all-targets -- -D warnings` — no issues.
+- `cargo fmt -p derrick-assay -- --check` — clean (had to run `cargo fmt` once to rewrap one line over the length limit).
+
+No production code touched, no assertions changed — same three scenarios, same generated YAML structure, just deduplicated via the shared assembler.</result>
+<usage><subagent_tokens>60078</subagent_tokens><tool_uses>16</tool_uses><duration_ms>150193</duration_ms></usage>
+</task-notification>
+
+---
+
+check 48 again
+
+---
+
+there sre comments
+
+---
+
+<task-notification>
+<task-id>a26367054139c42ce</task-id>
+<tool-use-id>toolu_01TQ1oh6V5Huq6RBnkFru5im</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-lgulliver-repos-derrick/eede6f22-e3de-4aac-bdbb-ff7ea081603f/tasks/a26367054139c42ce.output</output-file>
+<status>completed</status>
+<summary>Agent "Address #48 adopt review comments" finished</summary>
+<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>
+<result>Both comments addressed. Scope stayed inside `crates/derrick-adopt/src/lib.rs`.
+
+## COMMENT 1 — residual TOCTOU (promotion-window drift)
+
+Real issue, not a no-op. The pre-staging `revalidate_sources` at the top of `apply` closes the detect-&gt;stage window, but `stage_writes` does real I/O, and a guarded file could change during that span; the rename loop would then clobber it.
+
+Approach: added a SECOND `revalidate_sources(plan)` call in `apply` immediately before the promotion loop (right after `stage_writes` returns, at `crates/derrick-adopt/src/lib.rs:324`). Reuses the exact existing machinery — same `SourceGuard` re-read, same `AdoptError::StaleDetection` on drift. On drift it removes the half-built stage dir (identical cleanup to the staging-failure branch) and returns before any rename, so nothing is promoted. The fail-fast pre-staging check is untouched.
+
+Test: injecting drift at the precise mid-`apply` instant (post-stage, pre-rename) from one thread isn't feasible without a test hook inside `apply`, so per your fallback clause I drive the same private machinery `apply` uses in that window — `apply_revalidates_again_before_promotion_and_cleans_up`: stage into a stage dir (first check already passed), drift the guarded `.mcp.json`, assert the promotion-time `revalidate_sources` aborts with `StaleDetection`, then assert the abort path leaves the stage dir cleaned up, `derrick.yaml` not promoted, and the external edit intact. The pre-staging check stays covered by the existing `apply_aborts_when_snapshotted_file_changed_after_detect`.
+
+## COMMENT 2 — `prune_stale_stage_dirs` symlink-follow + non-UTF8 skip
+
+Both sub-issues real. Rewrote the loop (`crates/derrick-adopt/src/lib.rs:426`):
+- Replaced `path.is_dir()` (follows symlinks) with `entry.metadata()`, which does NOT traverse symlinks. A symlink's own metadata reports `is_dir() == false`, so a `.adopt-stage-*` symlink is never treated as, traversed into, or removed as a real stage dir.
+- Replaced `file_name().and_then(OsStr::to_str)` (drops non-UTF8 names) with `entry.file_name().to_string_lossy().starts_with(".adopt-stage-")`. Since the prefix is pure ASCII, the lossy conversion is byte-accurate across the matched region, so a non-UTF8-named leftover is still matched and pruned. `fs::remove_dir_all` itself does not follow symlinks during recursive removal.
+
+Tests (both `#[cfg(unix)]`):
+- `apply_prunes_non_utf8_stale_stage_dir` — creates a `.adopt-stage-` dir whose name has trailing invalid UTF-8 bytes and asserts apply prunes it. macOS/APFS rejects non-UTF8 filenames at the FS layer, so the test gracefully skips there (`create_dir_all` err -&gt; early return); it exercises the real path on Linux/tmpfs where CI runs.
+- `apply_does_not_follow_symlinked_stage_path` — a `.adopt-stage-symlink` pointing at a `precious/` dir; asserts the target's contents survive apply (symlink not treated as a stage dir, not followed).
+
+On-drift / staging-failure cleanup of the half-built stage dir is preserved (both the existing staging-failure branch and the new promotion-time branch call `fs::remove_dir_all(&amp;stage_dir)`).
+
+## Verification
+- `cargo test -p derrick-adopt` — 34 passed
+- `cargo clippy -p derrick-adopt --all-targets --all-features -- -D warnings` — clean (fixed one `needless_borrows_for_generic_args` introduced by the edit)
+- `cargo fmt -p derrick-adopt -- --check` — clean
+- `cargo build --workspace` — clean
+
+File touched: `/Users/lgulliver/repos/derrick/crates/derrick-adopt/src/lib.rs`
+
+One note for your awareness (no action taken, out of the two comments' scope): the promotion loop's own `fs::rename` failure path at ~`lib.rs:334` returns an `AdoptionOutcome` with `partial_failure` rather than tearing down the stage dir — that's pre-existing behaviour and intentional (it hands back recovery instructions), so I left it as-is.</result>
+<usage><subagent_tokens>62566</subagent_tokens><tool_uses>24</tool_uses><duration_ms>308211</duration_ms></usage>
+</task-notification>

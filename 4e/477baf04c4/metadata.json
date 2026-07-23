@@ -1,0 +1,24 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "4e477baf04c4",
+  "strategy": "manual-commit",
+  "branch": "fix/adopt-toctou-oq6",
+  "checkpoints_count": 3,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/4e/477baf04c4/0/metadata.json",
+      "transcript": "/4e/477baf04c4/0/full.jsonl",
+      "compact_transcript": "/4e/477baf04c4/0/transcript.jsonl",
+      "content_hash": "/4e/477baf04c4/0/content_hash.txt",
+      "prompt": "/4e/477baf04c4/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 26783,
+    "cache_creation_tokens": 286140,
+    "cache_read_tokens": 12615634,
+    "output_tokens": 65891,
+    "api_call_count": 89
+  }
+}

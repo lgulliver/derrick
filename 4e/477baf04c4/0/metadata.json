@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "4e477baf04c4",
+  "session_id": "eede6f22-e3de-4aac-bdbb-ff7ea081603f",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-23T19:56:05.280274Z",
+  "branch": "fix/adopt-toctou-oq6",
+  "checkpoints_count": 3,
+  "save_step_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "4c05def2b5c5",
+  "compact_transcript_start": 0,
+  "token_usage": {
+    "input_tokens": 26783,
+    "cache_creation_tokens": 286140,
+    "cache_read_tokens": 12615634,
+    "output_tokens": 65891,
+    "api_call_count": 89
+  },
+  "session_metrics": {
+    "turn_count": 31
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 386,
+      "user_lines_removed": 16,
+      "agent_lines_added": 18,
+      "agent_lines_removed": 211,
+      "user_added_per_file": {
+        "crates/derrick-adopt/src/lib.rs": 386
+      },
+      "user_removed_per_file": {
+        "crates/derrick-adopt/src/lib.rs": 16
+      }
+    }
+  ]
+}
