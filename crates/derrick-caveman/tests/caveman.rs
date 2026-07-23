@@ -64,6 +64,56 @@ fn protected_span_count_is_accurate() {
     assert!(output.text.contains("src/lib.rs:42:7"));
 }
 
+// ── FIX 2: ultra causal-arrow substitution must not corrupt intensifier `so` ──
+//
+// `causal_regex` used to match bare `so` alongside `because`/`therefore` and
+// rewrite it to " -> " at Ultra intensity. `so` is overwhelmingly used as an
+// intensifier ("so effective", "so good", "so far", "not so much"), not a
+// causal conjunction, so that substitution inverted meaning: "so effective"
+// became "-> effective" (a causal claim, not an intensifier). The installed
+// caveman skill (SKILL.md, Ultra row) does not perform arrow substitution for
+// `so` at all — confirmed by reading skills/caveman/SKILL.md, which
+// explicitly states Ultra uses "NO arrows (X -> Y) -- measured zero token
+// saving under tokenizer, cost decode clarity" and lists arrow use only for
+// unambiguous cause-then-effect conjunction stripping, never for bare `so`.
+// Per D7 (byte-identical to the skill), the regex was fixed by dropping the
+// `so` alternative rather than diverging further from the skill.
+
+#[test]
+fn ultra_does_not_corrupt_intensifier_so() {
+    let output = compress("This fix is so effective.", Intensity::Ultra);
+    assert_eq!(output.text, "This fix is so effective.");
+    assert!(
+        !output.text.contains("->"),
+        "bare `so` must not become an arrow"
+    );
+}
+
+#[test]
+fn ultra_does_not_corrupt_so_far() {
+    let output = compress("The tests pass so far.", Intensity::Ultra);
+    assert_eq!(output.text, "tests pass so far.");
+    assert!(!output.text.contains("->"));
+}
+
+#[test]
+fn ultra_does_not_corrupt_not_so_much() {
+    let output = compress("Not so much changed.", Intensity::Ultra);
+    assert_eq!(output.text, "Not so much changed.");
+    assert!(!output.text.contains("->"));
+}
+
+#[test]
+fn ultra_still_converts_causal_because_and_therefore() {
+    // Regression guard: dropping `so` from the alternation must not disturb
+    // the still-intentional (skill-documented) because/therefore handling.
+    let output = compress(
+        "The database response changed because the authentication request failed.",
+        Intensity::Ultra,
+    );
+    assert_eq!(output.text, "DB res changed -> auth req failed.");
+}
+
 #[test]
 fn streaming_state_survives_split_inline_code() {
     let mut compressor = Compressor::new(Intensity::Full);

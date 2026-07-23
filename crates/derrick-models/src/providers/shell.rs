@@ -218,6 +218,15 @@ fn stream_output(
                 }
             }
         }
+        // If we already emitted a terminal `End` from a valid <<DERRICK-META>>
+        // line, the response is complete and authoritative. A nonzero exit code
+        // after that (e.g. a wrapper script that cleans up noisily, or a shell
+        // that propagates a downstream signal) must NOT clobber the good
+        // response with a Provider error — consume_stream would surface the Err
+        // and discard the content. Return without inspecting the exit code.
+        if saw_end {
+            return;
+        }
         // Wait for process exit and check exit code
         let status = child.wait().await;
         if let Ok(status) = status {
@@ -327,5 +336,56 @@ fn parse_finish_reason(reason: &str) -> Result<FinishReason, ModelError> {
             message: format!("invalid shell finish reason: {other}"),
             retryable: false,
         }),
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn request() -> CompletionRequest {
+        CompletionRequest {
+            cached_prefix: None,
+            prompt: "hi".to_owned(),
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            timeout: Duration::from_secs(10),
+        }
+    }
+
+    fn model(script: &str) -> ShellModel {
+        ShellModel {
+            name: "shell-test".to_owned(),
+            argv: vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            cost_hint: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_meta_then_nonzero_exit_preserves_response() {
+        // The script emits a valid content line and a valid <<DERRICK-META>>
+        // line, then exits 3. The good response must survive: the nonzero exit
+        // must NOT be surfaced as a Provider error that discards the content.
+        let script = r#"cat >/dev/null; printf '%s\n' '<<DERRICK-CONTENT>> hello'; printf '%s\n' '<<DERRICK-META>> {"tokens_in":5,"tokens_out":2,"finish_reason":"stop"}'; exit 3"#;
+        let response = model(script).complete(request()).await.unwrap();
+        assert_eq!(response.text.trim(), "hello");
+        assert_eq!(response.tokens_in, 5);
+        assert_eq!(response.tokens_out, 2);
+        assert_eq!(response.finish_reason, FinishReason::Stop);
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_without_meta_is_an_error() {
+        // No <<DERRICK-META>> line: the nonzero exit is still surfaced so a
+        // genuine failure is not masked.
+        let script = r#"cat >/dev/null; printf '%s\n' 'boom' 1>&2; exit 1"#;
+        let error = model(script).complete(request()).await.unwrap_err();
+        match error {
+            ModelError::Provider { retryable, .. } => assert!(!retryable),
+            other => panic!("expected Provider error, got {other:?}"),
+        }
     }
 }

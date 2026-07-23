@@ -98,6 +98,38 @@ fn resolve_auth_mode(raw: Option<&str>, dialect: ApiDialect) -> Result<AuthMode,
     }
 }
 
+/// Outcome of resolving the configured `auth_env` against the [`AuthStore`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum KeyResolution<'a> {
+    /// No `auth_env` was configured at all (auth intentionally absent).
+    NotConfigured,
+    /// A non-empty key was resolved.
+    Present(String),
+    /// `auth_env` names a variable that is not set.
+    MissingEnv(&'a str),
+    /// `auth_env` resolves, but to an empty string.
+    Empty(&'a str),
+}
+
+/// Classifies how the configured `auth_env` resolved, so the caller can warn on
+/// a misconfiguration without duplicating the lookup logic (and so it stays
+/// unit-testable without a `tracing` subscriber). Never returns the raw key in
+/// a loggable position.
+fn classify_api_key<'a>(
+    auth: &AuthStore,
+    provider: &str,
+    auth_env: Option<&'a str>,
+) -> KeyResolution<'a> {
+    let Some(env_var) = auth_env else {
+        return KeyResolution::NotConfigured;
+    };
+    match auth.get(provider, env_var) {
+        None => KeyResolution::MissingEnv(env_var),
+        Some(secret) if secret.expose().is_empty() => KeyResolution::Empty(env_var),
+        Some(secret) => KeyResolution::Present(secret.expose().to_owned()),
+    }
+}
+
 /// An HTTP-backed model for an API or local runtime.
 pub(crate) struct HttpApiModel {
     dialect: ApiDialect,
@@ -142,10 +174,37 @@ pub(crate) fn build(
     // The key is only ever attached as a request header (never serialised into a
     // body, error message, or log) and `HttpApiModel` deliberately derives no
     // `Debug`, so it cannot leak through a `{:?}` of the model (D79).
-    let api_key = model_def.auth_env().and_then(|env_var| {
-        auth.get(&provider, env_var)
-            .map(|secret| secret.expose().to_owned())
-    });
+    //
+    // openai-compatible / ollama do not require auth, so a mistyped or unset
+    // `auth_env` would otherwise attach no header and only surface later as an
+    // opaque 401. Warn here so the misconfiguration is visible. Only the env-var
+    // NAME and provider are logged — never the resolved value.
+    let api_key = match classify_api_key(auth, &provider, model_def.auth_env()) {
+        KeyResolution::NotConfigured => None,
+        KeyResolution::Present(key) => Some(key),
+        KeyResolution::MissingEnv(env_var) => {
+            tracing::warn!(
+                target: "derrick_models::api",
+                runtime,
+                provider = %provider,
+                auth_env = env_var,
+                "`auth_env` is configured but the environment variable is not set; \
+                 no auth header will be attached"
+            );
+            None
+        }
+        KeyResolution::Empty(env_var) => {
+            tracing::warn!(
+                target: "derrick_models::api",
+                runtime,
+                provider = %provider,
+                auth_env = env_var,
+                "`auth_env` is configured but resolves to an empty value; \
+                 no auth header will be attached"
+            );
+            None
+        }
+    };
 
     let auth_mode = resolve_auth_mode(model_def.auth_mode(), dialect)
         .map_err(|error| ModelError::from(error.with_provider(Some(provider.clone()))))?;
@@ -279,6 +338,8 @@ enum StreamPiece {
     Delta(String),
     /// Token-usage update (`tokens_in`, `tokens_out`); either may be `None`.
     Usage(Option<u32>, Option<u32>),
+    /// Terminal finish reason decoded from the provider's stop field.
+    Finish(FinishReason),
 }
 
 /// Incremental decoder for a dialect's streaming wire format (SSE for the
@@ -296,6 +357,9 @@ struct StreamParser {
     sse_event: Option<String>,
     tokens_in: u32,
     tokens_out: u32,
+    /// Terminal finish reason once the provider reports one. `None` until then,
+    /// which `finish_reason()` treats as a truncated stream (`Error`).
+    finish: Option<FinishReason>,
 }
 
 impl StreamParser {
@@ -307,6 +371,7 @@ impl StreamParser {
             sse_event: None,
             tokens_in: 0,
             tokens_out: 0,
+            finish: None,
         }
     }
 
@@ -364,6 +429,7 @@ impl StreamParser {
                         self.tokens_out = tout;
                     }
                 }
+                StreamPiece::Finish(reason) => self.finish = Some(reason),
             }
         }
     }
@@ -442,6 +508,13 @@ impl StreamParser {
     fn totals(&self) -> (u32, u32) {
         (self.tokens_in, self.tokens_out)
     }
+
+    /// Terminal finish reason for the `End` event. A stream that ended without
+    /// the provider reporting a stop field is treated as truncated (`Error`)
+    /// rather than a clean `Stop`.
+    fn finish_reason(&self) -> FinishReason {
+        self.finish.unwrap_or(FinishReason::Error)
+    }
 }
 
 /// Drains complete `\n`-terminated lines from `buf`, leaving any partial tail.
@@ -481,7 +554,26 @@ fn interpret_openai(json: &Value) -> Vec<StreamPiece> {
                 .map(|value| value as u32),
         ));
     }
+    // `finish_reason` is `null` on intermediate chunks and non-null only on the
+    // terminal choice; `as_str` skips the nulls for us.
+    if let Some(reason) = json
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+    {
+        pieces.push(StreamPiece::Finish(map_openai_finish(reason)));
+    }
     pieces
+}
+
+/// Maps an OpenAI `finish_reason` to a [`FinishReason`].
+fn map_openai_finish(reason: &str) -> FinishReason {
+    match reason {
+        "length" => FinishReason::Length,
+        // Normal terminations, including tool/function calls.
+        "stop" | "tool_calls" | "function_call" => FinishReason::Stop,
+        // `content_filter` and anything unrecognised are abnormal stops.
+        _ => FinishReason::Error,
+    }
 }
 
 /// Interprets one Anthropic streaming event by its `event:` type.
@@ -499,13 +591,29 @@ fn interpret_anthropic(event: Option<&str>, json: &Value) -> Vec<StreamPiece> {
                 .map(|value| value as u32),
             None,
         )],
-        Some("message_delta") => vec![StreamPiece::Usage(
-            None,
-            json.pointer("/usage/output_tokens")
-                .and_then(Value::as_u64)
-                .map(|value| value as u32),
-        )],
+        Some("message_delta") => {
+            let mut pieces = vec![StreamPiece::Usage(
+                None,
+                json.pointer("/usage/output_tokens")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32),
+            )];
+            if let Some(reason) = json.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                pieces.push(StreamPiece::Finish(map_anthropic_finish(reason)));
+            }
+            pieces
+        }
         _ => Vec::new(),
+    }
+}
+
+/// Maps an Anthropic `stop_reason` to a [`FinishReason`].
+fn map_anthropic_finish(reason: &str) -> FinishReason {
+    match reason {
+        "max_tokens" => FinishReason::Length,
+        "end_turn" | "stop_sequence" | "tool_use" | "pause_turn" => FinishReason::Stop,
+        // `refusal` and anything unrecognised are abnormal stops.
+        _ => FinishReason::Error,
     }
 }
 
@@ -526,8 +634,20 @@ fn interpret_ollama(json: &Value) -> Vec<StreamPiece> {
                 .and_then(Value::as_u64)
                 .map(|value| value as u32),
         ));
+        pieces.push(StreamPiece::Finish(map_ollama_finish(
+            json.get("done_reason").and_then(Value::as_str),
+        )));
     }
     pieces
+}
+
+/// Maps an Ollama `done_reason` to a [`FinishReason`]. `done: true` marks a
+/// normal completion, so a missing/unknown reason is treated as `Stop`.
+fn map_ollama_finish(reason: Option<&str>) -> FinishReason {
+    match reason {
+        Some("length") => FinishReason::Length,
+        _ => FinishReason::Stop,
+    }
 }
 
 /// Joins the system + cached-prefix portions of a request into one system blob.
@@ -645,7 +765,7 @@ impl Model for HttpApiModel {
                             state.queue.push_back(CompletionEvent::End {
                                 tokens_in,
                                 tokens_out,
-                                finish_reason: FinishReason::Stop,
+                                finish_reason: state.parser.finish_reason(),
                             });
                             state.ended = true;
                         }
@@ -873,6 +993,149 @@ mod tests {
         );
         assert_eq!(text, "local says hi");
         assert_eq!((tin, tout), (3, 7));
+    }
+
+    /// Like [`drain`] but returns the decoded terminal finish reason, mirroring
+    /// how `stream()` reads it for the `End` event at end-of-stream.
+    fn drain_finish(dialect: ApiDialect, chunks: &[&str]) -> FinishReason {
+        let mut parser = StreamParser::new(dialect);
+        for chunk in chunks {
+            let _ = parser.push(chunk.as_bytes());
+        }
+        let _ = parser.finish();
+        parser.finish_reason()
+    }
+
+    #[test]
+    fn openai_length_stop_maps_to_length() {
+        // A stream truncated by the token budget carries finish_reason "length".
+        let reason = drain_finish(
+            ApiDialect::OpenAi,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"cut\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n",
+                "data: [DONE]\n\n",
+            ],
+        );
+        assert_eq!(reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn openai_clean_stop_maps_to_stop() {
+        let reason = drain_finish(
+            ApiDialect::OpenAi,
+            &["data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"],
+        );
+        assert_eq!(reason, FinishReason::Stop);
+    }
+
+    #[test]
+    fn openai_content_filter_maps_to_error() {
+        assert_eq!(map_openai_finish("content_filter"), FinishReason::Error);
+        assert_eq!(map_openai_finish("tool_calls"), FinishReason::Stop);
+    }
+
+    #[test]
+    fn truncated_stream_with_no_terminal_reason_is_error() {
+        // Deltas arrive, then the byte stream just ends (dropped connection):
+        // the provider never reported a stop field, so this is not a clean Stop.
+        let reason = drain_finish(
+            ApiDialect::OpenAi,
+            &["data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"],
+        );
+        assert_eq!(reason, FinishReason::Error);
+    }
+
+    #[test]
+    fn anthropic_max_tokens_maps_to_length() {
+        let reason = drain_finish(
+            ApiDialect::Anthropic,
+            &[
+                "event: content_block_delta\ndata: {\"delta\":{\"text\":\"hi\"}}\n\n",
+                "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":4}}\n\n",
+            ],
+        );
+        assert_eq!(reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn anthropic_end_turn_maps_to_stop() {
+        assert_eq!(map_anthropic_finish("end_turn"), FinishReason::Stop);
+        assert_eq!(map_anthropic_finish("refusal"), FinishReason::Error);
+    }
+
+    #[test]
+    fn ollama_done_reason_length_maps_to_length() {
+        let reason = drain_finish(
+            ApiDialect::Ollama,
+            &[
+                "{\"message\":{\"content\":\"x\"},\"done\":true,\"done_reason\":\"length\",\"eval_count\":2}\n",
+            ],
+        );
+        assert_eq!(reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn ollama_done_without_reason_maps_to_stop() {
+        let reason = drain_finish(
+            ApiDialect::Ollama,
+            &["{\"message\":{\"content\":\"x\"},\"done\":true,\"eval_count\":2}\n"],
+        );
+        assert_eq!(reason, FinishReason::Stop);
+    }
+
+    #[test]
+    fn classify_api_key_variants() {
+        use std::collections::HashMap;
+
+        use crate::Secret;
+
+        // Not configured: no auth_env.
+        assert_eq!(
+            classify_api_key(&AuthStore::for_testing(HashMap::new()), "openai", None),
+            KeyResolution::NotConfigured
+        );
+
+        // Configured but the env var is absent from the store.
+        assert_eq!(
+            classify_api_key(
+                &AuthStore::for_testing(HashMap::new()),
+                "openai",
+                Some("OPENAI_API_KEY")
+            ),
+            KeyResolution::MissingEnv("OPENAI_API_KEY")
+        );
+
+        // Configured but resolves to an empty value.
+        let mut empty = HashMap::new();
+        empty.insert(
+            ("openai".to_owned(), "OPENAI_API_KEY".to_owned()),
+            Secret::new(""),
+        );
+        assert_eq!(
+            classify_api_key(
+                &AuthStore::for_testing(empty),
+                "openai",
+                Some("OPENAI_API_KEY")
+            ),
+            KeyResolution::Empty("OPENAI_API_KEY")
+        );
+
+        // Configured and present.
+        let mut present = HashMap::new();
+        present.insert(
+            ("openai".to_owned(), "OPENAI_API_KEY".to_owned()),
+            Secret::new("sk-live"),
+        );
+        assert_eq!(
+            classify_api_key(
+                &AuthStore::for_testing(present),
+                "openai",
+                Some("OPENAI_API_KEY")
+            ),
+            KeyResolution::Present("sk-live".to_owned())
+        );
     }
 
     #[test]

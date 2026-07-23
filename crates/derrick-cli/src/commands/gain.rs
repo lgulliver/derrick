@@ -34,9 +34,11 @@ pub(crate) async fn run(args: GainArgs) -> Result<()> {
         None => None,
     };
 
+    let pipeline_savings = repo_root.as_deref().and_then(aggregate_pipeline_savings);
+
     match args.format {
-        OutputFormat::Human => print_human(&usage, args.all, &project_dir),
-        OutputFormat::Json => print_json(&usage, args.all),
+        OutputFormat::Human => print_human(&usage, args.all, &project_dir, &pipeline_savings),
+        OutputFormat::Json => print_json(&usage, args.all, &pipeline_savings),
     }
 
     Ok(())
@@ -46,6 +48,7 @@ fn print_human(
     usage: &Option<telemetry::TokenUsage>,
     all_sessions: bool,
     project_dir: &Option<std::path::PathBuf>,
+    pipeline_savings: &Option<PipelineSavings>,
 ) {
     println!("derrick gain \u{2014} token savings\n");
 
@@ -137,6 +140,25 @@ fn print_human(
         "  {:<10} active (lite / full / ultra compression)",
         "caveman:"
     );
+
+    if let Some(p) = pipeline_savings {
+        println!();
+        println!(
+            "  Pipeline savings ({} run{})",
+            p.runs,
+            if p.runs == 1 { "" } else { "s" }
+        );
+        println!(
+            "  {:<28} {:>12}  \u{2190} measured (scrub raw vs. compressed)",
+            "scrub bytes saved",
+            fmt_tokens(p.bytes_saved)
+        );
+        println!(
+            "  {:<28} {:>12}  \u{2190} est. (compliance-gated rate formula, not measured)",
+            "roughneck tokens saved (est.)",
+            fmt_tokens(p.roughneck_tokens_saved)
+        );
+    }
     println!();
 
     if usage.is_some() && !all_sessions {
@@ -145,7 +167,11 @@ fn print_human(
     println!("  Run `derrick gain --format json` for machine-readable output.");
 }
 
-fn print_json(usage: &Option<telemetry::TokenUsage>, all_sessions: bool) {
+fn print_json(
+    usage: &Option<telemetry::TokenUsage>,
+    all_sessions: bool,
+    pipeline_savings: &Option<PipelineSavings>,
+) {
     let telemetry_val = match usage {
         Some(u) => serde_json::json!({
             "scope": if all_sessions { "all_sessions" } else { "latest_session" },
@@ -169,12 +195,23 @@ fn print_json(usage: &Option<telemetry::TokenUsage>, all_sessions: bool) {
     let obj = serde_json::json!({
         "scrub": {
             "status": "active",
-            "tools": ["bd", "cargo", "claude", "codex", "copilot", "gh", "git", "gt"]
+            "tools": ["bd", "cargo", "claude", "codex", "copilot", "gh", "git", "gt"],
+            // Measured: raw subprocess output bytes minus scrubbed bytes,
+            // summed across every run manifest for this repo. null when no
+            // run manifests were found (not the same as a measured zero).
+            "bytes_saved": pipeline_savings.as_ref().map(|p| p.bytes_saved),
         },
         "caveman": {
             "status": "active",
             "intensities": ["lite", "full", "ultra"]
         },
+        "roughneck": {
+            // Estimate: fixed-rate formula gated by a pass/fail compliance
+            // heuristic (derrick-roughneck), not a measured counterfactual.
+            // See D-fix in derrick-roughneck::estimate_savings docs.
+            "tokens_saved_estimate": pipeline_savings.as_ref().map(|p| p.roughneck_tokens_saved),
+        },
+        "pipeline_runs_observed": pipeline_savings.as_ref().map(|p| p.runs),
         "telemetry": telemetry_val,
     });
     println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
@@ -296,6 +333,18 @@ fn step_rows(value: &serde_json::Value) -> Vec<StepRow> {
                 .to_owned();
             let tokens_in = step.get("tokens_in").and_then(|v| v.as_u64()).unwrap_or(0);
             let tokens_out = step.get("tokens_out").and_then(|v| v.as_u64()).unwrap_or(0);
+            // Scrub compression (measured) and roughneck savings (estimate),
+            // populated by derrick-flow (manifest.rs / steps.rs) but previously
+            // dropped on the floor here — see FIX 1.
+            let bytes_raw = step.get("bytes_raw").and_then(|v| v.as_u64()).unwrap_or(0);
+            let bytes_saved = step
+                .get("bytes_saved")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let roughneck_tokens_saved = step
+                .get("roughneck_tokens_saved")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let started = step.get("started_at").and_then(|v| v.as_str());
             let finished = step.get("finished_at").and_then(|v| v.as_str());
             let duration_s = duration_seconds(started, finished);
@@ -304,6 +353,9 @@ fn step_rows(value: &serde_json::Value) -> Vec<StepRow> {
                 status,
                 tokens_in,
                 tokens_out,
+                bytes_raw,
+                bytes_saved,
+                roughneck_tokens_saved,
                 duration_s,
             });
         }
@@ -316,7 +368,81 @@ struct StepRow {
     status: String,
     tokens_in: u64,
     tokens_out: u64,
+    /// Raw subprocess output bytes before scrub compression (0 for non-bash steps).
+    bytes_raw: u64,
+    /// Bytes removed by scrub output compression — measured, not estimated.
+    bytes_saved: u64,
+    /// Output tokens saved by roughneck prompt injection — a fixed-rate
+    /// formula over a compliance heuristic (see derrick-roughneck), NOT a
+    /// measured counterfactual. Always surface this as an estimate.
+    roughneck_tokens_saved: u64,
     duration_s: f64,
+}
+
+/// Aggregate scrub/roughneck savings the pipeline already measured, summed
+/// across every step of a run.
+#[derive(Default)]
+struct RunSavings {
+    bytes_raw: u64,
+    bytes_saved: u64,
+    roughneck_tokens_saved: u64,
+}
+
+fn run_savings(rows: &[StepRow]) -> RunSavings {
+    let mut totals = RunSavings::default();
+    for row in rows {
+        totals.bytes_raw = totals.bytes_raw.saturating_add(row.bytes_raw);
+        totals.bytes_saved = totals.bytes_saved.saturating_add(row.bytes_saved);
+        totals.roughneck_tokens_saved = totals
+            .roughneck_tokens_saved
+            .saturating_add(row.roughneck_tokens_saved);
+    }
+    totals
+}
+
+/// Pipeline-wide savings aggregated across every run manifest found under
+/// `<state_dir>/runs/*/manifest.json` for the current repo. Backs the
+/// top-level `derrick gain` view (no `--run`) so scrub/roughneck savings the
+/// pipeline already measured don't disappear behind a static "active" line.
+#[derive(Default)]
+struct PipelineSavings {
+    runs: usize,
+    bytes_raw: u64,
+    bytes_saved: u64,
+    roughneck_tokens_saved: u64,
+}
+
+fn aggregate_pipeline_savings(repo_root: &Path) -> Option<PipelineSavings> {
+    let state_dir: PathBuf =
+        derrick_config::Config::load_from_path(&repo_root.join("derrick.yaml"))
+            .map(|cfg| cfg.state().dir().to_path_buf())
+            .unwrap_or_else(|_| PathBuf::from(".derrick"));
+    let runs_dir = repo_root.join(state_dir).join("runs");
+    let entries = std::fs::read_dir(&runs_dir).ok()?;
+
+    let mut totals = PipelineSavings::default();
+    for entry in entries.flatten() {
+        let manifest_path = entry.path().join("manifest.json");
+        let Some(value) = std::fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        else {
+            continue;
+        };
+        let rows = step_rows(&value);
+        if rows.is_empty() {
+            continue;
+        }
+        let run = run_savings(&rows);
+        totals.runs += 1;
+        totals.bytes_raw = totals.bytes_raw.saturating_add(run.bytes_raw);
+        totals.bytes_saved = totals.bytes_saved.saturating_add(run.bytes_saved);
+        totals.roughneck_tokens_saved = totals
+            .roughneck_tokens_saved
+            .saturating_add(run.roughneck_tokens_saved);
+    }
+
+    if totals.runs == 0 { None } else { Some(totals) }
 }
 
 fn duration_seconds(started: Option<&str>, finished: Option<&str>) -> f64 {
@@ -339,6 +465,7 @@ fn print_run_human(run_id: &str, value: &serde_json::Value, manifest_path: &Path
     let tokens_in: u64 = rows.iter().map(|r| r.tokens_in).sum();
     let tokens_out: u64 = rows.iter().map(|r| r.tokens_out).sum();
     let duration_s: f64 = rows.iter().map(|r| r.duration_s).sum();
+    let savings = run_savings(&rows);
 
     println!(
         "  {:<13} {:<9} {:>9} {:>9} {:>10}",
@@ -372,6 +499,22 @@ fn print_run_human(run_id: &str, value: &serde_json::Value, manifest_path: &Path
     .estimate_usd(tokens_in, tokens_out);
     println!();
     println!("  Estimated cost (claude-sonnet-4): {}", fmt_usd(cost));
+
+    if savings.bytes_saved > 0 || savings.roughneck_tokens_saved > 0 {
+        println!();
+        println!("  Compression");
+        println!(
+            "  {:<28} {:>12}  \u{2190} measured (scrub raw vs. compressed)",
+            "scrub bytes saved",
+            fmt_tokens(savings.bytes_saved)
+        );
+        println!(
+            "  {:<28} {:>12}  \u{2190} est. (compliance-gated rate formula, not measured)",
+            "roughneck tokens saved (est.)",
+            fmt_tokens(savings.roughneck_tokens_saved)
+        );
+    }
+
     println!("  Run manifest: {}", manifest_path.display());
 }
 
@@ -379,6 +522,7 @@ fn print_run_json(run_id: &str, value: &serde_json::Value) {
     let rows = step_rows(value);
     let tokens_in: u64 = rows.iter().map(|r| r.tokens_in).sum();
     let tokens_out: u64 = rows.iter().map(|r| r.tokens_out).sum();
+    let savings = run_savings(&rows);
     let cost = derrick_models::CostHint {
         in_per_mtok: 3.0,
         out_per_mtok: 15.0,
@@ -397,6 +541,9 @@ fn print_run_json(run_id: &str, value: &serde_json::Value) {
                 "status": r.status,
                 "tokens_in": r.tokens_in,
                 "tokens_out": r.tokens_out,
+                "bytes_raw": r.bytes_raw,
+                "bytes_saved": r.bytes_saved,
+                "roughneck_tokens_saved_estimate": r.roughneck_tokens_saved,
             })
         })
         .collect();
@@ -406,6 +553,11 @@ fn print_run_json(run_id: &str, value: &serde_json::Value) {
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "cost_estimate_usd": cost,
+        // Measured: scrub raw vs. compressed bytes, summed across steps.
+        "bytes_saved": savings.bytes_saved,
+        // Estimate: roughneck's fixed-rate formula over a compliance
+        // heuristic — not a measured counterfactual. See derrick-roughneck.
+        "roughneck_tokens_saved_estimate": savings.roughneck_tokens_saved,
         "steps": steps,
     });
     println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
@@ -530,5 +682,145 @@ mod tests {
         assert_eq!(rows[0].tokens_in, 1234);
         assert_eq!(rows[0].tokens_out, 456);
         assert!((rows[0].duration_s - 2.5).abs() < 1e-6);
+    }
+
+    // ── FIX 1: bytes_saved / roughneck_tokens_saved surfacing ──────────────
+
+    #[test]
+    fn step_rows_extracts_compression_fields() {
+        let value = serde_json::json!({
+            "steps": [
+                {
+                    "id": "specify",
+                    "status": "success",
+                    "tokens_in": 100,
+                    "tokens_out": 50,
+                    "bytes_raw": 5000,
+                    "bytes_saved": 3200,
+                    "roughneck_tokens_saved": 900
+                }
+            ]
+        });
+        let rows = step_rows(&value);
+        assert_eq!(rows[0].bytes_raw, 5000);
+        assert_eq!(rows[0].bytes_saved, 3200);
+        assert_eq!(rows[0].roughneck_tokens_saved, 900);
+    }
+
+    #[test]
+    fn step_rows_defaults_compression_fields_to_zero_when_absent() {
+        // Older manifests (or non-bash steps) may not carry these fields.
+        let value = serde_json::json!({
+            "steps": [
+                { "id": "clarify", "status": "success", "tokens_in": 10, "tokens_out": 5 }
+            ]
+        });
+        let rows = step_rows(&value);
+        assert_eq!(rows[0].bytes_raw, 0);
+        assert_eq!(rows[0].bytes_saved, 0);
+        assert_eq!(rows[0].roughneck_tokens_saved, 0);
+    }
+
+    #[test]
+    fn run_savings_sums_across_steps() {
+        let value = serde_json::json!({
+            "steps": [
+                { "id": "a", "status": "success", "tokens_in": 1, "tokens_out": 1,
+                  "bytes_raw": 1000, "bytes_saved": 400, "roughneck_tokens_saved": 100 },
+                { "id": "b", "status": "success", "tokens_in": 1, "tokens_out": 1,
+                  "bytes_raw": 2000, "bytes_saved": 600, "roughneck_tokens_saved": 250 }
+            ]
+        });
+        let rows = step_rows(&value);
+        let totals = run_savings(&rows);
+        assert_eq!(totals.bytes_raw, 3000);
+        assert_eq!(totals.bytes_saved, 1000);
+        assert_eq!(totals.roughneck_tokens_saved, 350);
+    }
+
+    /// Asserts the figures the bug report says are dropped on the floor
+    /// actually appear in the `--run <id>` JSON view's per-step and
+    /// aggregate output, and that the roughneck figure is labelled as an
+    /// estimate (FIX 3) rather than presented as a hard measured number.
+    #[test]
+    fn run_json_shape_surfaces_bytes_saved_and_roughneck_estimate() {
+        let value = serde_json::json!({
+            "steps": [
+                { "id": "specify", "status": "success", "tokens_in": 100, "tokens_out": 50,
+                  "bytes_raw": 5000, "bytes_saved": 3200, "roughneck_tokens_saved": 900 }
+            ]
+        });
+        let rows = step_rows(&value);
+        let savings = run_savings(&rows);
+
+        // Mirrors the object print_run_json builds.
+        let steps: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "status": r.status,
+                    "tokens_in": r.tokens_in,
+                    "tokens_out": r.tokens_out,
+                    "bytes_raw": r.bytes_raw,
+                    "bytes_saved": r.bytes_saved,
+                    "roughneck_tokens_saved_estimate": r.roughneck_tokens_saved,
+                })
+            })
+            .collect();
+        let obj = serde_json::json!({
+            "bytes_saved": savings.bytes_saved,
+            "roughneck_tokens_saved_estimate": savings.roughneck_tokens_saved,
+            "steps": steps,
+        });
+
+        assert_eq!(obj["bytes_saved"], 3200);
+        assert_eq!(obj["roughneck_tokens_saved_estimate"], 900);
+        assert_eq!(obj["steps"][0]["bytes_saved"], 3200);
+        // Field name itself carries the "estimate" label per FIX 3 — never a
+        // bare "roughneck_tokens_saved" implying a measured counterfactual.
+        assert!(
+            obj["steps"][0]
+                .get("roughneck_tokens_saved_estimate")
+                .is_some()
+        );
+        assert!(obj["steps"][0].get("roughneck_tokens_saved").is_none());
+    }
+
+    #[test]
+    fn pipeline_savings_none_when_no_run_manifests_found() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No .derrick/runs directory at all: aggregate must return None, not
+        // a misleading measured-zero.
+        assert!(aggregate_pipeline_savings(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn pipeline_savings_aggregates_across_multiple_run_manifests() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runs_dir = tmp.path().join(".derrick").join("runs");
+        for (run_id, bytes_saved, roughneck) in
+            [("run-a", 1000u64, 200u64), ("run-b", 500u64, 50u64)]
+        {
+            let dir = runs_dir.join(run_id);
+            std::fs::create_dir_all(&dir).expect("create run dir");
+            let manifest = serde_json::json!({
+                "steps": [
+                    { "id": "specify", "status": "success", "tokens_in": 1, "tokens_out": 1,
+                      "bytes_raw": bytes_saved * 2, "bytes_saved": bytes_saved,
+                      "roughneck_tokens_saved": roughneck }
+                ]
+            });
+            std::fs::write(
+                dir.join("manifest.json"),
+                serde_json::to_string(&manifest).expect("serialize manifest"),
+            )
+            .expect("write manifest");
+        }
+
+        let totals = aggregate_pipeline_savings(tmp.path()).expect("some savings");
+        assert_eq!(totals.runs, 2);
+        assert_eq!(totals.bytes_saved, 1500);
+        assert_eq!(totals.roughneck_tokens_saved, 250);
     }
 }

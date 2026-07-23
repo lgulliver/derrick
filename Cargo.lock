@@ -621,6 +621,7 @@ dependencies = [
 name = "derrick-assay"
 version = "0.1.0-alpha.5"
 dependencies = [
+ "async-trait",
  "chrono",
  "derrick-adopt",
  "derrick-config",

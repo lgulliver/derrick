@@ -43,6 +43,13 @@
 //! * `Full` — applies the rate formula: `saved = actual × rate / (1 − rate)`
 //! * `Partial` — 40% of the Full estimate
 //! * `None` — 0 (the model did not comply; no saving to attribute)
+//!
+//! **This number is always an estimate, never a measured counterfactual.**
+//! It is a fixed-rate formula gated by a pass/fail compliance heuristic, not
+//! a before/after byte comparison (contrast with `derrick-scrub`'s
+//! `bytes_saved`, which *is* measured). Any UI or report that surfaces
+//! [`RoughneckSavings::tokens_saved`] MUST label it as an estimate — see
+//! [`TOKENS_SAVED_LABEL`] — so it is never mistaken for a hard number.
 
 /// Lite-intensity instructions: drop filler, keep prose.
 pub const LITE_INSTRUCTIONS: &str = "[ROUGHNECK:LITE] Be concise. Drop filler words, preambles, and closing summaries. Keep all technical content complete and accurate.";
@@ -68,10 +75,21 @@ pub enum Compliance {
 #[derive(Clone, Debug)]
 pub struct RoughneckSavings {
     /// Estimated tokens saved. Zero when compliance is `None`.
+    ///
+    /// This is a fixed-rate formula over a compliance heuristic (see the
+    /// crate-level docs), not a measured counterfactual. Label it as an
+    /// estimate wherever it surfaces — see [`TOKENS_SAVED_LABEL`].
     pub tokens_saved: u32,
     /// How faithfully the model obeyed the compression instruction.
     pub compliance: Compliance,
 }
+
+/// Canonical human-readable label for surfacing [`RoughneckSavings::tokens_saved`]
+/// in any UI, report, or CLI output. `tokens_saved` is a fixed-rate formula
+/// gated by a pass/fail compliance heuristic — not a measured counterfactual
+/// — so every surface (e.g. `derrick gain`) must present it as an estimate
+/// rather than a hard number.
+pub const TOKENS_SAVED_LABEL: &str = "roughneck tokens saved (est.)";
 
 /// Filler / hedge words that compressed responses should largely omit.
 ///
@@ -499,6 +517,16 @@ fn compute_tokens_saved(output: &str, rate: f64, compliance: Compliance) -> u32 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── FIX 3: tokens_saved must always be labelled an estimate ────────────
+
+    #[test]
+    fn tokens_saved_label_marks_the_figure_as_an_estimate() {
+        // tokens_saved is a fixed-rate formula over a pass/fail compliance
+        // gate, not a measured counterfactual — any surface (e.g. `derrick
+        // gain`) must present it as "(est.)", never a bare number.
+        assert!(TOKENS_SAVED_LABEL.contains("est."));
+    }
 
     // ── inject_prompt ──────────────────────────────────────────────────────
 

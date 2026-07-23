@@ -132,9 +132,14 @@ pub async fn execute_step(
                 )
                 .await;
             if !message.is_empty() {
+                let label = if status == StepStatus::Failed {
+                    "step failed"
+                } else {
+                    "step halted"
+                };
                 let _ = derrick_assay::io::append_log(
                     &log_path,
-                    &format!("\n---\nstep halted: {message}\n"),
+                    &format!("\n---\n{label}: {message}\n"),
                 );
             }
             Ok(StepRecord {
@@ -151,6 +156,45 @@ pub async fn execute_step(
                 roughneck_tokens_saved,
             })
         }
+        // A `StepFailed` is a step-level failure, not an unrecoverable
+        // orchestration error. Surface it as `Ok(StepRecord { Failed })` so the
+        // caller's state machine runs its `Failed` arm — firing the terminal
+        // reporter callbacks (no orphaned spinner) and the worktree-preserve
+        // path. The caller persists this record to the manifest, so we must
+        // NOT push it here (doing so would double-count the step).
+        Err(RunError::StepFailed { id, message }) => {
+            let _ignored = derrick_assay::io::append_log(
+                &log_path,
+                &format!("\n---\nstep {id} failed: {message}\n"),
+            );
+            let _ = substrate
+                .record_typed_event(
+                    derrick_substrate::EventScope::Worktree {
+                        run_id: run_id.to_owned(),
+                    },
+                    derrick_substrate::EventKind::PipelineStepCompleted {
+                        step_id: step.id().to_owned(),
+                        status: "failed".to_owned(),
+                    },
+                )
+                .await;
+            Ok(StepRecord {
+                id: step.id().to_owned(),
+                status: StepStatus::Failed,
+                started_at,
+                finished_at,
+                log_path,
+                artifacts: Vec::new(),
+                tokens_in: 0,
+                tokens_out: 0,
+                bytes_raw: 0,
+                bytes_saved: 0,
+                roughneck_tokens_saved: 0,
+            })
+        }
+        // A genuinely unrecoverable orchestration error (bad config, IO,
+        // substrate/host failure). The caller propagates via `?` before it can
+        // persist the run, so finalize the manifest here, then bubble up.
         Err(error) => {
             let _ignored = derrick_assay::io::append_log(&log_path, &format!("{error}\n"));
             let record = StepRecord {
@@ -1042,10 +1086,13 @@ async fn execute_bash_step(
     if output.status.success() {
         Ok(StepExecution::success(Vec::new()).with_compression(bytes_raw, bytes_saved))
     } else {
-        Err(RunError::StepFailed {
-            id: step.id().to_owned(),
-            message: format!("bash exited with {}", output.status),
-        })
+        // Step-level failure: route through the state machine as `Failed`
+        // (not `Err`) so terminal callbacks fire. Keep the compression stats
+        // recorded — the subprocess still produced output worth accounting.
+        Ok(
+            StepExecution::failed(format!("bash exited with {}", output.status))
+                .with_compression(bytes_raw, bytes_saved),
+        )
     }
 }
 

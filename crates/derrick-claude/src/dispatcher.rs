@@ -541,6 +541,17 @@ mod tests {
     use derrick_substrate_native::{NativeConfig, NativeSubstrate};
     use tempfile::TempDir;
 
+    /// Mutating the process-wide `PATH` env var is not thread-safe: other
+    /// `#[tokio::test]`s run concurrently on separate OS threads (each with
+    /// its own current-thread runtime) and would race on the same `PATH`.
+    /// Serialise any test that touches `PATH` on this guard, matching the
+    /// existing pattern in `derrick-tools/tests/hosts.rs` (`PROCESS_LOCK`) and
+    /// `derrick-stack/tests/fake_gh.rs` (`GUARD`). A `tokio::sync::Mutex` is
+    /// used (rather than `std::sync::Mutex`) so the guard can be held across
+    /// `.await` points for the whole async test body without tripping
+    /// clippy's `await_holding_lock`.
+    static PATH_MUTATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn site_fixture() -> derrick_config::Site {
         derrick_config::Config::defaults().site().clone()
     }
@@ -728,7 +739,10 @@ mod tests {
     #[tokio::test]
     async fn auto_dispatch_with_missing_binary_releases_hand() {
         // We override $PATH so `claude` is not found; the poll task should
-        // record a release event and return the ticket to Ready.
+        // record a release event and return the ticket to Ready. Hold the
+        // shared guard for the whole test so no concurrently-running test on
+        // another thread observes (or clobbers) our empty PATH.
+        let _path_guard = PATH_MUTATION_LOCK.lock().await;
         let tempdir = tempfile::tempdir()
             .map_err(|error| format!("tempdir: {error}"))
             .unwrap_or_else(|message| panic!("{message}"));
@@ -741,10 +755,11 @@ mod tests {
         let dispatcher = ClaudeHandDispatcher::new(Arc::clone(&substrate), cfg);
 
         // Empty PATH for the duration of this test so spawn fails fast.
-        // SAFETY: tests run single-threaded by default for this scope.
+        // SAFETY: set_var/remove_var on a process-wide env var is only sound
+        // because `_path_guard` (held above) serialises this test against
+        // every other test in this crate that touches PATH — no concurrent
+        // reader/writer on another thread can observe a partial mutation.
         let prev_path = std::env::var_os("PATH");
-        // SAFETY: set_var/remove_var require care in multi-threaded contexts;
-        // tokio::test uses a current-thread runtime by default which is fine.
         unsafe {
             std::env::set_var("PATH", "");
         }

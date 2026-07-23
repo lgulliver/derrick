@@ -2157,4 +2157,601 @@ Details"#;
             .expect("reconcile");
         assert_eq!(exec.status, crate::types::StepStatus::Halted);
     }
+
+    // ---- async round-loop coverage ------------------------------------
+    //
+    // Everything above is `#[test]` on pure helpers. Nothing previously drove
+    // `run_reviewer_rounds`/`execute_assay_core`/`replan_from_objections`/
+    // `detect_codex_fallback` as `#[tokio::test]`s — the only prior coverage
+    // was one E2E smoke test (in `derrick-flow`) whose mock reviewer accepts
+    // on round 1. These tests drive the real async multi-round loop:
+    //   - a single reviewer that REJECTs round 1 (with suggested revisions)
+    //     then ACCEPTs round 2, exercising `replan_from_objections` and the
+    //     round-2 delta-prompt path via `last_delta_from_plan`.
+    //   - multi-reviewer split verdicts under both `on_split: reject` and
+    //     `on_split: majority`, exercising the concurrent semaphore-gated
+    //     `tokio::spawn` fan-out in `execute_assay_core` and
+    //     `reconcile_verdicts`.
+    //   - the `detect_codex_fallback` headless-codex path, which calls the
+    //     `claude` host adapter directly instead of `derrick_models::resolve_role`.
+    //
+    // Reviewer "models" are the real `provider: shell` adapter pointed at a
+    // tiny mock script (no network, no real host CLI) — the same pattern
+    // `derrick-flow`'s own `/drill` E2E tests use. The codex-fallback case
+    // mocks `derrick_tools::HostAdapter` directly, matching `StaticHost` in
+    // `derrick-flow/src/lib.rs`.
+
+    use derrick_tools::{HostAdapter, HostError, HostRegistry, HostRequest, HostResponse};
+
+    fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).expect("stat script").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod script");
+        }
+        path
+    }
+
+    /// Always responds with a bare `accept` verdict.
+    fn accept_script(dir: &Path) -> PathBuf {
+        write_script(
+            dir,
+            "accept-reviewer",
+            "#!/bin/sh\ncat > /dev/null\nprintf '## Verdict\\naccept\\n'\n",
+        )
+    }
+
+    /// Always responds with a bare `reject` verdict (no `## Suggested
+    /// revisions` section — valid only when this is the *final* round, since
+    /// `run_reviewer_rounds` only parses suggested revisions when a reject
+    /// triggers a replan, i.e. when `round < max_rounds`).
+    fn reject_script(dir: &Path) -> PathBuf {
+        write_script(
+            dir,
+            "reject-reviewer",
+            "#!/bin/sh\ncat > /dev/null\nprintf '## Verdict\\nreject\\n'\n",
+        )
+    }
+
+    /// First invocation REJECTs with a `## Suggested revisions` section (so
+    /// `suggested_revisions()` can extract objections for the replan);
+    /// records a state file so every subsequent invocation ACCEPTs instead.
+    fn reject_then_accept_script(dir: &Path) -> PathBuf {
+        let state = dir.join("reject-then-accept.seen");
+        let body = format!(
+            "#!/bin/sh\ncat > /dev/null\nif [ -f '{state}' ]; then\n  printf '## Verdict\\naccept\\n'\nelse\n  printf seen > '{state}'\n  printf '## Suggested revisions\\n- address concern A\\n## Verdict\\nreject\\n'\nfi\n",
+            state = state.display()
+        );
+        write_script(dir, "reject-then-accept-reviewer", &body)
+    }
+
+    /// Creates `<tmp>/specs/001-test/{spec.md,plan.md}` plus a non-placeholder
+    /// constitution, matching the layout `run_reviewer_rounds` expects.
+    fn feature_workspace() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let feature_dir = PathBuf::from("specs/001-test");
+        std::fs::create_dir_all(tmp.path().join(&feature_dir)).expect("mkdir feature dir");
+        std::fs::write(tmp.path().join(&feature_dir).join("spec.md"), "spec body")
+            .expect("write spec.md");
+        std::fs::write(tmp.path().join(&feature_dir).join("plan.md"), "plan body")
+            .expect("write plan.md");
+        std::fs::create_dir_all(tmp.path().join(".specify/memory"))
+            .expect("mkdir constitution dir");
+        std::fs::write(
+            tmp.path().join(".specify/memory/constitution.md"),
+            "constitution",
+        )
+        .expect("write constitution.md");
+        (tmp, feature_dir)
+    }
+
+    fn pipeline_step(config: &Config, id: &str) -> derrick_config::PipelineStep {
+        config
+            .pipeline()
+            .iter()
+            .find(|step| step.id() == id)
+            .unwrap_or_else(|| panic!("pipeline step {id:?} not found in config"))
+            .clone()
+    }
+
+    fn single_reviewer_yaml(reviewer_cli: &Path, rounds: u32) -> String {
+        format!(
+            r#"version: 1
+site:
+  name: test
+  prefix: tst
+models:
+  shell-reviewer:
+    provider: shell
+    cli: "{cli}"
+    model: shell-reviewer
+roles:
+  proposer: shell-reviewer
+  reviewer: shell-reviewer
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: {rounds}
+pipeline:
+  - id: plan
+    role: proposer
+    host: claude
+  - id: assay
+    runner: derrick
+    skippable: true
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#,
+            cli = reviewer_cli.display(),
+            rounds = rounds,
+        )
+    }
+
+    /// Builds a `derrick.yaml` with one `provider: shell` reviewer role per
+    /// `(role_name, script_path)` pair, all reviewing under `on_split`. No
+    /// `plan` step is included — these scenarios use `rounds: 1`, so no
+    /// reviewer ever rejects with rounds remaining and `replan_from_objections`
+    /// is never invoked.
+    fn multi_reviewer_yaml(reviewers: &[(&str, &Path)], on_split: &str) -> String {
+        let mut models = String::new();
+        let mut roles = String::new();
+        let mut reviewer_names = Vec::new();
+        for (role, cli) in reviewers {
+            models.push_str(&format!(
+                "  shell-{role}:\n    provider: shell\n    cli: \"{}\"\n    model: shell-{role}\n",
+                cli.display()
+            ));
+            roles.push_str(&format!("  {role}: shell-{role}\n"));
+            reviewer_names.push((*role).to_owned());
+        }
+        let first_role = reviewers[0].0;
+        format!(
+            r#"version: 1
+site:
+  name: test
+  prefix: tst
+models:
+{models}roles:
+{roles}tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+  assay:
+    enabled: true
+    role: {first_role}
+    reviewers: [{reviewer_list}]
+    on_split: {on_split}
+    rounds: 1
+pipeline:
+  - id: assay
+    runner: derrick
+    skippable: true
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#,
+            reviewer_list = reviewer_names.join(", "),
+        )
+    }
+
+    /// Mock `claude` host adapter used by `replan_from_objections` (the
+    /// `plan` step's `host:` binding) — returns a fixed, recognisable delta so
+    /// tests can assert it landed in `plan.md`.
+    struct ReplanHost;
+
+    #[async_trait::async_trait]
+    impl HostAdapter for ReplanHost {
+        fn name(&self) -> &str {
+            "claude"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn run(&self, _request: HostRequest) -> Result<HostResponse, HostError> {
+            Ok(HostResponse {
+                stdout: "REPLAN-DELTA: address concern A\n".to_owned(),
+                stderr: String::new(),
+                exit_code: 0,
+                elapsed: std::time::Duration::from_millis(1),
+                tokens_in: 0,
+                tokens_out: 0,
+                pid: None,
+            })
+        }
+    }
+
+    /// Mock `claude` host adapter for the `detect_codex_fallback` path —
+    /// returns a fixed transcript and reports fixed token counts so the test
+    /// can assert both flow all the way through to `ReviewerOutcome`.
+    struct StaticClaudeHost {
+        stdout: &'static str,
+        tokens_in: u32,
+        tokens_out: u32,
+    }
+
+    #[async_trait::async_trait]
+    impl HostAdapter for StaticClaudeHost {
+        fn name(&self) -> &str {
+            "claude"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn run(&self, _request: HostRequest) -> Result<HostResponse, HostError> {
+            Ok(HostResponse {
+                stdout: self.stdout.to_owned(),
+                stderr: String::new(),
+                exit_code: 0,
+                elapsed: std::time::Duration::from_millis(1),
+                tokens_in: self.tokens_in,
+                tokens_out: self.tokens_out,
+                pid: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_assay_single_reviewer_reject_then_accept_replans_and_succeeds() {
+        let (tmp, feature_dir) = feature_workspace();
+        let reviewer_cli = reject_then_accept_script(tmp.path());
+
+        let yaml = single_reviewer_yaml(&reviewer_cli, 2);
+        std::fs::write(tmp.path().join("derrick.yaml"), &yaml).expect("write derrick.yaml");
+        let config = Config::load_from_path(&tmp.path().join("derrick.yaml")).expect("load config");
+
+        let mut hosts = HostRegistry::empty();
+        hosts.register("claude", Box::new(ReplanHost));
+        let hosts = Arc::new(hosts);
+
+        let step = pipeline_step(&config, "assay");
+        let mut state = ExecutionState::new(
+            "build the thing".to_owned(),
+            "run-rr-1".to_owned(),
+            tmp.path().join(".derrick/runs/run-rr-1"),
+        );
+        state.feature_dir = Some(feature_dir.clone());
+
+        let log_path = tmp.path().join("assay.log");
+        let exec = execute_assay(
+            &config,
+            hosts,
+            tmp.path(),
+            tmp.path(),
+            &feature_dir,
+            "build the thing",
+            "run-rr-1",
+            &step,
+            &log_path,
+            &mut state,
+        )
+        .await
+        .expect("execute_assay should succeed once the replanned round is accepted");
+
+        assert_eq!(exec.status, crate::types::StepStatus::Success);
+
+        // The reject-round objections were sent to the `claude` host (the
+        // `plan` step's binding) via `replan_from_objections`, which appended
+        // the response to plan.md.
+        let plan_after = std::fs::read_to_string(tmp.path().join(&feature_dir).join("plan.md"))
+            .expect("read plan.md");
+        assert!(
+            plan_after.contains("REPLAN-DELTA"),
+            "expected replanned delta appended to plan.md, got: {plan_after}"
+        );
+
+        let verdict =
+            std::fs::read_to_string(tmp.path().join(&feature_dir).join("assay/verdict.md"))
+                .expect("read verdict.md");
+        assert!(verdict.contains("verdict: accept"));
+        assert!(verdict.contains("round: 2"));
+
+        let debate = std::fs::read_to_string(tmp.path().join(&feature_dir).join("assay/debate.md"))
+            .expect("read debate.md");
+        assert!(
+            debate.contains("Rebuttal"),
+            "expected a rebuttal transcript entry from the replan, got: {debate}"
+        );
+        assert!(debate.contains("round 1/2"));
+        assert!(debate.contains("round 2/2"));
+    }
+
+    #[tokio::test]
+    async fn execute_assay_multi_reviewer_split_verdict_on_split_reject_halts() {
+        let (tmp, feature_dir) = feature_workspace();
+        let accept_cli = accept_script(tmp.path());
+        let reject_cli = reject_script(tmp.path());
+
+        let yaml = multi_reviewer_yaml(
+            &[("reviewer-a", &accept_cli), ("reviewer-b", &reject_cli)],
+            "reject",
+        );
+        std::fs::write(tmp.path().join("derrick.yaml"), &yaml).expect("write derrick.yaml");
+        let config = Config::load_from_path(&tmp.path().join("derrick.yaml")).expect("load config");
+
+        let step = pipeline_step(&config, "assay");
+        let mut state = ExecutionState::new(
+            "prompt".to_owned(),
+            "run-split-1".to_owned(),
+            tmp.path().join(".derrick/runs/run-split-1"),
+        );
+        state.feature_dir = Some(feature_dir.clone());
+
+        let exec = execute_assay(
+            &config,
+            Arc::new(HostRegistry::empty()),
+            tmp.path(),
+            tmp.path(),
+            &feature_dir,
+            "prompt",
+            "run-split-1",
+            &step,
+            &tmp.path().join("assay.log"),
+            &mut state,
+        )
+        .await
+        .expect("a split verdict under on_split: reject is a halt, not an error");
+
+        assert_eq!(exec.status, crate::types::StepStatus::Halted);
+
+        let combined =
+            std::fs::read_to_string(tmp.path().join(&feature_dir).join("assay/verdict.md"))
+                .expect("read combined verdict.md");
+        assert!(combined.contains("verdict: reject"));
+        assert!(combined.contains("on_split: reject"));
+        assert!(combined.contains("reviewers: 2"));
+    }
+
+    #[tokio::test]
+    async fn execute_assay_multi_reviewer_majority_accepts_despite_one_reject() {
+        let (tmp, feature_dir) = feature_workspace();
+        let accept_cli = accept_script(tmp.path());
+        let reject_cli = reject_script(tmp.path());
+
+        // 3 reviewers (majority requires odd count): 2 accept, 1 reject.
+        let yaml = multi_reviewer_yaml(
+            &[
+                ("reviewer-a", &accept_cli),
+                ("reviewer-b", &accept_cli),
+                ("reviewer-c", &reject_cli),
+            ],
+            "majority",
+        );
+        std::fs::write(tmp.path().join("derrick.yaml"), &yaml).expect("write derrick.yaml");
+        let config = Config::load_from_path(&tmp.path().join("derrick.yaml")).expect("load config");
+
+        let step = pipeline_step(&config, "assay");
+        let mut state = ExecutionState::new(
+            "prompt".to_owned(),
+            "run-split-2".to_owned(),
+            tmp.path().join(".derrick/runs/run-split-2"),
+        );
+        state.feature_dir = Some(feature_dir.clone());
+
+        let exec = execute_assay(
+            &config,
+            Arc::new(HostRegistry::empty()),
+            tmp.path(),
+            tmp.path(),
+            &feature_dir,
+            "prompt",
+            "run-split-2",
+            &step,
+            &tmp.path().join("assay.log"),
+            &mut state,
+        )
+        .await
+        .expect("majority accept should succeed");
+
+        assert_eq!(exec.status, crate::types::StepStatus::Success);
+
+        let combined =
+            std::fs::read_to_string(tmp.path().join(&feature_dir).join("assay/verdict.md"))
+                .expect("read combined verdict.md");
+        assert!(combined.contains("verdict: accept"));
+        assert!(combined.contains("on_split: majority"));
+        assert!(combined.contains("reviewers: 3"));
+    }
+
+    #[tokio::test]
+    async fn run_reviewer_rounds_codex_fallback_uses_claude_host_and_propagates_tokens() {
+        let (tmp, feature_dir) = feature_workspace();
+
+        // `roles.reviewer` is bound to a model literally named `codex`, so
+        // `detect_codex_fallback` recognises it and `run_reviewer_rounds`
+        // calls the `claude` host adapter directly instead of
+        // `derrick_models::resolve_role` — the model's own `cli` is never
+        // invoked, so it can be a harmless placeholder.
+        let yaml = r#"version: 1
+site:
+  name: test
+  prefix: tst
+models:
+  codex:
+    provider: shell
+    cli: "true"
+    model: codex
+roles:
+  reviewer: codex
+tools:
+  speckit:
+    enabled: true
+    version: ">=0.4.0"
+  substrate:
+    backend: native
+    mode: solo
+  copilot:
+    enabled: false
+    agent_identity: derrick-hand
+  assay:
+    enabled: true
+    role: reviewer
+    reviewers: [reviewer]
+    rounds: 1
+pipeline:
+  - id: assay
+    runner: derrick
+    skippable: true
+guardrails:
+  constitution_path: .specify/memory/constitution.md
+  forbid_paths: []
+  required_labels: []
+parallelism:
+  batch_max: 8
+  step_max: 4
+  assay_max: 2
+state:
+  dir: .derrick
+  log_runs: true
+  worktree_root: .derrick/worktrees
+"#;
+        std::fs::write(tmp.path().join("derrick.yaml"), yaml).expect("write derrick.yaml");
+        let config = Config::load_from_path(&tmp.path().join("derrick.yaml")).expect("load config");
+
+        let mut hosts = HostRegistry::empty();
+        hosts.register(
+            "claude",
+            Box::new(StaticClaudeHost {
+                stdout: "## Verdict\naccept\n",
+                tokens_in: 7,
+                tokens_out: 9,
+            }),
+        );
+        let hosts = Arc::new(hosts);
+
+        let step = pipeline_step(&config, "assay");
+        let mut state = ExecutionState::new(
+            "prompt".to_owned(),
+            "run-codex-1".to_owned(),
+            tmp.path().join(".derrick/runs/run-codex-1"),
+        );
+        state.feature_dir = Some(feature_dir.clone());
+
+        let reviewer_dir = tmp.path().join(&feature_dir).join("assay");
+        let log_path = tmp.path().join("assay.log");
+
+        let outcome = run_reviewer_rounds(
+            &config,
+            hosts,
+            tmp.path(),
+            tmp.path(),
+            &feature_dir,
+            "prompt",
+            "run-codex-1",
+            &step,
+            &log_path,
+            "reviewer",
+            &reviewer_dir,
+            &state,
+        )
+        .await
+        .expect("run_reviewer_rounds should succeed via the codex-headless fallback");
+
+        match outcome {
+            ReviewerRoundOutcome::Decided(decided) => {
+                assert_eq!(decided.verdict, "accept");
+                assert_eq!(decided.role, "reviewer");
+                assert_eq!(decided.tokens_in, 7);
+                assert_eq!(decided.tokens_out, 9);
+                assert_eq!(decided.rounds_used, 1);
+            }
+            ReviewerRoundOutcome::Skipped => panic!("expected a decided outcome, got Skipped"),
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_codex_fallback_true_for_codex_named_model() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("derrick.yaml"),
+            "tools:\n  assay:\n    reviewers: [reviewer]\n\
+             models:\n  codex:\n    provider: shell\n    cli: \"true\"\n    model: codex\n\
+             roles:\n  reviewer: codex\n",
+        )
+        .expect("write config");
+        let config = Config::load_layered(tmp.path()).expect("load config");
+        assert!(
+            detect_codex_fallback(&config, "reviewer")
+                .await
+                .expect("detect_codex_fallback"),
+            "a role bound to a model literally named `codex` should be recognised as codex family"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_codex_fallback_false_for_non_codex_model() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("derrick.yaml"),
+            "tools:\n  assay:\n    reviewers: [reviewer]\n\
+             models:\n  shell-reviewer:\n    provider: shell\n    cli: \"true\"\n    model: shell-reviewer\n\
+             roles:\n  reviewer: shell-reviewer\n",
+        )
+        .expect("write config");
+        let config = Config::load_layered(tmp.path()).expect("load config");
+        assert!(
+            !detect_codex_fallback(&config, "reviewer")
+                .await
+                .expect("detect_codex_fallback"),
+            "a role bound to a non-codex shell model must not trigger the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_codex_fallback_false_for_unbound_role() {
+        // `roles.get(reviewer_role)` returns `None` for a role with no
+        // binding — must fail closed to `false` (never guess codex), not
+        // error or panic.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("derrick.yaml"), "version: 1\n").expect("write config");
+        let config = Config::load_layered(tmp.path()).expect("load config");
+        assert!(
+            !detect_codex_fallback(&config, "no-such-role")
+                .await
+                .expect("detect_codex_fallback")
+        );
+    }
 }

@@ -1077,8 +1077,16 @@ fn extensive_regex() -> Option<&'static Regex> {
 
 fn causal_regex() -> Option<&'static Regex> {
     static REGEX: OnceLock<Option<Regex>> = OnceLock::new();
+    // `so` is deliberately excluded: unlike `because`/`therefore` it is
+    // overwhelmingly used as a bare intensifier ("so effective", "so good",
+    // "so far", "not so much") rather than a causal conjunction, and a
+    // conjunction-only regex cannot tell the two apart without full parsing.
+    // Converting intensifier `so` to " -> " inverts meaning (D-fix: caveman
+    // ultra corrupted "so effective" into "-> effective"). Dropping the
+    // alternative entirely is the conservative fix; see the
+    // non_causal_so_* corpus cases in tests/corpus/ultra/.
     REGEX
-        .get_or_init(|| Regex::new(r"(?i)\s+(?:because|therefore|so)\s+").ok())
+        .get_or_init(|| Regex::new(r"(?i)\s+(?:because|therefore)\s+").ok())
         .as_ref()
 }
 
