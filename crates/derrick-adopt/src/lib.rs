@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use derrick_config::{Config, InitTemplateVars, SubstrateMode, render_init_template};
@@ -60,6 +60,14 @@ const CODEX_SETTINGS_TEMPLATE: &str = include_str!(concat!(
 /// worktrees, queues, logs, or local state. Shared by `derrick init` and the
 /// adoption pass to keep the two codegen sites identical.
 pub const DERRICK_GITIGNORE: &str = "runs/\nstate.json\nforeman.log\nderrick.db*\nindex.db*\nworktrees/\ncopilot-queue/\ncopilot-worktrees/\n.adopt-stage-*/\n";
+
+/// Minimum age a `.adopt-stage-*` directory must reach before pruning will
+/// remove it. A concurrent `apply` creates its stage dir seconds before use,
+/// so anything younger than this could belong to a live run and must be left
+/// alone; anything older is debris from a crashed or interrupted run and is
+/// safe to reclaim. One hour is far longer than any real apply runs, yet short
+/// enough that leftovers are cleaned up on the next apply.
+const STAGE_DIR_PRUNE_GRACE: Duration = Duration::from_secs(60 * 60);
 
 const DERRICK_BLOCK_START: &str = "<!-- derrick:start -->";
 const DERRICK_BLOCK_END: &str = "<!-- derrick:end -->";
@@ -284,6 +292,7 @@ impl Adopter {
 
         plan.blockers = blockers.into_iter().collect();
         plan.warnings = warnings.into_iter().collect();
+        plan.source_guards = source_guards(detection, &plan.writes);
         plan.sort();
         Ok(plan)
     }
@@ -294,36 +303,41 @@ impl Adopter {
             return Err(AdoptError::Blocked(plan.blockers.clone()));
         }
         self.preflight(plan)?;
+        // Re-read the files the merges were computed against. If any changed
+        // since detect, the staged content is stale — abort rather than
+        // silently clobber the external edit (OQ6, DESIGN.md §5.6).
+        self.revalidate_sources(plan)?;
 
         let state_dir = self.repo_root.join(".derrick");
         fs::create_dir_all(&state_dir).map_err(|source| AdoptError::Io {
             path: state_dir.clone(),
             source,
         })?;
+        // Prune stage dirs left behind by earlier interrupted or partially
+        // failed applies so they do not accumulate under `.derrick/`.
+        self.prune_stale_stage_dirs(&state_dir);
         let stage_dir = state_dir.join(format!(".adopt-stage-{}", Uuid::new_v4()));
-        // TODO(T012): Foreman's D32 cleanup loop must prune stale `.derrick/.adopt-stage-*`.
         fs::create_dir_all(&stage_dir).map_err(|source| AdoptError::Io {
             path: stage_dir.clone(),
             source,
         })?;
 
-        for write in &plan.writes {
-            let staged_path = stage_dir.join(&write.path);
-            if let Some(parent) = staged_path.parent() {
-                fs::create_dir_all(parent).map_err(|source| AdoptError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            }
-            fs::write(&staged_path, &write.content).map_err(|source| AdoptError::Io {
-                path: staged_path,
-                source,
-            })?;
+        // Stage everything before touching real files. On any staging error,
+        // remove the half-built stage dir so it does not leak.
+        if let Err(error) = self.stage_writes(plan, &stage_dir) {
+            let _ = fs::remove_dir_all(&stage_dir);
+            return Err(error);
         }
 
-        let staged_config = stage_dir.join("derrick.yaml");
-        if staged_config.exists() {
-            Config::load_from_path(&staged_config)?;
+        // Second, tighter revalidation immediately before the promotion loop.
+        // A guarded file can change again during `stage_writes`, so re-check
+        // now to keep the check-to-promote window as small as possible: any
+        // rename below would clobber that external edit. On drift, tear down
+        // the half-built stage dir (same cleanup as a staging failure) and
+        // abort with `StaleDetection`. Nothing has been promoted yet.
+        if let Err(error) = self.revalidate_sources(plan) {
+            let _ = fs::remove_dir_all(&stage_dir);
+            return Err(error);
         }
 
         let mut written = Vec::new();
@@ -396,6 +410,107 @@ impl Adopter {
             bookkeeping,
             partial_failure: None,
         })
+    }
+
+    /// Re-reads every file a merge write depended on and compares it against the
+    /// content captured at detect. Returns [`AdoptError::StaleDetection`] listing
+    /// any file whose on-disk state diverged (edited, created, or deleted) since
+    /// detection. Read errors other than "not found" propagate as IO errors.
+    fn revalidate_sources(&self, plan: &AdoptionPlan) -> Result<(), AdoptError> {
+        let mut stale = Vec::new();
+        for guard in &plan.source_guards {
+            let path = self.repo_root.join(&guard.path);
+            let current = match fs::read_to_string(&path) {
+                Ok(contents) => Some(contents),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(source) => return Err(AdoptError::Io { path, source }),
+            };
+            if current.as_deref() != guard.expected.as_deref() {
+                stale.push(guard.path.clone());
+            }
+        }
+        if stale.is_empty() {
+            Ok(())
+        } else {
+            stale.sort();
+            stale.dedup();
+            Err(AdoptError::StaleDetection(stale))
+        }
+    }
+
+    /// Best-effort removal of leftover `.derrick/.adopt-stage-*` directories from
+    /// prior runs. Failures are ignored so a stray locked directory never blocks
+    /// an otherwise-valid apply.
+    ///
+    /// Only directories older than [`STAGE_DIR_PRUNE_GRACE`] are removed. A
+    /// second `apply` running concurrently against the same repo will have just
+    /// created its own stage dir; pruning that mid-flight would corrupt the
+    /// live run. The age gate leaves any freshly-created dir untouched while
+    /// still reclaiming genuinely stale debris from crashed runs. The current
+    /// apply creates its own stage dir *after* this runs, so it is never at
+    /// risk from itself.
+    fn prune_stale_stage_dirs(&self, state_dir: &Path) {
+        let Ok(entries) = fs::read_dir(state_dir) else {
+            return;
+        };
+        let now = SystemTime::now();
+        for entry in entries.flatten() {
+            // Use the entry's own metadata (does not traverse symlinks) so a
+            // symlink is never treated as, traversed into, or removed as a real
+            // stage dir. A symlink's own metadata reports `is_dir() == false`,
+            // so `.adopt-stage-*` symlinks are left untouched.
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_dir() {
+                continue;
+            }
+            // Match the prefix without requiring valid UTF-8 so a non-UTF8-named
+            // leftover is still pruned (`OsStr::to_str` would skip it). The
+            // prefix is pure ASCII, so a lossy conversion is byte-accurate over
+            // the matched region.
+            let name = entry.file_name();
+            if !name.to_string_lossy().starts_with(".adopt-stage-") {
+                continue;
+            }
+            // Only reclaim dirs old enough that no live apply could still own
+            // them. A missing/unreadable mtime, or a future mtime (clock skew),
+            // yields no measurable age and is treated conservatively as
+            // too-fresh-to-prune so a concurrent run is never nuked.
+            let old_enough = metadata
+                .modified()
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .is_some_and(|age| age >= STAGE_DIR_PRUNE_GRACE);
+            if old_enough {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    /// Writes every planned file into the staging directory and validates the
+    /// staged `derrick.yaml`. Kept separate from promotion so a staging-phase
+    /// failure can tear the stage dir down without touching real files.
+    fn stage_writes(&self, plan: &AdoptionPlan, stage_dir: &Path) -> Result<(), AdoptError> {
+        for write in &plan.writes {
+            let staged_path = stage_dir.join(&write.path);
+            if let Some(parent) = staged_path.parent() {
+                fs::create_dir_all(parent).map_err(|source| AdoptError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            fs::write(&staged_path, &write.content).map_err(|source| AdoptError::Io {
+                path: staged_path,
+                source,
+            })?;
+        }
+
+        let staged_config = stage_dir.join("derrick.yaml");
+        if staged_config.exists() {
+            Config::load_from_path(&staged_config)?;
+        }
+        Ok(())
     }
 
     fn relative_if_file(&self, relative: impl AsRef<Path>) -> Option<PathBuf> {
@@ -1040,6 +1155,10 @@ pub struct AdoptionPlan {
     pub blockers: Vec<String>,
     /// When true, `apply` runs `specify integration install claude` after writing files.
     pub install_speckit_integration: bool,
+    /// Detect-time snapshot of every file a merge write was computed against.
+    /// `apply` re-reads these before promotion and aborts if any changed since
+    /// detection (guards the OQ6 detect→apply TOCTOU, DESIGN.md §5.6).
+    pub source_guards: Vec<SourceGuard>,
 }
 
 impl AdoptionPlan {
@@ -1049,7 +1168,24 @@ impl AdoptionPlan {
                 .cmp(&right.path)
                 .then(left.as_field.cmp(&right.as_field))
         });
+        self.source_guards
+            .sort_by(|left, right| left.path.cmp(&right.path));
     }
+}
+
+/// A detect-time content snapshot for a file that a merge write depends on.
+///
+/// Captured at `propose` time from the detection report. At `apply` time the
+/// file is re-read and compared: any divergence means the on-disk state changed
+/// between detect and apply, so the pre-computed merge is stale and `apply`
+/// aborts rather than silently clobbering the external edit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceGuard {
+    /// Relative path of the guarded file.
+    pub path: PathBuf,
+    /// Content observed at detect time. `None` means the file was absent at
+    /// detect and must still be absent at apply.
+    pub expected: Option<String>,
 }
 
 /// A planned filesystem write.
@@ -1126,6 +1262,13 @@ pub enum AdoptError {
     /// Proposal has blockers.
     #[error("adoption blocked: {}", .0.join("; "))]
     Blocked(Vec<String>),
+    /// A file changed on disk between detect and apply, so the staged merges
+    /// are stale. The user must re-run `derrick init` to re-detect.
+    #[error(
+        "files changed since detection ({}); re-run `derrick init`",
+        .0.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+    )]
+    StaleDetection(Vec<PathBuf>),
     /// Config parsing or validation failed.
     #[error("{0}")]
     Config(#[from] derrick_config::ConfigError),
@@ -1153,6 +1296,32 @@ struct AdoptionHistoryEntry {
     timestamp: String,
     written: Vec<PathBuf>,
     references: Vec<PathBuf>,
+}
+
+/// Builds the detect-time guards for every merge write in `writes`.
+///
+/// Only `Append`/`MergeJson` writes carry pre-computed merges of existing
+/// content, so only those need revalidation. For each such write we record the
+/// content captured at detect (or `None` when the file was absent), so `apply`
+/// can detect an external edit and abort instead of clobbering it. `Create`
+/// writes replace wholesale and are already gated by blockers, so they are not
+/// guarded here.
+fn source_guards(detection: &DetectionReport, writes: &[PlannedWrite]) -> Vec<SourceGuard> {
+    let mut seen = BTreeSet::new();
+    let mut guards = Vec::new();
+    for write in writes {
+        if !matches!(write.mode, WriteMode::Append | WriteMode::MergeJson) {
+            continue;
+        }
+        if !seen.insert(write.path.clone()) {
+            continue;
+        }
+        guards.push(SourceGuard {
+            path: write.path.clone(),
+            expected: detection.file_contents.get(&write.path).cloned(),
+        });
+    }
+    guards
 }
 
 fn render_derrick_yaml(
@@ -1995,6 +2164,14 @@ mod tests {
         fs::write(path, contents).unwrap_or_else(|error| panic!("write failed: {error}"));
     }
 
+    /// Backdates a path's mtime well past [`STAGE_DIR_PRUNE_GRACE`] so the prune
+    /// age gate treats it as stale debris rather than a live concurrent run.
+    fn age_past_prune_grace(path: &Path) {
+        let old = SystemTime::now() - STAGE_DIR_PRUNE_GRACE - Duration::from_secs(60);
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(old))
+            .unwrap_or_else(|error| panic!("set mtime failed: {error}"));
+    }
+
     #[test]
     fn gitignore_covers_foreman_runtime_artifacts() {
         let entries: Vec<&str> = DERRICK_GITIGNORE.lines().collect();
@@ -2618,6 +2795,270 @@ mod tests {
         let state = fs::read_to_string(dir.path().join(".derrick/state.json"))
             .unwrap_or_else(|error| panic!("read state failed: {error}"));
         assert!(state.matches("timestamp").count() >= 2);
+    }
+
+    #[tokio::test]
+    async fn apply_aborts_when_snapshotted_file_changed_after_detect() {
+        let dir = git_repo();
+        let mcp = dir.path().join(".mcp.json");
+        // A pre-existing merge target: detect snapshots this content and the
+        // plan's .mcp.json merge is computed against it.
+        write(&mcp, r#"{"mcpServers":{"other":{"command":"foo"}}}"#);
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+        assert!(
+            plan.source_guards
+                .iter()
+                .any(|guard| guard.path == Path::new(".mcp.json") && guard.expected.is_some()),
+            "expected a content guard for the pre-existing .mcp.json"
+        );
+
+        // External edit lands between detect and apply.
+        let external = r#"{"mcpServers":{"other":{"command":"CHANGED-EXTERNALLY"}}}"#;
+        write(&mcp, external);
+
+        let error = adopter
+            .apply(&plan)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("expected stale-detection abort"));
+        assert!(
+            matches!(&error, AdoptError::StaleDetection(paths) if paths.contains(&PathBuf::from(".mcp.json"))),
+            "expected StaleDetection for .mcp.json, got: {error}"
+        );
+        assert!(error.to_string().contains("re-run `derrick init`"));
+
+        // The external edit must survive — the stale merge must not clobber it.
+        let after = fs::read_to_string(&mcp).unwrap_or_else(|error| panic!("read failed: {error}"));
+        assert_eq!(after, external, "external edit must not be silently lost");
+        // Nothing should have been promoted.
+        assert!(!dir.path().join("derrick.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn apply_prunes_stale_adopt_stage_dirs() {
+        let dir = git_repo();
+        // Simulate a stage dir left behind by an earlier partial failure.
+        let stale = dir.path().join(".derrick/.adopt-stage-stale");
+        fs::create_dir_all(&stale).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        fs::write(stale.join("leftover.txt"), "old")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        // Age it past the grace window so the prune gate treats it as debris.
+        age_past_prune_grace(&stale);
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+
+        adopter
+            .apply(&plan)
+            .await
+            .unwrap_or_else(|error| panic!("apply failed: {error}"));
+
+        assert!(
+            !stale.exists(),
+            "stale .adopt-stage-* dir should be pruned at apply start"
+        );
+        assert!(dir.path().join("derrick.yaml").is_file());
+    }
+
+    // COMMENT 1 (prune concurrency race): pruning must respect an age grace
+    // window. A freshly-created stage dir — as a concurrent `apply` would leave
+    // mid-flight — must survive; only a dir older than the grace threshold (a
+    // crashed run's leftover) may be removed.
+    #[test]
+    fn prune_stale_stage_dirs_respects_grace_window() {
+        let dir = git_repo();
+        let state_dir = dir.path().join(".derrick");
+        fs::create_dir_all(&state_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+
+        // A fresh dir standing in for a concurrent apply's in-progress stage.
+        let fresh = state_dir.join(".adopt-stage-fresh");
+        fs::create_dir_all(&fresh).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+
+        // An old leftover from a crashed run: backdate past the grace window.
+        let old = state_dir.join(".adopt-stage-old");
+        fs::create_dir_all(&old).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        age_past_prune_grace(&old);
+
+        let adopter = Adopter::new(dir.path());
+        adopter.prune_stale_stage_dirs(&state_dir);
+
+        assert!(
+            fresh.exists(),
+            "a freshly-created stage dir (possible concurrent apply) must NOT be pruned"
+        );
+        assert!(
+            !old.exists(),
+            "a stage dir older than the grace window must be pruned"
+        );
+    }
+
+    // COMMENT 1 (residual TOCTOU): drift that lands during the staging window —
+    // after the pre-staging revalidation has passed, before promotion — must be
+    // caught by the second, promotion-time revalidation, and the half-built
+    // stage dir must be torn down with nothing promoted.
+    //
+    // Injecting a mutation at the exact mid-`apply` instant (post-`stage_writes`,
+    // pre-rename) from a single test thread is impractical without a test hook
+    // inside `apply`, so this drives the same private machinery `apply` uses in
+    // that window: stage into a stage dir (first revalidation already passed),
+    // drift a guarded file, then assert the promotion-time revalidation aborts
+    // and the abort path leaves nothing promoted. The pre-staging revalidation
+    // is covered by `apply_aborts_when_snapshotted_file_changed_after_detect`.
+    #[tokio::test]
+    async fn apply_revalidates_again_before_promotion_and_cleans_up() {
+        let dir = git_repo();
+        let mcp = dir.path().join(".mcp.json");
+        write(&mcp, r#"{"mcpServers":{"other":{"command":"foo"}}}"#);
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+        assert!(
+            plan.source_guards
+                .iter()
+                .any(|guard| guard.path == Path::new(".mcp.json") && guard.expected.is_some()),
+            "expected a content guard we can drift"
+        );
+
+        // Pre-staging revalidation would pass here (no drift yet). Reproduce the
+        // post-staging state `apply` reaches just before the promotion loop.
+        let state_dir = dir.path().join(".derrick");
+        fs::create_dir_all(&state_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        let stage_dir = state_dir.join(".adopt-stage-promotion-window");
+        fs::create_dir_all(&stage_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        adopter
+            .stage_writes(&plan, &stage_dir)
+            .unwrap_or_else(|error| panic!("stage_writes failed: {error}"));
+        assert!(
+            stage_dir.join("derrick.yaml").is_file(),
+            "staging should have populated the stage dir"
+        );
+
+        // Drift lands during the staging window.
+        let external = r#"{"mcpServers":{"other":{"command":"DRIFTED-DURING-STAGING"}}}"#;
+        write(&mcp, external);
+
+        // The promotion-time revalidation (the new second check) must abort.
+        let error = adopter
+            .revalidate_sources(&plan)
+            .err()
+            .unwrap_or_else(|| panic!("expected stale-detection abort at promotion time"));
+        assert!(
+            matches!(&error, AdoptError::StaleDetection(paths) if paths.contains(&PathBuf::from(".mcp.json"))),
+            "expected StaleDetection for .mcp.json, got: {error}"
+        );
+
+        // `apply`'s abort branch removes the half-built stage dir and promotes
+        // nothing; mirror and assert that cleanup.
+        let _ = fs::remove_dir_all(&stage_dir);
+        assert!(
+            !stage_dir.exists(),
+            "half-built stage dir must be cleaned up on promotion-time abort"
+        );
+        assert!(
+            !dir.path().join("derrick.yaml").exists(),
+            "nothing should be promoted when the promotion-time check aborts"
+        );
+        let after = fs::read_to_string(&mcp).unwrap_or_else(|error| panic!("read failed: {error}"));
+        assert_eq!(after, external, "external edit must survive the abort");
+    }
+
+    // COMMENT 2: a stale stage dir with a non-UTF8 name must still be pruned.
+    // `OsStr::to_str()` would return `None` and skip it; matching on the lossy
+    // (byte-accurate over the ASCII prefix) name prunes it.
+    // Gated to non-macOS unix: APFS enforces UTF-8 filenames and rejects the
+    // non-UTF8 name outright, so the scenario cannot exist there. The skip is
+    // platform-deterministic, so it is a compile-time gate rather than a
+    // runtime check. Linux (ext4/tmpfs, where CI runs) exercises the real path.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn apply_prunes_non_utf8_stale_stage_dir() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = git_repo();
+        let state_dir = dir.path().join(".derrick");
+        fs::create_dir_all(&state_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        // `.adopt-stage-` (ASCII) followed by invalid UTF-8 continuation bytes.
+        let mut raw = b".adopt-stage-".to_vec();
+        raw.extend_from_slice(&[0x66, 0x80, 0x81]);
+        let stale = state_dir.join(OsStr::from_bytes(&raw));
+        fs::create_dir_all(&stale).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        fs::write(stale.join("leftover.txt"), "old")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        // Age it past the grace window so the prune gate treats it as debris.
+        age_past_prune_grace(&stale);
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+        adopter
+            .apply(&plan)
+            .await
+            .unwrap_or_else(|error| panic!("apply failed: {error}"));
+
+        assert!(
+            !stale.exists(),
+            "non-UTF8-named stale .adopt-stage-* dir should be pruned"
+        );
+        assert!(dir.path().join("derrick.yaml").is_file());
+    }
+
+    // COMMENT 2: a symlink named like a stage dir must not be followed. Its own
+    // metadata reports `is_dir() == false`, so it is neither treated as a real
+    // stage dir nor removed, and its target's contents survive untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_does_not_follow_symlinked_stage_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = git_repo();
+        let state_dir = dir.path().join(".derrick");
+        fs::create_dir_all(&state_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        // A real directory the symlink points at; its contents must survive.
+        let target = dir.path().join("precious");
+        fs::create_dir_all(&target).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        fs::write(target.join("keep.txt"), "important")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        let link = state_dir.join(".adopt-stage-symlink");
+        symlink(&target, &link).unwrap_or_else(|error| panic!("symlink failed: {error}"));
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+        adopter
+            .apply(&plan)
+            .await
+            .unwrap_or_else(|error| panic!("apply failed: {error}"));
+
+        assert!(
+            target.join("keep.txt").exists(),
+            "symlink target must not be traversed or removed"
+        );
+        assert!(dir.path().join("derrick.yaml").is_file());
     }
 
     #[test]
