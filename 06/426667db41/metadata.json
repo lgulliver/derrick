@@ -1,0 +1,31 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "06426667db41",
+  "strategy": "manual-commit",
+  "branch": "fix/review-findings-batch",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "DESIGN.md",
+    "crates/derrick-caveman/src/lib.rs",
+    "crates/derrick-caveman/tests/caveman.rs",
+    "crates/derrick-caveman/tests/corpus/ultra/abbreviation_and_arrows.out",
+    "crates/derrick-caveman/tests/corpus/ultra/one_very_long_paragraph.out",
+    "crates/derrick-caveman/tests/skill_parity.rs"
+  ],
+  "sessions": [
+    {
+      "metadata": "/06/426667db41/0/metadata.json",
+      "transcript": "/06/426667db41/0/full.jsonl",
+      "compact_transcript": "/06/426667db41/0/transcript.jsonl",
+      "content_hash": "/06/426667db41/0/content_hash.txt",
+      "prompt": "/06/426667db41/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2547,
+    "cache_creation_tokens": 30553,
+    "cache_read_tokens": 2730877,
+    "output_tokens": 16473,
+    "api_call_count": 20
+  }
+}

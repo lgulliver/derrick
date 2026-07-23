@@ -1,0 +1,134 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "06426667db41",
+  "session_id": "eede6f22-e3de-4aac-bdbb-ff7ea081603f",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-23T18:49:05.436373Z",
+  "branch": "fix/review-findings-batch",
+  "checkpoints_count": 7,
+  "save_step_count": 3,
+  "files_touched": [
+    "DESIGN.md",
+    "crates/derrick-caveman/src/lib.rs",
+    "crates/derrick-caveman/tests/caveman.rs",
+    "crates/derrick-caveman/tests/corpus/ultra/abbreviation_and_arrows.out",
+    "crates/derrick-caveman/tests/corpus/ultra/one_very_long_paragraph.out",
+    "crates/derrick-caveman/tests/skill_parity.rs"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-8[1m]",
+  "turn_id": "30a795d41ae0",
+  "checkpoint_transcript_start": 258,
+  "transcript_lines_at_start": 258,
+  "compact_transcript_start": 51,
+  "token_usage": {
+    "input_tokens": 2547,
+    "cache_creation_tokens": 30553,
+    "cache_read_tokens": 2730877,
+    "output_tokens": 16473,
+    "api_call_count": 20
+  },
+  "session_metrics": {
+    "turn_count": 21
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-07-23T18:49:05.396033Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 532,
+    "human_modified": 91,
+    "human_removed": 0,
+    "total_committed": 532,
+    "total_lines_changed": 627,
+    "agent_percentage": 0,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 44,
+      "user_lines_removed": 9,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "DESIGN.md": 44
+      },
+      "user_removed_per_file": {
+        "DESIGN.md": 9
+      }
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 463,
+      "user_lines_removed": 71,
+      "agent_lines_added": 90,
+      "agent_lines_removed": 9,
+      "user_added_per_file": {
+        "crates/derrick-caveman/src/lib.rs": 20,
+        "crates/derrick-caveman/tests/caveman.rs": 38,
+        "crates/derrick-caveman/tests/corpus/ultra/abbreviation_and_arrows.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/causal_because_no_arrow.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/causal_because_no_arrow.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/causal_therefore_no_arrow.in": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/causal_therefore_no_arrow.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/one_very_long_paragraph.out": 1,
+        "crates/derrick-caveman/tests/skill_fixtures/SKILL.snapshot.md": 78,
+        "crates/derrick-caveman/tests/skill_parity.rs": 171,
+        "crates/derrick-caveman/tests/support/mod.rs": 41,
+        "crates/derrick-substrate-native/src/foreman.rs": 7,
+        "crates/derrick-substrate-native/src/lib.rs": 21,
+        "crates/derrick-substrate/src/lib.rs": 81
+      },
+      "user_removed_per_file": {
+        "crates/derrick-caveman/src/lib.rs": 4,
+        "crates/derrick-caveman/tests/caveman.rs": 33,
+        "crates/derrick-caveman/tests/corpus/ultra/abbreviation_and_arrows.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/one_very_long_paragraph.out": 1,
+        "crates/derrick-caveman/tests/skill_parity.rs": 6,
+        "crates/derrick-substrate-native/src/lib.rs": 6,
+        "crates/derrick-substrate/src/lib.rs": 20
+      }
+    },
+    {
+      "checkpoint_number": 3,
+      "user_lines_added": 5,
+      "user_lines_removed": 1,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        "DESIGN.md": 5
+      },
+      "user_removed_per_file": {
+        "DESIGN.md": 1
+      }
+    },
+    {
+      "checkpoint_number": 4,
+      "user_lines_added": 207,
+      "user_lines_removed": 20,
+      "agent_lines_added": 5,
+      "agent_lines_removed": 42,
+      "user_added_per_file": {
+        "crates/derrick-caveman/src/lib.rs": 19,
+        "crates/derrick-caveman/tests/caveman.rs": 47,
+        "crates/derrick-caveman/tests/corpus/ultra/abbreviation_and_arrows.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/conjunction_stripping.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/crlf_input.out": 2,
+        "crates/derrick-caveman/tests/corpus/ultra/no_trailing_newline.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/one_very_long_paragraph.out": 1,
+        "crates/derrick-caveman/tests/skill_parity.rs": 71,
+        "crates/derrick-caveman/tests/support/mod.rs": 64
+      },
+      "user_removed_per_file": {
+        "crates/derrick-caveman/src/lib.rs": 10,
+        "crates/derrick-caveman/tests/caveman.rs": 2,
+        "crates/derrick-caveman/tests/corpus/ultra/abbreviation_and_arrows.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/conjunction_stripping.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/crlf_input.out": 2,
+        "crates/derrick-caveman/tests/corpus/ultra/no_trailing_newline.out": 1,
+        "crates/derrick-caveman/tests/corpus/ultra/one_very_long_paragraph.out": 1,
+        "crates/derrick-caveman/tests/skill_parity.rs": 2
+      }
+    }
+  ]
+}
