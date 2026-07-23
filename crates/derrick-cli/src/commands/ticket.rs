@@ -6,8 +6,8 @@ use std::process::Command;
 
 use derrick_config::{Config, SubstrateBackendKind, SubstrateMode};
 use derrick_substrate::{
-    BlockReason, InReviewMetadata, LinkKind, ManualDoneAttestation, Substrate, TicketFilter,
-    TicketId, TicketState,
+    BlockReason, InReviewMetadata, LinkKind, ManualDoneAttestation, TicketFilter, TicketId,
+    TicketState, TicketStore,
 };
 use derrick_substrate_native::NativeSubstrate;
 

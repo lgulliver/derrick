@@ -25,8 +25,9 @@ pub enum Intensity {
     /// Full compression: drop articles, flatten prose, and prefer
     /// short words.
     Full,
-    /// Maximum compression: abbreviate prose words, strip safe
-    /// conjunctions, and use arrows for causal phrasing.
+    /// Maximum compression: abbreviate prose words and strip safe
+    /// and causal conjunctions (`because`/`therefore`) without
+    /// inserting an arrow (D90; the installed skill forbids `->`).
     Ultra,
 }
 
@@ -740,7 +741,14 @@ fn substitute_phrases(input: &str, intensity: Intensity) -> String {
     }
     if intensity == Intensity::Ultra {
         if let Some(regex) = causal_regex() {
-            output = regex.replace_all(&output, " -> ").into_owned();
+            // D90: the installed skill strips the causal conjunction and
+            // forbids arrows outright ("NO arrows (X -> Y) -- measured
+            // zero token saving under tokenizer, cost decode clarity").
+            // Join the two clauses with a comma rather than the word —
+            // mirrors the skill's own Ultra example, which joins clauses
+            // with commas ("Inline obj prop, new ref, re-render.")
+            // rather than inventing a connective.
+            output = regex.replace_all(&output, ", ").into_owned();
         }
     }
     output
@@ -1081,10 +1089,18 @@ fn causal_regex() -> Option<&'static Regex> {
     // overwhelmingly used as a bare intensifier ("so effective", "so good",
     // "so far", "not so much") rather than a causal conjunction, and a
     // conjunction-only regex cannot tell the two apart without full parsing.
-    // Converting intensifier `so` to " -> " inverts meaning (D-fix: caveman
+    // Converting intensifier `so` to an arrow inverts meaning (D-fix: caveman
     // ultra corrupted "so effective" into "-> effective"). Dropping the
     // alternative entirely is the conservative fix; see the
     // non_causal_so_* corpus cases in tests/corpus/ultra/.
+    //
+    // D90: `because`/`therefore` themselves no longer become an arrow either.
+    // The installed skill's Ultra row strips the causal conjunction outright
+    // and explicitly forbids arrows ("NO arrows (X -> Y) -- measured zero
+    // token saving under tokenizer, cost decode clarity"). The matched
+    // conjunction (with its surrounding whitespace) is replaced with a
+    // comma-space join in `substitute_phrases` below — see the
+    // ultra/*causal*/*conjunction* corpus cases for the resulting output.
     REGEX
         .get_or_init(|| Regex::new(r"(?i)\s+(?:because|therefore)\s+").ok())
         .as_ref()

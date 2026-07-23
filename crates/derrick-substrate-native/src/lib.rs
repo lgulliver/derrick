@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use derrick_config::Site;
 use derrick_substrate::{
-    Batch, BatchName, BlockReason, Complexity, Event, EventId, EventKind, EventScope, ForemanMode,
-    ForemanStatus, Hand, HandId, HandKind, InReviewMetadata, Link, LinkKind, ManualDoneAttestation,
-    NewEvent, NewTicket, Substrate, SubstrateError, Ticket, TicketFilter, TicketId, TicketState,
-    TypedEvent,
+    Batch, BatchName, BlockReason, Complexity, Event, EventId, EventKind, EventLog, EventScope,
+    ForemanMode, ForemanState, ForemanStatus, Hand, HandId, HandKind, HandRegistry,
+    InReviewMetadata, Link, LinkKind, ManualDoneAttestation, NewEvent, NewTicket, SubstrateError,
+    Ticket, TicketFilter, TicketId, TicketState, TicketStore, TypedEvent, WorktreeReservations,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use tokio::task;
@@ -671,7 +671,7 @@ impl NativeSubstrate {
 }
 
 #[async_trait::async_trait]
-impl Substrate for NativeSubstrate {
+impl TicketStore for NativeSubstrate {
     async fn site(&self) -> Result<Site, SubstrateError> {
         Ok(self.site.clone())
     }
@@ -1640,7 +1640,10 @@ impl Substrate for NativeSubstrate {
         })
         .await
     }
+}
 
+#[async_trait::async_trait]
+impl HandRegistry for NativeSubstrate {
     async fn register_hand(&self, hand: Hand) -> Result<(), SubstrateError> {
         self.run_write(move |connection| {
             connection
@@ -1712,9 +1715,12 @@ impl Substrate for NativeSubstrate {
     }
 
     async fn hand_heartbeat(&self, id: &HandId) -> Result<(), SubstrateError> {
-        Substrate::heartbeat(self, id).await
+        HandRegistry::heartbeat(self, id).await
     }
+}
 
+#[async_trait::async_trait]
+impl EventLog for NativeSubstrate {
     async fn record_event(&self, event: NewEvent) -> Result<Event, SubstrateError> {
         self.run_write(move |connection| {
             let scope = match event.ticket.as_ref() {
@@ -1870,7 +1876,10 @@ impl Substrate for NativeSubstrate {
         })
         .await
     }
+}
 
+#[async_trait::async_trait]
+impl ForemanState for NativeSubstrate {
     async fn foreman_status(&self) -> Result<ForemanStatus, SubstrateError> {
         self.run_read(move |connection| {
             let row: Option<(Option<i64>, Option<String>, String)> = connection
@@ -1902,7 +1911,7 @@ impl Substrate for NativeSubstrate {
     }
 
     async fn record_foreman_start(&self, pid: u32) -> Result<(), SubstrateError> {
-        Substrate::record_foreman_detached(self, pid).await
+        ForemanState::record_foreman_detached(self, pid).await
     }
 
     async fn record_foreman_attached(&self, pid: u32) -> Result<(), SubstrateError> {
@@ -1916,7 +1925,7 @@ impl Substrate for NativeSubstrate {
     }
 
     async fn record_foreman_stop(&self) -> Result<(), SubstrateError> {
-        Substrate::record_foreman_stopped(self).await
+        ForemanState::record_foreman_stopped(self).await
     }
 
     async fn record_foreman_stopped(&self) -> Result<(), SubstrateError> {
@@ -1934,7 +1943,10 @@ impl Substrate for NativeSubstrate {
         })
         .await
     }
+}
 
+#[async_trait::async_trait]
+impl WorktreeReservations for NativeSubstrate {
     async fn reserve_worktree(
         &self,
         run_id: &str,

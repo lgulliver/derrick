@@ -15,8 +15,8 @@ use chrono::Utc;
 use derrick_config::{Config, Stacking};
 use derrick_stack::{NoneStackBackend, RestackOutcome, RestackParams, StackBackend};
 use derrick_substrate::{
-    BlockReason, EventKind, EventScope, Hand, HandId, InReviewMetadata, Substrate, SubstrateError,
-    Ticket, TicketId, TicketState,
+    BlockReason, EventKind, EventLog, EventScope, Hand, HandId, HandRegistry, InReviewMetadata,
+    SubstrateError, Ticket, TicketId, TicketState, TicketStore,
 };
 use futures::future::join_all;
 use thiserror::Error;
@@ -1389,6 +1389,13 @@ impl Foreman {
     }
 
     async fn dispatch_ready(&self, report: &mut TickReport) -> Result<(), ForemanError> {
+        // D92: `batch_max` bounds ACTIVE HANDS, not total resource footprint.
+        // `count_inflight_tickets` counts only `InFlight` tickets (hands
+        // actually running); tickets in `InReview` still hold their worktree
+        // and open PR by design but are deliberately NOT counted against the
+        // cap. The budget below therefore limits concurrent active workers,
+        // not the number of non-terminal tickets holding resources. See
+        // DESIGN.md §9.C.
         let inflight = self.substrate.count_inflight_tickets().await?;
         let cap = u64::from(self.batch_max);
         if inflight >= cap {

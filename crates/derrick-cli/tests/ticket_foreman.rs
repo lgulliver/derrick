@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use derrick_config::{Config, Site};
 use derrick_substrate::{
-    BatchName, BlockReason, LinkKind, NewTicket, Substrate, TicketId, TicketState,
+    BatchName, BlockReason, LinkKind, NewTicket, TicketId, TicketState, TicketStore,
 };
 use derrick_substrate_native::{NativeConfig, NativeSubstrate};
 use tempfile::TempDir;

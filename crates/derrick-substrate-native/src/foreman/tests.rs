@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use derrick_config::Config;
 use derrick_substrate::{
-    BlockReason, EventKind, Hand, HandId, HandKind, InReviewMetadata, LinkKind, NewTicket,
-    Substrate, SubstrateError, Ticket, TicketId, TicketState,
+    BlockReason, EventKind, EventLog, Hand, HandId, HandKind, HandRegistry, InReviewMetadata,
+    LinkKind, NewTicket, SubstrateError, Ticket, TicketId, TicketState, TicketStore,
 };
 use tempfile::TempDir;
 use tokio::sync::Mutex;

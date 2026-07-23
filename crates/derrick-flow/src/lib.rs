@@ -766,7 +766,7 @@ print('<<DERRICK-META>> {{"tokens_in": 1, "tokens_out": 1, "finish_reason": "sto
 
         // Mark tickets as `done` via the substrate API (mark_ticket_done_manually
         // works on any non-terminal ticket; they are currently `ready`).
-        use derrick_substrate::{ManualDoneAttestation, Substrate, TicketId};
+        use derrick_substrate::{ManualDoneAttestation, TicketId, TicketStore};
         let db_path = dir.path().join(".derrick/derrick.db");
         {
             let config = Config::load_from_path(&dir.path().join("derrick.yaml"))?;

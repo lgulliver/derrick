@@ -16,8 +16,8 @@ use derrick_memory::LessonIndex;
 use async_trait::async_trait;
 use chrono::Utc;
 use derrick_substrate::{
-    Complexity, EventKind, EventScope, Hand, HandId, HandKind, Substrate, SubstrateError, Ticket,
-    TicketId,
+    Complexity, EventKind, EventLog, EventScope, Hand, HandId, HandKind, HandRegistry,
+    SubstrateError, Ticket, TicketId, TicketStore,
 };
 use derrick_substrate_native::NativeSubstrate;
 use derrick_substrate_native::foreman::{

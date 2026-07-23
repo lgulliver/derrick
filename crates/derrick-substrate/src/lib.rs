@@ -16,9 +16,19 @@ pub use types::{
     TicketState, TypedEvent, ticket_id_pattern,
 };
 
-/// Storage contract implemented by derrick substrate backends.
+// D89 split the former 47-method `Substrate` god-trait into the focused role
+// traits below (Interface Segregation). `NativeSubstrate` in
+// `derrick-substrate-native` implements every role; the `Substrate` supertrait
+// plus its blanket impl keep existing `Arc<dyn Substrate>` / `S: Substrate`
+// callers compiling unchanged. Each role trait is exercised end-to-end against
+// a real SQLite database (via `tempfile`) in the native crate's test suite.
+
+/// Ticket lifecycle, labels, links, and batches — the ticket data store.
+///
+/// Implemented by `derrick_substrate_native::NativeSubstrate`. Exercised via
+/// the native crate's real-SQLite integration tests.
 #[async_trait::async_trait]
-pub trait Substrate: Send + Sync {
+pub trait TicketStore: Send + Sync {
     /// Returns the site registered in this substrate.
     async fn site(&self) -> Result<Site, SubstrateError>;
 
@@ -44,14 +54,14 @@ pub trait Substrate: Send + Sync {
     /// path only (current state == target state, returns `Ok` without a
     /// write). Every other transition has a dedicated typed method:
     ///
-    /// - `→ InFlight` → [`Substrate::assign_to_hand`]
-    /// - `→ InReview` → [`Substrate::transition_to_in_review`]
-    /// - `→ Blocked` → [`Substrate::block_ticket`]
-    /// - `→ Done` → [`Substrate::verify_ticket_merged`] /
-    ///   [`Substrate::mark_ticket_done_manually`]
-    /// - `→ Rejected` → [`Substrate::reject_ticket`]
-    /// - `→ Ready` from non-`Blocked` → [`Substrate::release_from_hand`]
-    /// - `→ Ready` from `Blocked` → [`Substrate::unblock_ticket`]
+    /// - `→ InFlight` → [`TicketStore::assign_to_hand`]
+    /// - `→ InReview` → [`TicketStore::transition_to_in_review`]
+    /// - `→ Blocked` → [`TicketStore::block_ticket`]
+    /// - `→ Done` → [`TicketStore::verify_ticket_merged`] /
+    ///   [`TicketStore::mark_ticket_done_manually`]
+    /// - `→ Rejected` → [`TicketStore::reject_ticket`]
+    /// - `→ Ready` from non-`Blocked` → [`TicketStore::release_from_hand`]
+    /// - `→ Ready` from `Blocked` → [`TicketStore::unblock_ticket`]
     ///
     /// Implementations MUST refuse every non-no-op call with
     /// `SubstrateError::Invalid` carrying a pointer to the correct typed
@@ -213,18 +223,25 @@ pub trait Substrate: Send + Sync {
 
     /// Lists tickets in a batch ordered by `ordinal`, then by creation time.
     async fn tickets_in_batch(&self, name: &BatchName) -> Result<Vec<Ticket>, SubstrateError>;
+}
 
+/// Hand registration and liveness — the crew registry.
+///
+/// Implemented by `derrick_substrate_native::NativeSubstrate`. Exercised via
+/// the native crate's real-SQLite integration tests.
+#[async_trait::async_trait]
+pub trait HandRegistry: Send + Sync {
     /// Registers a hand that can own or execute tickets.
     async fn register_hand(&self, hand: Hand) -> Result<(), SubstrateError>;
 
     /// Registers a crew hand with its spawned child pid for process liveness
     /// (D75). Dispatchers call this when they spawn an agent process so the
     /// foreman cleanup pass can check `kill(pid, 0)` alongside the heartbeat
-    /// TTL. The default implementation delegates to [`Substrate::register_hand`]
-    /// (pid ignored) so backends without pid tracking and test mocks keep
-    /// working; the native backend overrides it to persist `pid` on the hand
-    /// row. The hand's existing `pid` field, if set, is overwritten with the
-    /// supplied pid.
+    /// TTL. The default implementation delegates to
+    /// [`HandRegistry::register_hand`] (pid ignored) so backends without pid
+    /// tracking and test mocks keep working; the native backend overrides it
+    /// to persist `pid` on the hand row. The hand's existing `pid` field, if
+    /// set, is overwritten with the supplied pid.
     async fn register_hand_with_pid(&self, mut hand: Hand, pid: u32) -> Result<(), SubstrateError> {
         hand.pid = Some(pid);
         self.register_hand(hand).await
@@ -236,11 +253,18 @@ pub trait Substrate: Send + Sync {
     /// Records that a hand is still alive.
     async fn heartbeat(&self, id: &HandId) -> Result<(), SubstrateError>;
 
-    /// T012 alias for [`Substrate::heartbeat`]. Provided so the cleanup
+    /// T012 alias for [`HandRegistry::heartbeat`]. Provided so the cleanup
     /// pass and dispatcher can call a method with the contract-aligned name.
     async fn hand_heartbeat(&self, id: &HandId) -> Result<(), SubstrateError>;
+}
 
-    /// **Deprecated.** Use [`Substrate::record_typed_event`] which preserves
+/// The append-only event log — writes and typed reads.
+///
+/// Implemented by `derrick_substrate_native::NativeSubstrate`. Exercised via
+/// the native crate's real-SQLite integration tests.
+#[async_trait::async_trait]
+pub trait EventLog: Send + Sync {
+    /// **Deprecated.** Use [`EventLog::record_typed_event`] which preserves
     /// the structured payload as JSON in `body` and the discriminator in
     /// `kind`. Retained for one release for the T010 bridge step.
     #[deprecated(
@@ -248,7 +272,7 @@ pub trait Substrate: Send + Sync {
     )]
     async fn record_event(&self, event: NewEvent) -> Result<Event, SubstrateError>;
 
-    /// **Deprecated.** Use [`Substrate::tail_typed_events`] which returns
+    /// **Deprecated.** Use [`EventLog::tail_typed_events`] which returns
     /// `TypedEvent` with the deserialised `EventKind` payload.
     #[deprecated(
         note = "use tail_typed_events; the legacy string-bodied API will be removed after T012"
@@ -283,11 +307,18 @@ pub trait Substrate: Send + Sync {
         id: &TicketId,
         limit: usize,
     ) -> Result<Vec<TypedEvent>, SubstrateError>;
+}
 
+/// Foreman process lifecycle — status and start/stop bookkeeping.
+///
+/// Implemented by `derrick_substrate_native::NativeSubstrate`. Exercised via
+/// the native crate's real-SQLite integration tests.
+#[async_trait::async_trait]
+pub trait ForemanState: Send + Sync {
     /// Returns the current foreman process status.
     async fn foreman_status(&self) -> Result<ForemanStatus, SubstrateError>;
 
-    /// **Deprecated.** Use [`Substrate::record_foreman_detached`]. The new
+    /// **Deprecated.** Use [`ForemanState::record_foreman_detached`]. The new
     /// method writes `mode = detached` to the foreman row and emits a
     /// `ForemanStarted { mode: Detached, pid }` event.
     #[deprecated(note = "use record_foreman_detached")]
@@ -300,14 +331,21 @@ pub trait Substrate: Send + Sync {
     /// Records that the foreman started in detached (daemon) mode.
     async fn record_foreman_detached(&self, pid: u32) -> Result<(), SubstrateError>;
 
-    /// **Deprecated.** Use [`Substrate::record_foreman_stopped`].
+    /// **Deprecated.** Use [`ForemanState::record_foreman_stopped`].
     #[deprecated(note = "use record_foreman_stopped")]
     async fn record_foreman_stop(&self) -> Result<(), SubstrateError>;
 
     /// Records that the foreman stopped cleanly. Writes `mode = stopped`,
     /// clears `pid`, emits `EventKind::ForemanStopped`.
     async fn record_foreman_stopped(&self) -> Result<(), SubstrateError>;
+}
 
+/// Worktree slot reservation for pipeline runs.
+///
+/// Implemented by `derrick_substrate_native::NativeSubstrate`. Exercised via
+/// the native crate's real-SQLite integration tests.
+#[async_trait::async_trait]
+pub trait WorktreeReservations: Send + Sync {
     /// Reserve a worktree slot for a pipeline run and return its planned path.
     async fn reserve_worktree(
         &self,
@@ -317,4 +355,27 @@ pub trait Substrate: Send + Sync {
 
     /// Mark a worktree closed after the run completed (success or failure).
     async fn close_worktree(&self, run_id: &str) -> Result<(), SubstrateError>;
+}
+
+/// Storage contract implemented by derrick substrate backends.
+///
+/// D89 split the former monolithic trait into the five role traits above so
+/// each caller can depend on only the slice it uses (Interface Segregation).
+/// `Substrate` is retained as the union supertrait: existing callers that hold
+/// `Arc<dyn Substrate>` or are generic over `S: Substrate` keep working
+/// unchanged, and the blanket impl below means any type implementing all five
+/// role traits automatically satisfies `Substrate` — implementors write only
+/// the per-role `impl` blocks, never `impl Substrate` directly.
+pub trait Substrate:
+    TicketStore + EventLog + HandRegistry + ForemanState + WorktreeReservations
+{
+}
+
+/// Blanket impl: every backend that implements all five role traits *is* a
+/// `Substrate`. The default `Sized` bound on `T` deliberately excludes
+/// `dyn Substrate` itself (which already carries `Substrate` via the trait
+/// object), so the two never overlap.
+impl<T> Substrate for T where
+    T: TicketStore + EventLog + HandRegistry + ForemanState + WorktreeReservations
+{
 }

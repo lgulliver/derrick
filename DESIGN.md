@@ -130,7 +130,7 @@ modules can be tested, profiled, and (later) ported in isolation.
 | Copilot | `crates/derrick-copilot` | Dispatches steps or tickets to Copilot agents (CLI + Workspace API) |
 | Models | `crates/derrick-models` | Provider trait; adapters for API providers, local runtimes, CLI shells (see §6.5) |
 | Adopt | `crates/derrick-adopt` | Brownfield detection of AGENTS.md, CLAUDE.md, agents/, skills/, docs (§5.6); writes Claude Code host hook configs (`.claude/settings.json` PreToolUse/PostToolUse) so scrub+caveman fire at host boundaries (D29). Codex hook installation deferred (D34); T011 writes `.codex/instructions.md` only. |
-| Substrate trait | `crates/derrick-substrate` | One async trait (`Substrate`); a native impl, future impls slot in behind it |
+| Substrate trait | `crates/derrick-substrate` | A family of focused async role traits (`TicketStore`, `EventLog`, `HandRegistry`, `ForemanState`, `WorktreeReservations` — D89, splitting the prior monolithic `Substrate` trait); a native impl implements all of them, future impls slot in behind whichever slice they need |
 | Native substrate | `crates/derrick-substrate-native` | SQLite-backed execution substrate + in-process foreman |
 | Stack | `crates/derrick-stack` | PR stacking: native engine (plain git + `gh`); `StackBackend` trait as extension seam (see §8.5) |
 | Survey | `crates/derrick-survey` | Native code-graph index: SQLite + FTS5 symbol/reference/call-graph index at `.derrick/index.db`; MCP server surface for agent queries; CLI subcommands `build|search|context|impact|status` for ad-hoc/Bash parity (see §9.B.8) |
@@ -746,6 +746,15 @@ overwrite**. It runs an adoption pass *before* writing anything:
 3. **Propose.** Print the proposed `derrick.yaml` and the *list
    of files derrick would create or append to* (nothing else). The
    user reviews, accepts or edits, then derrick writes.
+
+**Known gap (OQ6):** merges of `hooks`/`.mcp.json`/
+`.claude/settings.json` are computed against the snapshot captured
+at step 1 (Detect) and are not re-read from disk before step 3's
+write (Promote). An external edit to any of those files between
+detect and apply is silently lost. A detect→merge revalidation
+pass — re-read on-disk state immediately before promotion and
+refuse or re-merge if it changed — is the leaning fix; not yet
+built. See §12 OQ6.
 
 Concrete behaviours:
 
@@ -1451,9 +1460,14 @@ tools:
 
 One logical model, one native implementation in v1. Everything
 in derrick — observability surface, runners, memory layers —
-talks to the `Substrate` trait, not to SQLite directly. Adding a
-second backend later means a new crate that implements the trait;
-no other code changes.
+talks to the substrate through a family of focused role traits
+(`TicketStore`, `EventLog`, `HandRegistry`, `ForemanState`,
+`WorktreeReservations`), not to SQLite directly and not through
+one all-encompassing trait (D89 split the original 47-method
+`Substrate` god-trait once it was clear callers only ever held
+the concrete `Arc<NativeSubstrate>` and the trait bought no real
+decoupling). Adding a second backend later means a new crate that
+implements the role traits it needs; no other code changes.
 
 - **Site** — a workspace registered with the substrate. One per
   repo. Has a name and a ticket prefix.
@@ -1713,11 +1727,15 @@ derrick-managed PRs.
 
 ### 8.6 Extension point: adding more backends later
 
-The `Substrate` trait is the only contract. A future
-`crates/derrick-substrate-gastown` (or `-linear`, `-github-projects`,
-`-jira`) would implement the same trait — observability,
-runners, and the foreman keep working unchanged. We are not
-designing for this in v1; we are leaving the door open.
+The substrate role traits (`TicketStore`, `EventLog`,
+`HandRegistry`, `ForemanState`, `WorktreeReservations` — D89) are
+the only contract. A future `crates/derrick-substrate-gastown` (or
+`-linear`, `-github-projects`, `-jira`) would implement the traits
+it needs — observability, runners, and the foreman keep working
+unchanged against whichever slice a given caller depends on. We
+are not designing for this in v1; we are leaving the door open,
+and the split makes that door cheaper to open than one
+monolithic trait would.
 
 `derrick doctor` in v1 checks: SQLite file accessibility,
 foreman PID liveness if attached, ticket schema version. No
@@ -2119,6 +2137,18 @@ parallelism:
   assay_max: 2         # max concurrent reviewers in multi-reviewer assay
 ```
 
+**`batch_max` bounds active hands, not total footprint (D92).**
+`batch_max` caps tickets in `InFlight` only — it does not count
+tickets sitting in `InReview` (hand has exited, worktree still
+held, PR open, awaiting merge/verify). This is intentional: the
+cap governs how many hands (concurrent workers) the foreman will
+run at once, not the total number of open worktrees or PRs the
+batch may accumulate. A batch can therefore hold more open
+worktrees than `batch_max` at any given moment if several tickets
+have reached `InReview` while new `InFlight` slots are dispatched
+underneath the cap. Do not read `batch_max` as a resource-footprint
+limit — it isn't one.
+
 **9.C.2 Multi-reviewer assay.** `tools.assay.reviewers` accepts a
 list. v1 ships with `[reviewer]` (codex only) as the default;
 adding `gemini` or a local model is a config edit. When multiple
@@ -2430,6 +2460,10 @@ links back to the section where it lives.
 | D85 | **Pluggable spec-provider seam: `tools.specify.provider` selects `speckit` \| `native` \| `import` across the spec→plan→tasks surface. Refines D2/D3; default clause superseded by D87.** The `specify`/`plan`/`tasks` pipeline steps generalise from a single host-delegated speckit invocation into a selectable provider — all three produce the **same on-disk artifacts** (`specs/<NNN>-<slug>/{spec,plan,tasks}.md` + `.specify/feature.json`) so downstream `clarify`/`assay`/`bridge` are unchanged. **(a) `speckit`** — the host-delegated path (D30), preserved as an explicit compatibility provider. **(b) `native`** — a derrick-owned in-process generator (new `derrick-specify` crate) using host-CLI completions: **survey-grounded** (derrick writes the `grounding:` front-matter from the real index, so the model never invents symbol/path names; degrades gracefully with no index), **clarify-first** (the clarify Q&A runs *before* drafting), and **schema-validated** (YAML front-matter + required headings; `validate_spec/plan/tasks` return Reject/Warn findings with one bounded repair pass), wired through roughneck/caveman/prompt-caching for token efficiency. **(c) `import`** — bring-your-own spec/PRD from a local file (v1): passed through verbatim if it already matches the schema, else normalised by one model call; `import.{plan,tasks}` each select `native`\|`speckit`\|`import` downstream. Remote sources (GitHub issue / Notion / Confluence) are a documented deferred limitation — derrick's Rust cannot call agent-side MCP tools; export to a local file. **Seam shape:** a closed `SpecProviderKind` enum + a `run_spec_phase` resolver in `derrick-flow` (not a `dyn` trait), matching the `StackBackendKind`/`SubstrateBackendKind` selection precedent rather than the open `Substrate`/`StackBackend` trait seams. **Back-compat:** the provider is consulted only for a *bare* `specify`/`plan`/`tasks` step (no `role`/`host`/`command`/`runner`); a step pinning `host:`+`command:` runs verbatim through the existing role path. The absent `role` is load-bearing, not incidental: it is part of what classifies a step as bare (`is_bare` in `derrick-flow::steps`, `is_bare_spec_step` in `derrick-config`), so a step that carries a `role:` deliberately does *not* route to the seam. The native generator never reads the step's `role:` — it resolves its own `drafter`/`proposer` tiers from `roles:` internally, and `derrick doctor` validates those two tiers (not the step's role) resolve to a model. `CONFIG_VERSION` unchanged (additive optional fields, per D66/D67). `derrick init` has a provider prompt; `derrick doctor` reports the active provider and scopes the speckit-on-PATH check to the `speckit` provider or steps that pin `/speckit.*`. New MCP-backed import sources touching company systems require IT approval. | §4 / §5.2 / §5.3 / D2 / D3 / D30 |
 | D87 | **Native spec provider is the default for new sites.** Supersedes D85's default-provider clause while preserving its seam and artifact contract. New `derrick init` configs write `tools.specify.provider: native` and bare `specify`/`plan`/`tasks` steps, so a standard `/drill` path no longer requires speckit. Speckit remains an explicit compatibility provider: selecting it pins `/speckit.specify`, `/speckit.plan`, `/speckit.tasks`, and `/speckit.analyze` as host commands, and existing configs with explicit `/speckit.*` steps continue to run verbatim. The default native pipeline drops the optional `/speckit.analyze` step; schema validation in `derrick-specify` plus the assay step are the native quality gates. `derrick doctor` checks for speckit only when provider `speckit` is selected or a pipeline step explicitly pins `/speckit.*`. `CONFIG_VERSION` remains unchanged because existing config semantics are preserved and the change affects generated defaults. | §4 / §5.2 / §5.3 / D85 |
 | D88 | **Roles may bind both model/provider and an agent file.** The `roles:` map keeps its existing short form (`reviewer: codex-gpt5`) and gains an expanded form (`reviewer: { model: codex-gpt5, agent: .codex/agents/integrations-engineer.md }`). `model` is the existing model alias, so provider switching remains a one-line role/model edit; `agent` is an optional repo-local path to the host-native agent instruction file for that role. During role-step execution, derrick reads the configured file from the step working tree and prepends it as explicit user-configured role context before the step prompt. This is not a hidden derrick system prompt and does not replace host-native rule loading: Claude/Codex/Copilot/opencode/aider still load `AGENTS.md`, `.codex/instructions.md`, `.github/copilot-instructions.md`, sub-agent files, skills, hooks, and plugins normally. Profiles and `stages:` overrides update only the role's model binding and preserve any configured agent path. `CONFIG_VERSION` remains unchanged because the short form is still accepted and the expanded form is additive. | §6.5 / §5.2 / D65 / D66 |
+| D89 | **Split `Substrate` into focused role traits.** The 47-method `Substrate` god-trait (`derrick-substrate/src/lib.rs`) costs every implementor and mock but buys little decoupling in practice — callers hold concrete `Arc<NativeSubstrate>` in 43 places against only 6 `dyn Substrate` uses. Decision: split it into focused role traits (proposed: `TicketStore`, `EventLog`, `HandRegistry`, `ForemanState`, `WorktreeReservations`) so each caller depends only on the slice it actually uses, per the narrow-traits house rule (Interface Segregation) — a future alternate backend or `dyn` boundary becomes cheap for the slice that needs it instead of all-or-nothing on one god-trait. `NativeSubstrate` implements all of them; this is a cross-crate change and the technical shape is routed through rust-architect. Refines D11's scope-discipline principle — sign-off for substrate additions now applies per role trait rather than to a single monolithic one. | §3.1 / §8.1 / §8.6 / D11 |
+| D90 | **Caveman ultra conforms to the skill: no arrows.** Caveman ultra converted causal conjunctions (`because`/`therefore`, previously also `so`) into `->` arrows, but the installed caveman `SKILL.md` strips the conjunction outright and explicitly forbids arrows ("NO arrows — measured zero token saving under tokenizer") — a direct violation of D7's byte-identical-to-the-skill rule. Decision: caveman ultra now strips the causal conjunction and emits no arrow, matching the skill exactly. Corpus tests that locked the old arrow behaviour are updated to match the corrected output. | §9.B.3 / D7 |
+| D91 | **Automated skill-parity harness enforcing D7.** D7 ("caveman byte-identical to the skill at matched intensities") had no automated enforcement — `skill_parity` was a 9-line ignored placeholder test — which is exactly how the D90 drift (arrows vs. no arrows) shipped unnoticed. Decision: build a real parity harness that runs the installed caveman skill and the crate's `compress()` over the shared corpus and diffs the two outputs, wired into CI so any future D7 drift fails the build instead of silently diverging. Depends on D90 landing first — building the harness against the old arrow behaviour would lock in the wrong output. | §9.B.3 / D7 / D90 |
+| D92 | **`batch_max` bounds active hands, not total in-flight footprint.** Confirmed intent: the foreman's `parallelism.batch_max` caps only tickets in `InFlight` — tickets in `InReview` (worktree still held, PR open, awaiting merge) are not counted against it. This is deliberate, not an oversight: the cap bounds concurrent *active workers* (hands actually running), not the total resource footprint held across every non-terminal ticket state. No behaviour change from this decision; §9.C now documents the semantics explicitly so the cap isn't mistaken for a footprint limit. | §9.C |
 
 ### Remaining open questions
 
@@ -2440,6 +2474,7 @@ links back to the section where it lives.
 | OQ3 | **Hub auth and multi-tenancy.** ~~A network-exposed server holding multiple teams' source requires at minimum bearer-token gating and likely per-workspace access scoping. The stdio model never had this surface; it should be treated as first-class design, not a bolt-on. Exact mechanism (static tokens, OAuth, mTLS, per-workspace ACL table) is unresolved.~~ **Resolved by D83**: scoped bearer tokens in hub config; each token grants workspace ids and capabilities (`read`/`refresh`; `upload` deferred); TLS terminated by reverse proxy; non-loopback bind gated on auth presence. | Resolved — see D83. | D80 / D83 / §9.B.8a |
 | OQ4 | **Hub routing scheme.** ~~`repo`/`workspace` selector argument on each tool (recommended starting point per D80) vs. per-workspace tool namespacing at the MCP layer. Start with the selector-arg approach; revisit if client ergonomics demand otherwise.~~ **Resolved by D84**: explicit `workspace` argument remains the default (D80, backward-compatible); a `derrick_survey_list_workspaces` discovery tool enumerates auth-scoped workspace ids; optional path-prefix routing (e.g. `/w/<id>`) gives clean per-site URLs for reverse-proxy routing without per-call `workspace` argument; subdomain/host-based routing rejected (requires wildcard DNS + TLS, not justified at current scale). All OQ2–OQ5 are now resolved. | Resolved — see D84. | D80 / D84 / §9.B.8a |
 | OQ5 | **Where does indexing happen? Hub-as-indexer vs hub-as-index-registry (the `WorkspaceSource` fork).** ~~The hub's query layer depends only on `index.db`, not on how it was produced, which enables two sourcing modes. **Local (indexer mode, current):** `root` points at a working tree on the hub's disk; the hub builds and refreshes it (D81 poll-TTL + `derrick_survey_refresh`). Implies source code lives on the hub. **Pushed (registry mode):** no `root`; a producer (CI/dev machine) builds `index.db` where the code already lives and uploads it; the hub opens and serves it, never seeing source. A `WorkspaceSource` enum (`Local { root }` \| `Pushed { … }`) is the natural seam: `WorkspaceConfig` becomes a tagged enum, `WorkspaceEntry.root` moves into a `source` field, only the build/refresh path branches — the serving tools (`search`/`context`/`impact`/`status`) are untouched. Modes can be mixed within one `hub.yaml`, giving a migration path. Two new costs in registry mode only: (1) **Schema/version portability** — a pushed DB from a different `derrick-survey` binary version must be accepted or rejected cleanly. **This is already implemented**: `db.rs` uses `PRAGMA user_version` (currently 2, set by `migrations/0002_meta_table.sql`), and `migrate()` enforces a `SchemaTooNew` hard-error when the stored version exceeds `SCHEMA_VERSION`. Cross-machine portability is therefore largely solved; no new stamping work is required. (2) **Atomic swap** — replacing a pushed DB while queries are in flight requires open-new, atomically swap the `Arc<Survey>`, drop-old; the current entry only rebuilds in place. The registry write path also implies an authenticated upload endpoint, coupling to OQ3 (auth). Registry mode makes D81's poll-TTL moot (freshness becomes push-based) and reshapes the OQ4 routing discussion (a registry hub stores `.db` files only; no source on shared infra).~~ **Resolved by D82**: `WorkspaceSource` abstraction (`Local { root }` \| `Pushed { db_path }`) is adopted as permanent; `Local` is unchanged; `Pushed` serves a prebuilt DB via atomic hot-swap; authenticated HTTP upload deferred to OQ3. | Resolved — see D82. | D80 / D81 / D82 / §9.B.8a |
+| OQ6 | **`derrick-adopt` detect→apply TOCTOU.** The adoption pass (§5.6) merges `hooks`/`.mcp.json`/`.claude/settings.json` against a snapshot captured at *detect* time and never re-reads disk before *promotion* (the final write) — an external edit to any of those files between detect and apply is silently lost. | Build a detect→merge revalidation pass: re-read the on-disk state immediately before promotion, re-diff against the detect-time snapshot, and refuse (or re-merge) if it changed. | §5.6 |
 
 New questions raised during implementation will be tracked as
 GitHub issues with the `design-question` label, and locked-in

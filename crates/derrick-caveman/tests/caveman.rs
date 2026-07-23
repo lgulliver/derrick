@@ -1,9 +1,11 @@
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use derrick_caveman::{CompressOutput, Compressor, Intensity, compress};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
+
+mod support;
+use support::{corpus_inputs, intensity_dirs};
 
 #[test]
 fn intensity_serde_round_trip_serializes_lowercase() -> Result<(), TestSerdeError> {
@@ -67,7 +69,7 @@ fn protected_span_count_is_accurate() {
 // ── FIX 2: ultra causal-arrow substitution must not corrupt intensifier `so` ──
 //
 // `causal_regex` used to match bare `so` alongside `because`/`therefore` and
-// rewrite it to " -> " at Ultra intensity. `so` is overwhelmingly used as an
+// rewrite it to an arrow at Ultra intensity. `so` is overwhelmingly used as an
 // intensifier ("so effective", "so good", "so far", "not so much"), not a
 // causal conjunction, so that substitution inverted meaning: "so effective"
 // became "-> effective" (a causal claim, not an intensifier). The installed
@@ -78,6 +80,19 @@ fn protected_span_count_is_accurate() {
 // unambiguous cause-then-effect conjunction stripping, never for bare `so`.
 // Per D7 (byte-identical to the skill), the regex was fixed by dropping the
 // `so` alternative rather than diverging further from the skill.
+//
+// ── D90: `because`/`therefore` no longer produce an arrow either ──
+//
+// The above fix stopped short of the full skill rule: SKILL.md's Ultra row
+// says the conjunction itself is stripped ("Strip conjunctions when
+// cause-then-effect stay unambiguous") and arrows are forbidden outright
+// ("NO arrows (X -> Y)"), with no carve-out for `because`/`therefore`. The
+// crate previously still converted those two into " -> ", which is exactly
+// the arrow the skill forbids — a D7 violation. `causal_regex` now strips
+// the matched conjunction and joins the two clauses with a comma instead
+// (mirrors the skill's own Ultra worked example, which joins clauses with
+// commas rather than an invented connective). See the causal_because_no_arrow
+// and causal_therefore_no_arrow corpus cases.
 
 #[test]
 fn ultra_does_not_corrupt_intensifier_so() {
@@ -104,14 +119,31 @@ fn ultra_does_not_corrupt_not_so_much() {
 }
 
 #[test]
-fn ultra_still_converts_causal_because_and_therefore() {
-    // Regression guard: dropping `so` from the alternation must not disturb
-    // the still-intentional (skill-documented) because/therefore handling.
+fn ultra_strips_causal_because_without_arrow() {
+    // D90: the conjunction is stripped and clauses are comma-joined — no
+    // arrow, matching the installed skill's Ultra row exactly.
     let output = compress(
         "The database response changed because the authentication request failed.",
         Intensity::Ultra,
     );
-    assert_eq!(output.text, "DB res changed -> auth req failed.");
+    assert_eq!(output.text, "DB res changed, auth req failed.");
+    assert!(
+        !output.text.contains("->"),
+        "because must not become an arrow (D90)"
+    );
+}
+
+#[test]
+fn ultra_strips_causal_therefore_without_arrow() {
+    let output = compress(
+        "The build failed therefore the deploy stopped.",
+        Intensity::Ultra,
+    );
+    assert_eq!(output.text, "build failed, deploy stopped.");
+    assert!(
+        !output.text.contains("->"),
+        "therefore must not become an arrow (D90)"
+    );
 }
 
 #[test]
@@ -189,33 +221,6 @@ fn next_chunk_end(input: &str, start: usize, chunk_size: usize) -> usize {
         end = end.saturating_add(1);
     }
     end
-}
-
-fn intensity_dirs() -> [(Intensity, &'static str); 3] {
-    [
-        (Intensity::Lite, "lite"),
-        (Intensity::Full, "full"),
-        (Intensity::Ultra, "ultra"),
-    ]
-}
-
-fn corpus_inputs(dir: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("corpus")
-        .join(dir);
-    let mut inputs = Vec::new();
-
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "in") {
-            inputs.push(path);
-        }
-    }
-
-    inputs.sort();
-    Ok(inputs)
 }
 
 #[derive(Debug)]
