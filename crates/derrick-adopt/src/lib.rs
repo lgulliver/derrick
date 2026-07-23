@@ -321,6 +321,17 @@ impl Adopter {
             return Err(error);
         }
 
+        // Second, tighter revalidation immediately before the promotion loop.
+        // A guarded file can change again during `stage_writes`, so re-check
+        // now to keep the check-to-promote window as small as possible: any
+        // rename below would clobber that external edit. On drift, tear down
+        // the half-built stage dir (same cleanup as a staging failure) and
+        // abort with `StaleDetection`. Nothing has been promoted yet.
+        if let Err(error) = self.revalidate_sources(plan) {
+            let _ = fs::remove_dir_all(&stage_dir);
+            return Err(error);
+        }
+
         let mut written = Vec::new();
         for write in &plan.writes {
             let staged_path = stage_dir.join(&write.path);
@@ -427,14 +438,23 @@ impl Adopter {
             return;
         };
         for entry in entries.flatten() {
-            let path = entry.path();
-            let is_stage_dir = path.is_dir()
-                && path
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .is_some_and(|name| name.starts_with(".adopt-stage-"));
-            if is_stage_dir {
-                let _ = fs::remove_dir_all(&path);
+            // Use the entry's own metadata (does not traverse symlinks) so a
+            // symlink is never treated as, traversed into, or removed as a real
+            // stage dir. A symlink's own metadata reports `is_dir() == false`,
+            // so `.adopt-stage-*` symlinks are left untouched.
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_dir() {
+                continue;
+            }
+            // Match the prefix without requiring valid UTF-8 so a non-UTF8-named
+            // leftover is still pruned (`OsStr::to_str` would skip it). The
+            // prefix is pure ASCII, so a lossy conversion is byte-accurate over
+            // the matched region.
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(".adopt-stage-") {
+                let _ = fs::remove_dir_all(entry.path());
             }
         }
     }
@@ -2809,6 +2829,163 @@ mod tests {
         assert!(
             !stale.exists(),
             "stale .adopt-stage-* dir should be pruned at apply start"
+        );
+        assert!(dir.path().join("derrick.yaml").is_file());
+    }
+
+    // COMMENT 1 (residual TOCTOU): drift that lands during the staging window —
+    // after the pre-staging revalidation has passed, before promotion — must be
+    // caught by the second, promotion-time revalidation, and the half-built
+    // stage dir must be torn down with nothing promoted.
+    //
+    // Injecting a mutation at the exact mid-`apply` instant (post-`stage_writes`,
+    // pre-rename) from a single test thread is impractical without a test hook
+    // inside `apply`, so this drives the same private machinery `apply` uses in
+    // that window: stage into a stage dir (first revalidation already passed),
+    // drift a guarded file, then assert the promotion-time revalidation aborts
+    // and the abort path leaves nothing promoted. The pre-staging revalidation
+    // is covered by `apply_aborts_when_snapshotted_file_changed_after_detect`.
+    #[tokio::test]
+    async fn apply_revalidates_again_before_promotion_and_cleans_up() {
+        let dir = git_repo();
+        let mcp = dir.path().join(".mcp.json");
+        write(&mcp, r#"{"mcpServers":{"other":{"command":"foo"}}}"#);
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+        assert!(
+            plan.source_guards
+                .iter()
+                .any(|guard| guard.path == Path::new(".mcp.json") && guard.expected.is_some()),
+            "expected a content guard we can drift"
+        );
+
+        // Pre-staging revalidation would pass here (no drift yet). Reproduce the
+        // post-staging state `apply` reaches just before the promotion loop.
+        let state_dir = dir.path().join(".derrick");
+        fs::create_dir_all(&state_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        let stage_dir = state_dir.join(".adopt-stage-promotion-window");
+        fs::create_dir_all(&stage_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        adopter
+            .stage_writes(&plan, &stage_dir)
+            .unwrap_or_else(|error| panic!("stage_writes failed: {error}"));
+        assert!(
+            stage_dir.join("derrick.yaml").is_file(),
+            "staging should have populated the stage dir"
+        );
+
+        // Drift lands during the staging window.
+        let external = r#"{"mcpServers":{"other":{"command":"DRIFTED-DURING-STAGING"}}}"#;
+        write(&mcp, external);
+
+        // The promotion-time revalidation (the new second check) must abort.
+        let error = adopter
+            .revalidate_sources(&plan)
+            .err()
+            .unwrap_or_else(|| panic!("expected stale-detection abort at promotion time"));
+        assert!(
+            matches!(&error, AdoptError::StaleDetection(paths) if paths.contains(&PathBuf::from(".mcp.json"))),
+            "expected StaleDetection for .mcp.json, got: {error}"
+        );
+
+        // `apply`'s abort branch removes the half-built stage dir and promotes
+        // nothing; mirror and assert that cleanup.
+        let _ = fs::remove_dir_all(&stage_dir);
+        assert!(
+            !stage_dir.exists(),
+            "half-built stage dir must be cleaned up on promotion-time abort"
+        );
+        assert!(
+            !dir.path().join("derrick.yaml").exists(),
+            "nothing should be promoted when the promotion-time check aborts"
+        );
+        let after = fs::read_to_string(&mcp).unwrap_or_else(|error| panic!("read failed: {error}"));
+        assert_eq!(after, external, "external edit must survive the abort");
+    }
+
+    // COMMENT 2: a stale stage dir with a non-UTF8 name must still be pruned.
+    // `OsStr::to_str()` would return `None` and skip it; matching on the lossy
+    // (byte-accurate over the ASCII prefix) name prunes it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_prunes_non_utf8_stale_stage_dir() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = git_repo();
+        let state_dir = dir.path().join(".derrick");
+        fs::create_dir_all(&state_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        // `.adopt-stage-` (ASCII) followed by invalid UTF-8 continuation bytes.
+        let mut raw = b".adopt-stage-".to_vec();
+        raw.extend_from_slice(&[0x66, 0x80, 0x81]);
+        let stale = state_dir.join(OsStr::from_bytes(&raw));
+        // Some filesystems (APFS/macOS) enforce UTF-8 filenames and reject the
+        // create outright. The scenario cannot exist there, so skip rather than
+        // fail; on Linux (ext4/tmpfs, where CI runs) it exercises the real path.
+        if fs::create_dir_all(&stale).is_err() {
+            eprintln!("skipping: filesystem rejects non-UTF8 names");
+            return;
+        }
+        fs::write(stale.join("leftover.txt"), "old")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+        adopter
+            .apply(&plan)
+            .await
+            .unwrap_or_else(|error| panic!("apply failed: {error}"));
+
+        assert!(
+            !stale.exists(),
+            "non-UTF8-named stale .adopt-stage-* dir should be pruned"
+        );
+        assert!(dir.path().join("derrick.yaml").is_file());
+    }
+
+    // COMMENT 2: a symlink named like a stage dir must not be followed. Its own
+    // metadata reports `is_dir() == false`, so it is neither treated as a real
+    // stage dir nor removed, and its target's contents survive untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_does_not_follow_symlinked_stage_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = git_repo();
+        let state_dir = dir.path().join(".derrick");
+        fs::create_dir_all(&state_dir).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        // A real directory the symlink points at; its contents must survive.
+        let target = dir.path().join("precious");
+        fs::create_dir_all(&target).unwrap_or_else(|error| panic!("mkdir failed: {error}"));
+        fs::write(target.join("keep.txt"), "important")
+            .unwrap_or_else(|error| panic!("write failed: {error}"));
+        let link = state_dir.join(".adopt-stage-symlink");
+        symlink(&target, &link).unwrap_or_else(|error| panic!("symlink failed: {error}"));
+
+        let adopter = Adopter::new(dir.path());
+        let report = adopter
+            .detect()
+            .unwrap_or_else(|error| panic!("detect failed: {error}"));
+        let plan = adopter
+            .propose(&report, &opts(), None)
+            .unwrap_or_else(|error| panic!("propose failed: {error}"));
+        adopter
+            .apply(&plan)
+            .await
+            .unwrap_or_else(|error| panic!("apply failed: {error}"));
+
+        assert!(
+            target.join("keep.txt").exists(),
+            "symlink target must not be traversed or removed"
         );
         assert!(dir.path().join("derrick.yaml").is_file());
     }
