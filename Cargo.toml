@@ -45,9 +45,9 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
 # Storage
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # HTTP
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls-tls"], default-features = false }
 # HTTP server host for the survey hub's rmcp streamable-HTTP transport (D80).
 axum = "0.8"
 # Errors and logging
@@ -73,12 +73,12 @@ blake3 = "1"
 walkdir = "2"
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 schemars = "1"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 streaming-iterator = "0.1"
-tree-sitter-rust = "0.23"
-tree-sitter-python = "0.23"
-tree-sitter-go = "0.23"
-tree-sitter-javascript = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-java = "0.23"
