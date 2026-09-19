@@ -71,7 +71,7 @@ inquire = "0.9"
 rayon = "1"
 blake3 = "1"
 walkdir = "2"
-rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "2.0", features = ["server", "transport-io", "macros"] }
 schemars = "1"
 tree-sitter = "0.26"
 streaming-iterator = "0.1"
